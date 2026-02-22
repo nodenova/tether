@@ -1,0 +1,1095 @@
+"""Tests for the Claude Code agent wrapper (unit tests with mocks)."""
+
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
+
+from tether.agents.base import AgentResponse, ToolActivity
+from tether.agents.claude_code import (
+    ClaudeCodeAgent,
+    _describe_tool,
+    _is_retryable_error,
+    _truncate,
+)
+from tether.core.config import TetherConfig
+from tether.core.session import Session
+from tether.exceptions import AgentError
+
+# --- SDK mock helpers for _run_with_resume ---
+
+
+class AsyncIterHelper:
+    """Async iterable that yields a fixed sequence of messages."""
+
+    def __init__(self, messages):
+        self._messages = list(messages)
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        if not self._messages:
+            raise StopAsyncIteration
+        return self._messages.pop(0)
+
+
+def _make_text_block(text="hello"):
+    from claude_agent_sdk import TextBlock
+
+    block = MagicMock(spec=TextBlock)
+    block.text = text
+    return block
+
+
+def _make_tool_use_block(name="Bash"):
+    from claude_agent_sdk import ToolUseBlock
+
+    block = MagicMock(spec=ToolUseBlock)
+    block.name = name
+    return block
+
+
+def _make_tool_use_block_with_input(name="Bash", tool_input=None):
+    from claude_agent_sdk import ToolUseBlock
+
+    block = MagicMock(spec=ToolUseBlock)
+    block.name = name
+    block.input = tool_input or {}
+    return block
+
+
+def _make_tool_result_block(tool_use_id="tool-1"):
+    from claude_agent_sdk import ToolResultBlock
+
+    block = MagicMock(spec=ToolResultBlock)
+    block.tool_use_id = tool_use_id
+    block.content = "ok"
+    block.is_error = False
+    return block
+
+
+def _make_assistant_message(blocks):
+    from claude_agent_sdk import AssistantMessage
+
+    msg = MagicMock(spec=AssistantMessage)
+    msg.content = blocks
+    return msg
+
+
+def _make_result_message(
+    result="done",
+    session_id="sdk-session",
+    cost=0.05,
+    num_turns=3,
+    is_error=False,
+):
+    from claude_agent_sdk import ResultMessage
+
+    msg = MagicMock(spec=ResultMessage)
+    msg.result = result
+    msg.session_id = session_id
+    msg.total_cost_usd = cost
+    msg.num_turns = num_turns
+    msg.is_error = is_error
+    return msg
+
+
+def _patch_sdk_client(messages):
+    """Return a patch context that makes ClaudeSDKClient yield messages."""
+    mock_client = MagicMock()
+    mock_client.query = AsyncMock(return_value=None)
+    mock_client.receive_response = MagicMock(return_value=AsyncIterHelper(messages))
+
+    mock_ctx = MagicMock()
+    mock_ctx.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_ctx.__aexit__ = AsyncMock(return_value=False)
+
+    return patch(
+        "tether.agents.claude_code._SafeSDKClient",
+        return_value=mock_ctx,
+    ), mock_client
+
+
+@pytest.fixture
+def agent(config):
+    return ClaudeCodeAgent(config)
+
+
+@pytest.fixture
+def session(tmp_path):
+    return Session(
+        session_id="test-session",
+        user_id="user1",
+        chat_id="chat1",
+        working_directory=str(tmp_path),
+    )
+
+
+class TestClaudeCodeAgent:
+    def test_build_options_basic(self, agent, session):
+        opts = agent._build_options(session, can_use_tool=None)
+        assert opts.cwd == session.working_directory
+        assert opts.max_turns == 5  # from config fixture
+        assert opts.permission_mode is None
+        assert opts.setting_sources == ["project"]
+        assert opts.resume is None
+
+    def test_build_options_with_resume(self, agent, session):
+        session.claude_session_id = "existing-session-id"
+        opts = agent._build_options(session, can_use_tool=None)
+        assert opts.resume == "existing-session-id"
+
+    def test_build_options_with_system_prompt(self, tmp_path):
+        config = TetherConfig(
+            approved_directories=[tmp_path],
+            system_prompt="Be a pirate.",
+        )
+        agent = ClaudeCodeAgent(config)
+        session = Session(
+            session_id="s1",
+            user_id="u1",
+            chat_id="c1",
+            working_directory=str(tmp_path),
+            mode="auto",
+        )
+        opts = agent._build_options(session, can_use_tool=None)
+        assert opts.system_prompt == "Be a pirate."
+
+    def test_build_options_with_allowed_tools(self, tmp_path):
+        config = TetherConfig(
+            approved_directories=[tmp_path],
+            allowed_tools=["Read", "Glob"],
+        )
+        agent = ClaudeCodeAgent(config)
+        session = Session(
+            session_id="s1",
+            user_id="u1",
+            chat_id="c1",
+            working_directory=str(tmp_path),
+        )
+        opts = agent._build_options(session, can_use_tool=None)
+        assert opts.allowed_tools == ["Read", "Glob"]
+
+    def test_build_options_with_can_use_tool(self, agent, session):
+        async def my_hook(name, inp, ctx):
+            pass
+
+        opts = agent._build_options(session, can_use_tool=my_hook)
+        assert opts.can_use_tool is my_hook
+
+    @pytest.mark.asyncio
+    async def test_cancel_no_active_client(self, agent):
+        await agent.cancel("nonexistent")
+
+    @pytest.mark.asyncio
+    async def test_shutdown_no_clients(self, agent):
+        await agent.shutdown()
+
+    @pytest.mark.asyncio
+    async def test_execute_calls_run_with_resume(self, agent, session):
+        expected = AgentResponse(content="test response", session_id="s1")
+        with patch.object(
+            agent, "_run_with_resume", new_callable=AsyncMock
+        ) as mock_run:
+            mock_run.return_value = expected
+            result = await agent.execute("hello", session)
+            mock_run.assert_called_once()
+            args = mock_run.call_args
+            assert args[0][0] == "hello"  # prompt
+            assert args[0][1] is session  # session
+            assert result.content == "test response"
+            assert result.session_id == "s1"
+
+    @pytest.mark.asyncio
+    async def test_execute_wraps_exception_as_agent_error(self, agent, session):
+        with patch.object(
+            agent, "_run_with_resume", new_callable=AsyncMock
+        ) as mock_run:
+            mock_run.side_effect = RuntimeError("SDK failure")
+            with pytest.raises(AgentError, match="SDK failure"):
+                await agent.execute("hello", session)
+
+    @pytest.mark.asyncio
+    async def test_execute_returns_error_on_none_response(self, agent, session):
+        with patch.object(
+            agent, "_run_with_resume", new_callable=AsyncMock
+        ) as mock_run:
+            mock_run.return_value = None
+            result = await agent.execute("hello", session)
+            assert result.is_error is True
+            assert "No response" in result.content
+
+    @pytest.mark.asyncio
+    async def test_cancel_with_active_client(self, agent):
+        mock_client = AsyncMock()
+        agent._active_clients["s1"] = mock_client
+        await agent.cancel("s1")
+        mock_client.interrupt.assert_called_once()
+        agent._active_clients.clear()
+
+    @pytest.mark.asyncio
+    async def test_shutdown_disconnects_clients(self, agent):
+        mock_client1 = AsyncMock()
+        mock_client2 = AsyncMock()
+        agent._active_clients["s1"] = mock_client1
+        agent._active_clients["s2"] = mock_client2
+        await agent.shutdown()
+        mock_client1.disconnect.assert_called_once()
+        mock_client2.disconnect.assert_called_once()
+        assert len(agent._active_clients) == 0
+
+    def test_build_options_with_disallowed_tools(self, tmp_path):
+        config = TetherConfig(
+            approved_directories=[tmp_path],
+            disallowed_tools=["Bash"],
+        )
+        agent = ClaudeCodeAgent(config)
+        session = Session(
+            session_id="s1",
+            user_id="u1",
+            chat_id="c1",
+            working_directory=str(tmp_path),
+        )
+        opts = agent._build_options(session, can_use_tool=None)
+        assert opts.disallowed_tools == ["Bash"]
+
+    def test_no_resume_without_claude_session_id(self, agent, session):
+        session.claude_session_id = None
+        opts = agent._build_options(session, can_use_tool=None)
+        assert opts.resume is None
+
+    def test_no_system_prompt_when_unconfigured(self, agent, session):
+        session.mode = "auto"
+        opts = agent._build_options(session, can_use_tool=None)
+        assert not hasattr(opts, "system_prompt") or opts.system_prompt is None
+
+    def test_plan_mode_prepends_instruction(self, agent, session):
+        session.mode = "plan"
+        opts = agent._build_options(session, can_use_tool=None)
+        assert opts.system_prompt == agent._PLAN_MODE_INSTRUCTION
+
+    def test_plan_mode_with_existing_system_prompt(self, tmp_path):
+        config = TetherConfig(
+            approved_directories=[tmp_path],
+            system_prompt="Be a pirate.",
+        )
+        agent = ClaudeCodeAgent(config)
+        session = Session(
+            session_id="s1",
+            user_id="u1",
+            chat_id="c1",
+            working_directory=str(tmp_path),
+            mode="plan",
+        )
+        opts = agent._build_options(session, can_use_tool=None)
+        assert agent._PLAN_MODE_INSTRUCTION in opts.system_prompt
+        assert "Be a pirate." in opts.system_prompt
+        assert opts.system_prompt.startswith(agent._PLAN_MODE_INSTRUCTION)
+
+    def test_auto_mode_no_plan_instruction(self, agent, session):
+        session.mode = "auto"
+        opts = agent._build_options(session, can_use_tool=None)
+        sp = getattr(opts, "system_prompt", None)
+        if sp:
+            assert agent._PLAN_MODE_INSTRUCTION not in sp
+
+    @pytest.mark.asyncio
+    async def test_shutdown_suppresses_disconnect_errors(self, agent):
+        mock_client = AsyncMock()
+        mock_client.disconnect.side_effect = RuntimeError("disconnect failed")
+        agent._active_clients["s1"] = mock_client
+        # Should not raise
+        await agent.shutdown()
+        assert len(agent._active_clients) == 0
+
+    @pytest.mark.asyncio
+    async def test_shutdown_clears_active_clients(self, agent):
+        mock_client = AsyncMock()
+        agent._active_clients["s1"] = mock_client
+        agent._active_clients["s2"] = AsyncMock()
+        await agent.shutdown()
+        assert len(agent._active_clients) == 0
+
+
+class TestRunWithResume:
+    """Tests for the _run_with_resume method (lines 85-126)."""
+
+    @pytest.mark.asyncio
+    async def test_text_response(self, agent, session):
+        text_block = _make_text_block("Hello world")
+        assistant = _make_assistant_message([text_block])
+        result_msg = _make_result_message(result="Final answer")
+
+        patcher, _ = _patch_sdk_client([assistant, result_msg])
+        with patcher:
+            resp = await agent._run_with_resume(
+                "prompt", session, agent._build_options(session, None)
+            )
+
+        assert resp.content == "Final answer"
+        assert resp.session_id == "sdk-session"
+        assert resp.cost == pytest.approx(0.05)
+        assert resp.num_turns == 3
+        assert resp.is_error is False
+
+    @pytest.mark.asyncio
+    async def test_tool_use_tracking(self, agent, session):
+        tool1 = _make_tool_use_block("Read")
+        tool2 = _make_tool_use_block("Write")
+        assistant = _make_assistant_message([tool1, tool2])
+        result_msg = _make_result_message()
+
+        patcher, _ = _patch_sdk_client([assistant, result_msg])
+        with patcher:
+            resp = await agent._run_with_resume(
+                "prompt", session, agent._build_options(session, None)
+            )
+
+        assert resp.tools_used == ["Read", "Write"]
+
+    @pytest.mark.asyncio
+    async def test_text_fallback_no_result(self, agent, session):
+        text1 = _make_text_block("Part 1")
+        text2 = _make_text_block("Part 2")
+        assistant = _make_assistant_message([text1, text2])
+        result_msg = _make_result_message(result=None)
+
+        patcher, _ = _patch_sdk_client([assistant, result_msg])
+        with patcher:
+            resp = await agent._run_with_resume(
+                "prompt", session, agent._build_options(session, None)
+            )
+
+        assert resp.content == "Part 1\nPart 2"
+
+    @pytest.mark.asyncio
+    async def test_mixed_blocks(self, agent, session):
+        text_block = _make_text_block("I'll help you")
+        tool_block = _make_tool_use_block("Bash")
+        assistant = _make_assistant_message([text_block, tool_block])
+        result_msg = _make_result_message(result="All done")
+
+        patcher, _ = _patch_sdk_client([assistant, result_msg])
+        with patcher:
+            resp = await agent._run_with_resume(
+                "prompt", session, agent._build_options(session, None)
+            )
+
+        assert resp.content == "All done"
+        assert resp.tools_used == ["Bash"]
+
+    @pytest.mark.asyncio
+    async def test_zero_turns_retry(self, agent, session):
+        session.claude_session_id = "stale-session"
+        opts = agent._build_options(session, None)
+        assert opts.resume == "stale-session"
+
+        # First attempt: ResultMessage with num_turns=0 triggers retry
+        result_zero = _make_result_message(num_turns=0)
+        # Second attempt: normal result
+        result_ok = _make_result_message(result="Retried OK", num_turns=1)
+
+        call_count = 0
+
+        class FakeCtx:
+            async def __aenter__(self):
+                nonlocal call_count
+                call_count += 1
+                client = MagicMock()
+                client.query = AsyncMock(return_value=None)
+                if call_count == 1:
+                    client.receive_response = MagicMock(
+                        return_value=AsyncIterHelper([result_zero])
+                    )
+                else:
+                    client.receive_response = MagicMock(
+                        return_value=AsyncIterHelper([result_ok])
+                    )
+                return client
+
+            async def __aexit__(self, *args):
+                return False
+
+        with patch("tether.agents.claude_code._SafeSDKClient", return_value=FakeCtx()):
+            resp = await agent._run_with_resume("prompt", session, opts)
+
+        assert resp.content == "Retried OK"
+        assert call_count == 2
+        assert session.claude_session_id is None
+
+    @pytest.mark.asyncio
+    async def test_exhausted_attempts(self, agent, session):
+        # Both attempts yield no messages at all → "No response received."
+        class FakeCtx:
+            async def __aenter__(self):
+                client = MagicMock()
+                client.query = AsyncMock(return_value=None)
+                client.receive_response = MagicMock(return_value=AsyncIterHelper([]))
+                return client
+
+            async def __aexit__(self, *args):
+                return False
+
+        with patch("tether.agents.claude_code._SafeSDKClient", return_value=FakeCtx()):
+            resp = await agent._run_with_resume(
+                "prompt", session, agent._build_options(session, None)
+            )
+
+        assert resp.content == "No response received."
+        assert resp.is_error is True
+
+    @pytest.mark.asyncio
+    async def test_active_client_tracked(self, agent, session):
+        tracked_during = []
+
+        class TrackingCtx:
+            async def __aenter__(self):
+                client = MagicMock()
+
+                async def tracking_query(prompt):
+                    tracked_during.append(session.session_id in agent._active_clients)
+
+                client.query = tracking_query
+                client.receive_response = MagicMock(
+                    return_value=AsyncIterHelper([_make_result_message()])
+                )
+                return client
+
+            async def __aexit__(self, *args):
+                return False
+
+        with patch(
+            "tether.agents.claude_code._SafeSDKClient", return_value=TrackingCtx()
+        ):
+            await agent._run_with_resume(
+                "prompt", session, agent._build_options(session, None)
+            )
+
+        assert tracked_during == [True]
+        assert session.session_id not in agent._active_clients
+
+    @pytest.mark.asyncio
+    async def test_cleanup_on_exception(self, agent, session):
+        mock_client = MagicMock()
+        mock_client.query = AsyncMock(side_effect=RuntimeError("SDK crash"))
+
+        mock_ctx = MagicMock()
+        mock_ctx.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_ctx.__aexit__ = AsyncMock(return_value=False)
+
+        with (
+            patch("tether.agents.claude_code._SafeSDKClient", return_value=mock_ctx),
+            pytest.raises(RuntimeError, match="SDK crash"),
+        ):
+            await agent._run_with_resume(
+                "prompt", session, agent._build_options(session, None)
+            )
+
+        assert session.session_id not in agent._active_clients
+
+    @pytest.mark.asyncio
+    async def test_duration_calculated(self, agent, session):
+        result_msg = _make_result_message()
+
+        patcher, _ = _patch_sdk_client([result_msg])
+        with patcher:
+            resp = await agent._run_with_resume(
+                "prompt", session, agent._build_options(session, None)
+            )
+
+        assert resp.duration_ms >= 0
+
+    @pytest.mark.asyncio
+    async def test_is_error_propagated(self, agent, session):
+        result_msg = _make_result_message(is_error=True, result="Something failed")
+
+        patcher, _ = _patch_sdk_client([result_msg])
+        with patcher:
+            resp = await agent._run_with_resume(
+                "prompt", session, agent._build_options(session, None)
+            )
+
+        assert resp.is_error is True
+        assert resp.content == "Something failed"
+
+    @pytest.mark.asyncio
+    async def test_no_messages(self, agent, session):
+        patcher, _ = _patch_sdk_client([])
+        with patcher:
+            resp = await agent._run_with_resume(
+                "prompt", session, agent._build_options(session, None)
+            )
+
+        assert resp.content == "No response received."
+        assert resp.is_error is True
+
+    @pytest.mark.asyncio
+    async def test_query_and_receive_response_called(self, agent, session):
+        result_msg = _make_result_message()
+        patcher, mock_client = _patch_sdk_client([result_msg])
+        with patcher:
+            await agent._run_with_resume(
+                "hello world", session, agent._build_options(session, None)
+            )
+        mock_client.query.assert_awaited_once_with("hello world")
+        mock_client.receive_response.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_execute_e2e_through_run_with_resume(self, agent, session):
+        text_block = _make_text_block("Done!")
+        assistant = _make_assistant_message([text_block])
+        result_msg = _make_result_message(result="Complete", session_id="new-sid")
+
+        patcher, _ = _patch_sdk_client([assistant, result_msg])
+        with patcher:
+            resp = await agent.execute("do something", session)
+
+        assert resp.content == "Complete"
+        assert resp.session_id == "new-sid"
+
+
+class TestOnTextChunkCallback:
+    """Tests for on_text_chunk callback in _run_with_resume."""
+
+    @pytest.mark.asyncio
+    async def test_callback_called_per_text_block(self, agent, session):
+        text1 = _make_text_block("Hello")
+        text2 = _make_text_block(" World")
+        assistant = _make_assistant_message([text1, text2])
+        result_msg = _make_result_message(result="Hello World")
+
+        chunks = []
+
+        async def on_chunk(text):
+            chunks.append(text)
+
+        patcher, _ = _patch_sdk_client([assistant, result_msg])
+        with patcher:
+            await agent._run_with_resume(
+                "prompt",
+                session,
+                agent._build_options(session, None),
+                on_text_chunk=on_chunk,
+            )
+
+        assert chunks == ["Hello", " World"]
+
+    @pytest.mark.asyncio
+    async def test_callback_error_does_not_crash_agent(self, agent, session):
+        text_block = _make_text_block("Hello")
+        assistant = _make_assistant_message([text_block])
+        result_msg = _make_result_message(result="Hello")
+
+        async def failing_callback(text):
+            raise RuntimeError("callback error")
+
+        patcher, _ = _patch_sdk_client([assistant, result_msg])
+        with patcher:
+            resp = await agent._run_with_resume(
+                "prompt",
+                session,
+                agent._build_options(session, None),
+                on_text_chunk=failing_callback,
+            )
+
+        assert resp.content == "Hello"
+        assert resp.is_error is False
+
+    @pytest.mark.asyncio
+    async def test_callback_not_called_for_tool_blocks(self, agent, session):
+        tool_block = _make_tool_use_block("Bash")
+        assistant = _make_assistant_message([tool_block])
+        result_msg = _make_result_message()
+
+        chunks = []
+
+        async def on_chunk(text):
+            chunks.append(text)
+
+        patcher, _ = _patch_sdk_client([assistant, result_msg])
+        with patcher:
+            await agent._run_with_resume(
+                "prompt",
+                session,
+                agent._build_options(session, None),
+                on_text_chunk=on_chunk,
+            )
+
+        assert chunks == []
+
+    @pytest.mark.asyncio
+    async def test_callback_passed_through_execute(self, agent, session):
+        chunks = []
+
+        async def on_chunk(text):
+            chunks.append(text)
+
+        text_block = _make_text_block("Hi")
+        assistant = _make_assistant_message([text_block])
+        result_msg = _make_result_message(result="Hi")
+
+        patcher, _ = _patch_sdk_client([assistant, result_msg])
+        with patcher:
+            await agent.execute("prompt", session, on_text_chunk=on_chunk)
+
+        assert chunks == ["Hi"]
+
+    @pytest.mark.asyncio
+    async def test_no_callback_works_fine(self, agent, session):
+        text_block = _make_text_block("Hello")
+        assistant = _make_assistant_message([text_block])
+        result_msg = _make_result_message(result="Hello")
+
+        patcher, _ = _patch_sdk_client([assistant, result_msg])
+        with patcher:
+            resp = await agent._run_with_resume(
+                "prompt",
+                session,
+                agent._build_options(session, None),
+            )
+
+        assert resp.content == "Hello"
+
+
+class TestSafeSDKClient:
+    """Tests for _SafeSDKClient that skips unknown message types."""
+
+    @pytest.mark.asyncio
+    async def test_skips_unknown_message_types(self):
+        from tether.agents.claude_code import _SafeSDKClient
+
+        raw_messages = [
+            {"type": "rate_limit_event", "data": {}},
+            {
+                "type": "assistant",
+                "message": {
+                    "content": [{"type": "text", "text": "hello"}],
+                    "model": "claude-opus-4-6",
+                },
+            },
+        ]
+
+        client = _SafeSDKClient.__new__(_SafeSDKClient)
+        client._query = MagicMock()
+        client._query.receive_messages = MagicMock(
+            return_value=AsyncIterHelper(raw_messages)
+        )
+
+        messages = [msg async for msg in client.receive_messages()]
+        assert len(messages) == 1
+
+        from claude_agent_sdk import AssistantMessage
+
+        assert isinstance(messages[0], AssistantMessage)
+
+    @pytest.mark.asyncio
+    async def test_valid_messages_pass_through(self):
+        from tether.agents.claude_code import _SafeSDKClient
+
+        raw_messages = [
+            {
+                "type": "result",
+                "subtype": "success",
+                "duration_ms": 100,
+                "duration_api_ms": 80,
+                "is_error": False,
+                "num_turns": 2,
+                "session_id": "sess-123",
+                "total_cost_usd": 0.01,
+                "result": "All done",
+            },
+        ]
+
+        client = _SafeSDKClient.__new__(_SafeSDKClient)
+        client._query = MagicMock()
+        client._query.receive_messages = MagicMock(
+            return_value=AsyncIterHelper(raw_messages)
+        )
+
+        messages = [msg async for msg in client.receive_messages()]
+        assert len(messages) == 1
+
+        from claude_agent_sdk import ResultMessage
+
+        assert isinstance(messages[0], ResultMessage)
+        assert messages[0].session_id == "sess-123"
+        assert messages[0].result == "All done"
+
+    @pytest.mark.asyncio
+    async def test_logs_skipped_messages(self):
+        from tether.agents.claude_code import _SafeSDKClient
+
+        raw_messages = [{"type": "rate_limit_event", "data": {}}]
+
+        client = _SafeSDKClient.__new__(_SafeSDKClient)
+        client._query = MagicMock()
+        client._query.receive_messages = MagicMock(
+            return_value=AsyncIterHelper(raw_messages)
+        )
+
+        with patch("tether.agents.claude_code.logger") as mock_logger:
+            _ = [msg async for msg in client.receive_messages()]
+            mock_logger.debug.assert_called_once_with(
+                "skipping_unknown_sdk_message",
+                message_type="rate_limit_event",
+            )
+
+    @pytest.mark.asyncio
+    async def test_multiple_unknown_types_all_skipped(self):
+        from tether.agents.claude_code import _SafeSDKClient
+
+        raw_messages = [
+            {"type": "rate_limit_event", "data": {}},
+            {"type": "heartbeat", "ts": 123},
+            {"type": "unknown_future_type"},
+        ]
+
+        client = _SafeSDKClient.__new__(_SafeSDKClient)
+        client._query = MagicMock()
+        client._query.receive_messages = MagicMock(
+            return_value=AsyncIterHelper(raw_messages)
+        )
+
+        messages = [msg async for msg in client.receive_messages()]
+        assert len(messages) == 0
+
+
+class TestDescribeTool:
+    def test_bash_shows_command(self):
+        assert _describe_tool("Bash", {"command": "git status"}) == "git status"
+
+    def test_bash_truncates_long_command(self):
+        long_cmd = "a" * 100
+        result = _describe_tool("Bash", {"command": long_cmd})
+        assert len(result) <= 60
+        assert result.endswith("\u2026")
+
+    def test_read_shows_file_path(self):
+        assert _describe_tool("Read", {"file_path": "/src/main.py"}) == "/src/main.py"
+
+    def test_write_shows_file_path(self):
+        assert _describe_tool("Write", {"file_path": "/src/out.py"}) == "/src/out.py"
+
+    def test_edit_shows_file_path(self):
+        assert _describe_tool("Edit", {"file_path": "/a/b.py"}) == "/a/b.py"
+
+    def test_glob_shows_pattern(self):
+        assert _describe_tool("Glob", {"pattern": "**/*.py"}) == "**/*.py"
+
+    def test_glob_with_path(self):
+        result = _describe_tool("Glob", {"pattern": "*.py", "path": "/src"})
+        assert result == "*.py in /src"
+
+    def test_grep_shows_pattern(self):
+        assert _describe_tool("Grep", {"pattern": "TODO"}) == "/TODO/"
+
+    def test_web_fetch_shows_url(self):
+        assert (
+            _describe_tool("WebFetch", {"url": "https://example.com"})
+            == "https://example.com"
+        )
+
+    def test_web_search_shows_query(self):
+        assert _describe_tool("WebSearch", {"query": "python async"}) == "python async"
+
+    def test_todo_write_shows_subject(self):
+        result = _describe_tool("TodoWrite", {"subject": "Fix streaming display bug"})
+        assert result == "Fix streaming display bug"
+
+    def test_task_create_shows_subject(self):
+        result = _describe_tool("TaskCreate", {"subject": "Add unit tests"})
+        assert result == "Add unit tests"
+
+    def test_task_update_shows_id_and_status(self):
+        result = _describe_tool("TaskUpdate", {"taskId": "3", "status": "completed"})
+        assert result == "#3 → completed"
+
+    def test_task_update_shows_id_only(self):
+        result = _describe_tool("TaskUpdate", {"taskId": "5"})
+        assert result == "#5"
+
+    def test_task_get_shows_id(self):
+        result = _describe_tool("TaskGet", {"taskId": "7"})
+        assert result == "#7"
+
+    def test_task_list_shows_all_tasks(self):
+        result = _describe_tool("TaskList", {})
+        assert result == "all tasks"
+
+    def test_unknown_tool_shows_first_string(self):
+        assert _describe_tool("CustomTool", {"arg": "value"}) == "value"
+
+    def test_empty_input(self):
+        assert _describe_tool("Bash", {}) == ""
+
+    def test_unknown_tool_no_strings(self):
+        assert _describe_tool("CustomTool", {"count": 42}) == ""
+
+    def test_newline_collapsing(self):
+        result = _describe_tool("Bash", {"command": "echo\nhello\nworld"})
+        assert "\n" not in result
+        assert result == "echo hello world"
+
+
+class TestTruncate:
+    def test_short_text_unchanged(self):
+        assert _truncate("hello") == "hello"
+
+    def test_long_text_truncated(self):
+        result = _truncate("a" * 100, 20)
+        assert len(result) == 20
+        assert result.endswith("\u2026")
+
+    def test_newlines_collapsed(self):
+        assert _truncate("a\nb\nc") == "a b c"
+
+    def test_exact_length_unchanged(self):
+        text = "a" * 60
+        assert _truncate(text, 60) == text
+
+
+class TestOnToolActivityCallback:
+    @pytest.mark.asyncio
+    async def test_callback_called_per_tool_use_block(self, agent, session):
+        tool_block = _make_tool_use_block_with_input(
+            "Read", {"file_path": "/src/main.py"}
+        )
+        assistant = _make_assistant_message([tool_block])
+        result_msg = _make_result_message()
+
+        activities = []
+
+        async def on_activity(activity):
+            activities.append(activity)
+
+        patcher, _ = _patch_sdk_client([assistant, result_msg])
+        with patcher:
+            await agent._run_with_resume(
+                "prompt",
+                session,
+                agent._build_options(session, None),
+                on_tool_activity=on_activity,
+            )
+
+        assert len(activities) == 1
+        assert isinstance(activities[0], ToolActivity)
+        assert activities[0].tool_name == "Read"
+        assert activities[0].description == "/src/main.py"
+
+    @pytest.mark.asyncio
+    async def test_none_sent_for_tool_result_block(self, agent, session):
+        tool_use = _make_tool_use_block_with_input("Bash", {"command": "ls"})
+        tool_result = _make_tool_result_block("tool-1")
+        assistant = _make_assistant_message([tool_use, tool_result])
+        result_msg = _make_result_message()
+
+        activities = []
+
+        async def on_activity(activity):
+            activities.append(activity)
+
+        patcher, _ = _patch_sdk_client([assistant, result_msg])
+        with patcher:
+            await agent._run_with_resume(
+                "prompt",
+                session,
+                agent._build_options(session, None),
+                on_tool_activity=on_activity,
+            )
+
+        assert len(activities) == 2
+        assert isinstance(activities[0], ToolActivity)
+        assert activities[1] is None
+
+    @pytest.mark.asyncio
+    async def test_callback_error_does_not_crash(self, agent, session):
+        tool_block = _make_tool_use_block_with_input("Bash", {"command": "ls"})
+        assistant = _make_assistant_message([tool_block])
+        result_msg = _make_result_message(result="done")
+
+        async def failing_callback(activity):
+            raise RuntimeError("callback error")
+
+        patcher, _ = _patch_sdk_client([assistant, result_msg])
+        with patcher:
+            resp = await agent._run_with_resume(
+                "prompt",
+                session,
+                agent._build_options(session, None),
+                on_tool_activity=failing_callback,
+            )
+
+        assert resp.content == "done"
+        assert resp.is_error is False
+
+    @pytest.mark.asyncio
+    async def test_not_called_for_text_blocks(self, agent, session):
+        text_block = _make_text_block("Hello")
+        assistant = _make_assistant_message([text_block])
+        result_msg = _make_result_message()
+
+        activities = []
+
+        async def on_activity(activity):
+            activities.append(activity)
+
+        patcher, _ = _patch_sdk_client([assistant, result_msg])
+        with patcher:
+            await agent._run_with_resume(
+                "prompt",
+                session,
+                agent._build_options(session, None),
+                on_tool_activity=on_activity,
+            )
+
+        assert activities == []
+
+    @pytest.mark.asyncio
+    async def test_flows_through_execute(self, agent, session):
+        tool_block = _make_tool_use_block_with_input("Glob", {"pattern": "*.py"})
+        assistant = _make_assistant_message([tool_block])
+        result_msg = _make_result_message()
+
+        activities = []
+
+        async def on_activity(activity):
+            activities.append(activity)
+
+        patcher, _ = _patch_sdk_client([assistant, result_msg])
+        with patcher:
+            await agent.execute("prompt", session, on_tool_activity=on_activity)
+
+        assert len(activities) == 1
+        assert activities[0].tool_name == "Glob"
+
+
+class TestIsRetryableError:
+    def test_matches_api_error(self):
+        assert _is_retryable_error('{"type":"error","error":{"type":"api_error"}}')
+
+    def test_matches_overloaded(self):
+        assert _is_retryable_error("API Error: 529 overloaded")
+
+    def test_matches_500(self):
+        assert _is_retryable_error('API Error: 500 {"type":"error"}')
+
+    def test_matches_rate_limit(self):
+        assert _is_retryable_error("rate_limit_error: too many requests")
+
+    def test_no_match_authentication(self):
+        assert not _is_retryable_error("authentication_error: invalid key")
+
+    def test_no_match_invalid_request(self):
+        assert not _is_retryable_error("invalid_request_error: bad prompt")
+
+    def test_case_insensitive(self):
+        assert _is_retryable_error("API_ERROR from upstream")
+
+
+class TestRetryableApiErrors:
+    @pytest.mark.asyncio
+    async def test_retryable_api_error_retries_and_succeeds(self, agent, session):
+        """First attempt returns retryable API error, second succeeds."""
+        error_result = _make_result_message(
+            result='API Error: 500 {"type":"error","error":{"type":"api_error"}}',
+            is_error=True,
+            num_turns=1,
+        )
+        success_result = _make_result_message(result="All done!", num_turns=2)
+
+        call_count = 0
+
+        class FakeCtx:
+            async def __aenter__(self):
+                nonlocal call_count
+                call_count += 1
+                client = MagicMock()
+                client.query = AsyncMock(return_value=None)
+                if call_count == 1:
+                    client.receive_response = MagicMock(
+                        return_value=AsyncIterHelper([error_result])
+                    )
+                else:
+                    client.receive_response = MagicMock(
+                        return_value=AsyncIterHelper([success_result])
+                    )
+                return client
+
+            async def __aexit__(self, *args):
+                return False
+
+        with (
+            patch("tether.agents.claude_code._SafeSDKClient", return_value=FakeCtx()),
+            patch("asyncio.sleep", new_callable=AsyncMock),
+        ):
+            resp = await agent.execute("hello", session)
+
+        assert resp.content == "All done!"
+        assert resp.is_error is False
+        assert call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_non_retryable_error_not_retried(self, agent, session):
+        """Non-retryable error is returned immediately without retry."""
+        error_result = _make_result_message(
+            result="authentication_error: invalid API key",
+            is_error=True,
+            num_turns=1,
+        )
+
+        call_count = 0
+
+        class FakeCtx:
+            async def __aenter__(self):
+                nonlocal call_count
+                call_count += 1
+                client = MagicMock()
+                client.query = AsyncMock(return_value=None)
+                client.receive_response = MagicMock(
+                    return_value=AsyncIterHelper([error_result])
+                )
+                return client
+
+            async def __aexit__(self, *args):
+                return False
+
+        with patch("tether.agents.claude_code._SafeSDKClient", return_value=FakeCtx()):
+            resp = await agent.execute("hello", session)
+
+        assert resp.content == "authentication_error: invalid API key"
+        assert resp.is_error is True
+        assert call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_retryable_error_exhausted_shows_friendly_message(
+        self, agent, session
+    ):
+        """All retry attempts fail with API error → user gets friendly message."""
+        error_result = _make_result_message(
+            result='API Error: 529 {"type":"error","error":{"type":"overloaded"}}',
+            is_error=True,
+            num_turns=1,
+        )
+
+        class FakeCtx:
+            async def __aenter__(self):
+                client = MagicMock()
+                client.query = AsyncMock(return_value=None)
+                client.receive_response = MagicMock(
+                    return_value=AsyncIterHelper([error_result])
+                )
+                return client
+
+            async def __aexit__(self, *args):
+                return False
+
+        with (
+            patch("tether.agents.claude_code._SafeSDKClient", return_value=FakeCtx()),
+            patch("asyncio.sleep", new_callable=AsyncMock),
+        ):
+            resp = await agent.execute("hello", session)
+
+        assert resp.content == (
+            "The AI service is temporarily unavailable. Please try again in a moment."
+        )
+        assert resp.is_error is True

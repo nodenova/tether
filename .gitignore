@@ -1,0 +1,30 @@
+# Virtual environments
+.venv/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+# Environment
+.env
+
+# Coverage
+htmlcov/
+.coverage
+.coverage.*
+
+# IDE
+.claude/
+
+# Specs
+specs/
+
+# OS
+.DS_Store
+
+# Logs & sqlite3
+logs/
+*.db

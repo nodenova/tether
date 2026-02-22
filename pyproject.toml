@@ -1,0 +1,100 @@
+[project]
+name = "tether"
+version = "0.1.0"
+description = "Remote AI-assisted development with safety constraints. Work from anywhere, keep AI tethered."
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "claude-agent-sdk>=0.1.39",
+    "pydantic>=2.12.5",
+    "pydantic-settings>=2.13.1",
+    "structlog>=25.5.0",
+    "pyyaml>=6.0.3",
+    "python-dotenv>=1.2.1",
+    "aiosqlite>=0.20.0",
+    "python-telegram-bot>=22.6",
+]
+
+[project.scripts]
+tether = "tether.main:run"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+asyncio_mode = "auto"
+strict_markers = true
+addopts = "--tb=short -q"
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    "integration: marks integration tests",
+]
+
+[tool.ruff]
+line-length = 88
+target-version = "py313"
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "F",    # pyflakes
+    "I",    # isort (import sorting)
+    "N",    # pep8-naming
+    "W",    # pycodestyle warnings
+    "UP",   # pyupgrade (modernise syntax)
+    "B",    # flake8-bugbear (common pitfalls)
+    "SIM",  # flake8-simplify
+    "RUF",  # ruff-specific rules
+    "S",    # flake8-bandit (security)
+    "C4",   # flake8-comprehensions
+    "PT",   # flake8-pytest-style
+    "RET",  # flake8-return
+    "ARG",  # flake8-unused-arguments
+]
+ignore = ["E501"]  # line too long, handled by formatter
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101", "S105", "S106", "S108", "ARG"]  # assert, test tokens, /tmp paths, unused args all fine in tests
+
+[tool.ruff.lint.isort]
+known-first-party = ["tether"]
+
+[tool.mypy]
+python_version = "3.13"
+strict = true
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+no_implicit_optional = true
+
+[[tool.mypy.overrides]]
+module = "tests.*"
+disallow_untyped_defs = false
+
+[tool.coverage.run]
+source = ["tether"]
+branch = true
+
+[tool.coverage.report]
+fail_under = 89
+show_missing = true
+exclude_lines = [
+    "pragma: no cover",
+    "if TYPE_CHECKING:",
+    "if __name__",
+    "@overload",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.2",
+    "pytest-asyncio>=1.3.0",
+    "pytest-cov>=7.0.0",
+    "ruff>=0.15.2",
+    "mypy>=1.15",
+    "types-pyyaml>=6.0.12.20250915",
+]

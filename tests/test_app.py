@@ -1,0 +1,159 @@
+"""Tests for the build_engine() bootstrap function."""
+
+from __future__ import annotations
+
+from unittest.mock import patch
+
+from tether.app import build_engine
+from tether.core.config import TetherConfig
+from tether.core.engine import Engine
+from tether.middleware.auth import AuthMiddleware
+from tether.middleware.rate_limit import RateLimitMiddleware
+from tether.plugins.builtin.audit_plugin import AuditPlugin
+from tether.storage.memory import MemorySessionStore
+from tether.storage.sqlite import SqliteSessionStore
+
+
+def _patched_build_engine(**kwargs):
+    """Call build_engine with logging setup patched to avoid side effects."""
+    with patch("tether.app._configure_logging"):
+        return build_engine(**kwargs)
+
+
+class TestBuildEngine:
+    def test_returns_valid_engine(self, tmp_path):
+        config = TetherConfig(approved_directories=[tmp_path])
+        engine = _patched_build_engine(config=config)
+        assert isinstance(engine, Engine)
+        assert engine.agent is not None
+        assert engine.sandbox is not None
+        assert engine.audit is not None
+        assert engine.event_bus is not None
+
+    def test_memory_storage_backend(self, tmp_path):
+        config = TetherConfig(approved_directories=[tmp_path], storage_backend="memory")
+        engine = _patched_build_engine(config=config)
+        assert isinstance(engine._store, MemorySessionStore)
+
+    def test_sqlite_storage_backend(self, tmp_path):
+        config = TetherConfig(
+            approved_directories=[tmp_path],
+            storage_backend="sqlite",
+            storage_path=tmp_path / "test.db",
+        )
+        engine = _patched_build_engine(config=config)
+        assert isinstance(engine._store, SqliteSessionStore)
+
+    def test_no_connector_no_approval_coordinator(self, tmp_path):
+        config = TetherConfig(approved_directories=[tmp_path])
+        engine = _patched_build_engine(config=config)
+        assert engine.approval_coordinator is None
+        assert engine.connector is None
+
+    def test_auth_middleware_when_allowed_users(self, tmp_path):
+        config = TetherConfig(
+            approved_directories=[tmp_path],
+            allowed_user_ids={"user1", "user2"},
+        )
+        engine = _patched_build_engine(config=config)
+        assert engine.middleware_chain is not None
+        assert len(engine.middleware_chain._middleware) >= 1
+        assert isinstance(engine.middleware_chain._middleware[0], AuthMiddleware)
+
+    def test_rate_limit_middleware_when_rpm_set(self, tmp_path):
+        config = TetherConfig(
+            approved_directories=[tmp_path],
+            rate_limit_rpm=30,
+        )
+        engine = _patched_build_engine(config=config)
+        assert len(engine.middleware_chain._middleware) >= 1
+        assert isinstance(engine.middleware_chain._middleware[0], RateLimitMiddleware)
+
+    def test_plugin_registry_has_audit_plugin(self, tmp_path):
+        config = TetherConfig(approved_directories=[tmp_path])
+        engine = _patched_build_engine(config=config)
+        assert engine.plugin_registry is not None
+        audit = engine.plugin_registry.get("audit")
+        assert audit is not None
+        assert isinstance(audit, AuditPlugin)
+
+    def test_default_policy_loaded(self, tmp_path):
+        config = TetherConfig(approved_directories=[tmp_path])
+        engine = _patched_build_engine(config=config)
+        assert engine.policy_engine is not None
+        assert len(engine.policy_engine.rules) > 0
+        rule_names = [r.name for r in engine.policy_engine.rules]
+        assert "credential-files" in rule_names
+
+    def test_connector_wires_approval_coordinator(self, tmp_path, mock_connector):
+        config = TetherConfig(approved_directories=[tmp_path])
+        engine = _patched_build_engine(config=config, connector=mock_connector)
+        assert engine.approval_coordinator is not None
+        assert engine.connector is mock_connector
+        assert mock_connector._approval_resolver is not None
+
+    def test_both_middleware_ordered_correctly(self, tmp_path):
+        config = TetherConfig(
+            approved_directories=[tmp_path],
+            allowed_user_ids={"user1"},
+            rate_limit_rpm=30,
+        )
+        engine = _patched_build_engine(config=config)
+        mw = engine.middleware_chain._middleware
+        assert len(mw) == 2
+        assert isinstance(mw[0], AuthMiddleware)
+        assert isinstance(mw[1], RateLimitMiddleware)
+
+    def test_no_middleware_when_unconfigured(self, tmp_path):
+        config = TetherConfig(approved_directories=[tmp_path])
+        engine = _patched_build_engine(config=config)
+        assert len(engine.middleware_chain._middleware) == 0
+
+    def test_custom_policy_file_loaded(self, tmp_path):
+        custom = tmp_path / "custom.yaml"
+        custom.write_text(
+            "version: '1.0'\n"
+            "name: custom\n"
+            "rules:\n"
+            "  - name: custom-rule\n"
+            "    tools: [Read]\n"
+            "    action: allow\n"
+        )
+        config = TetherConfig(approved_directories=[tmp_path], policy_files=[custom])
+        engine = _patched_build_engine(config=config)
+        assert len(engine.policy_engine.rules) == 1
+        assert engine.policy_engine.rules[0].name == "custom-rule"
+
+    def test_custom_plugin_registered_alongside_audit(self, tmp_path):
+        from tether.plugins.base import PluginContext, PluginMeta, TetherPlugin
+
+        class CustomPlugin(TetherPlugin):
+            meta = PluginMeta(name="custom", version="0.1.0")
+
+            async def initialize(self, context: PluginContext) -> None:
+                pass
+
+        config = TetherConfig(approved_directories=[tmp_path])
+        custom = CustomPlugin()
+        engine = _patched_build_engine(config=config, plugins=[custom])
+        assert engine.plugin_registry.get("audit") is not None
+        assert engine.plugin_registry.get("custom") is custom
+
+    def test_sandbox_has_approved_directory(self, tmp_path):
+        config = TetherConfig(approved_directories=[tmp_path])
+        engine = _patched_build_engine(config=config)
+        assert tmp_path.resolve() in engine.sandbox._allowed
+
+    def test_audit_logger_path_matches_config(self, tmp_path):
+        config = TetherConfig(
+            approved_directories=[tmp_path],
+            audit_log_path=tmp_path / "my_audit.jsonl",
+        )
+        engine = _patched_build_engine(config=config)
+        assert engine.audit._path == tmp_path / "my_audit.jsonl"
+
+    def test_no_policy_files_loads_default(self, tmp_path):
+        config = TetherConfig(approved_directories=[tmp_path])
+        engine = _patched_build_engine(config=config)
+        rule_names = [r.name for r in engine.policy_engine.rules]
+        assert "credential-files" in rule_names

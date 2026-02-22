@@ -1,0 +1,68 @@
+version: "1.0"
+name: strict
+rules:
+  # Deny rules first
+  - name: credential-files
+    tools: [Read, Write, Edit]
+    path_patterns:
+      - "\\.env$|\\.env\\."
+      - "\\.ssh/|\\.aws/"
+      - "\\.key$|\\.pem$"
+      - "id_rsa|credentials|secrets?"
+    action: deny
+    reason: "Credential/sensitive file access blocked"
+
+  - name: destructive-bash
+    tool: Bash
+    command_patterns:
+      - "rm\\s"
+      - "\\bsudo\\b"
+      - "\\b(curl|wget)\\b.*\\|.*\\b(bash|sh|zsh)\\b"
+      - "\\bchmod\\b"
+      - "\\bmv\\b"
+      - "\\bcp\\b"
+    action: deny
+    reason: "Blocked in strict mode"
+
+  # Allow rules
+  - name: agent-internal-tools
+    tools: [AskUserQuestion, ExitPlanMode, Task, TaskCreate, TaskUpdate, TaskList, TaskGet, TodoWrite, EnterPlanMode]
+    action: allow
+
+  - name: read-only-tools
+    tools: [Read, Glob, Grep, LS]
+    action: allow
+
+  - name: read-only-bash
+    tool: Bash
+    command_patterns:
+      - "^(ls|pwd|echo|date|whoami|which|type)\\b"
+      - "^git\\s+(-[a-zA-Z]\\s+\\S+\\s+|--[a-z-]+(=\\S+)?\\s+)*?(status|log|diff|show)\\b"
+    action: allow
+
+  - name: plan-file-writes
+    tools: [Write, Edit]
+    path_patterns:
+      - "\\.plan$"
+      - "\\.claude/plans/"
+    action: allow
+
+  # Approval-required rules
+  - name: all-writes
+    tools: [Write, Edit, NotebookEdit]
+    action: require_approval
+    description: "File modification (strict mode)"
+
+  - name: all-bash
+    tools: [Bash]
+    action: require_approval
+    description: "Shell command (strict mode)"
+
+  - name: all-web
+    tools: [WebSearch, WebFetch]
+    action: require_approval
+    description: "Web access (strict mode)"
+
+settings:
+  default_action: require_approval
+  approval_timeout_seconds: 120

@@ -1,0 +1,70 @@
+version: "1.0"
+name: permissive
+rules:
+  # Deny rules first
+  - name: credential-files
+    tools: [Read, Write, Edit]
+    path_patterns:
+      - "\\.env$|\\.env\\."
+      - "\\.ssh/|\\.aws/"
+      - "\\.key$|\\.pem$"
+      - "id_rsa|credentials|secrets?"
+    action: deny
+    reason: "Credential/sensitive file access blocked"
+
+  - name: no-force-push
+    tool: Bash
+    command_patterns: ["git\\s+push.*(-f|--force)"]
+    action: deny
+    reason: "Force push blocked even in permissive mode"
+
+  - name: destructive-bash
+    tool: Bash
+    command_patterns:
+      - "rm\\s.*-.*r.*f|rm\\s+-rf"
+      - "\\bsudo\\b"
+      - "\\b(curl|wget)\\b.*\\|.*\\b(bash|sh|zsh)\\b"
+      - "\\b(DROP|TRUNCATE)\\s+(TABLE|DATABASE)\\b"
+    action: deny
+    reason: "Destructive command blocked"
+
+  # Allow rules
+  - name: agent-internal-tools
+    tools: [AskUserQuestion, ExitPlanMode, Task, TaskCreate, TaskUpdate, TaskList, TaskGet, TodoWrite, EnterPlanMode]
+    action: allow
+
+  - name: all-reads
+    tools: [Read, Glob, Grep, WebSearch, WebFetch, LS]
+    action: allow
+
+  - name: plan-file-writes
+    tools: [Write, Edit]
+    path_patterns:
+      - "\\.plan$"
+      - "\\.claude/plans/"
+    action: allow
+
+  - name: all-writes
+    tools: [Write, Edit, NotebookEdit]
+    action: allow
+
+  - name: safe-bash
+    tool: Bash
+    command_patterns:
+      - "^(ls|cat|head|tail|find|grep|wc|du|df|pwd|echo|date|whoami|which|type|file|stat)\\b"
+      - "^git\\s+(-[a-zA-Z]\\s+\\S+\\s+|--[a-z-]+(=\\S+)?\\s+)*?(status|log|diff|show|branch|remote|tag|add|commit|stash)\\b"
+      - "^(npm|yarn|pnpm|bun|pip|uv|cargo|go|make)\\s"
+      - "^(python|node|ruby|java|rustc|gcc)\\s"
+      - "^(pytest|jest|vitest|cargo test|go test)\\b"
+    action: allow
+
+  - name: git-mutations
+    tool: Bash
+    command_patterns:
+      - "^git\\s+(-[a-zA-Z]\\s+\\S+\\s+|--[a-z-]+(=\\S+)?\\s+)*?(push|reset|rebase|merge|cherry-pick|rm)\\b"
+    action: require_approval
+    description: "Git mutation"
+
+settings:
+  default_action: require_approval
+  approval_timeout_seconds: 600

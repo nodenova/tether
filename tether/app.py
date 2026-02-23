@@ -23,6 +23,8 @@ from tether.middleware.auth import AuthMiddleware
 from tether.middleware.base import MiddlewareChain
 from tether.middleware.rate_limit import RateLimitMiddleware
 from tether.plugins.builtin.audit_plugin import AuditPlugin
+from tether.plugins.builtin.browser_tools import BrowserToolsPlugin
+from tether.plugins.builtin.test_runner import TestRunnerPlugin
 from tether.plugins.registry import PluginRegistry
 from tether.storage.memory import MemorySessionStore
 from tether.storage.sqlite import SqliteSessionStore
@@ -134,6 +136,8 @@ def build_engine(
     # Plugins
     registry = PluginRegistry()
     registry.register(AuditPlugin(audit))
+    registry.register(BrowserToolsPlugin())
+    registry.register(TestRunnerPlugin())
     for plugin in plugins or []:
         registry.register(plugin)
 

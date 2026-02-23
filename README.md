@@ -32,6 +32,7 @@ Tether lets you send natural-language coding instructions from Telegram on your 
 - [Configuration](#configuration)
 - [Safety](#safety)
 - [Session Persistence](#session-persistence)
+- [Browser Testing](#browser-testing)
 - [Streaming](#streaming)
 - [CLI Mode](#cli-mode)
 - [Architecture](#architecture)
@@ -46,6 +47,7 @@ Tether lets you send natural-language coding instructions from Telegram on your 
 - **[uv](https://docs.astral.sh/uv/)** — fast Python package manager
 - **[Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code)** — installed and authenticated. The `claude` command must work in your terminal. Tether delegates to it via `claude-agent-sdk`.
 - **Telegram account** — to create a bot and chat with it from your phone
+- **Node.js 18+** *(optional)* — required only for [browser testing](#browser-testing) via Playwright MCP
 
 ### 1. Clone and install
 
@@ -157,17 +159,17 @@ Everything is logged to `audit.jsonl` — every tool attempt, every decision.
 Tether ships with three policies in `policies/`:
 
 **`default.yaml`** (recommended) — Good starting point for phone-based vibe coding.
-- Auto-allows: file reads, search, grep, git status/log/diff
-- Requires approval: file writes, edits, git push/rebase/merge, network commands
+- Auto-allows: file reads, search, grep, git status/log/diff, readonly browser tools (snapshots, screenshots)
+- Requires approval: file writes, edits, git push/rebase/merge, network commands, browser mutations (click, navigate, type)
 - Hard-blocks: credential file access, `rm -rf`, `sudo`, force push, pipe-to-shell, SQL DROP/TRUNCATE
 
 **`strict.yaml`** — Maximum safety, but chatty (lots of approval taps).
 - Auto-allows: only file reads (`Read`, `Glob`, `Grep`, `LS`)
-- Requires approval: everything else, including writes, bash, and web tools
+- Requires approval: everything else, including writes, bash, web tools, and all browser tools
 - 2-minute approval timeout (vs 5 minutes for default)
 
 **`permissive.yaml`** — For trusted environments where you want minimal interruptions.
-- Auto-allows: reads, writes, package managers (`npm`, `pip`, `uv`, `cargo`), test runners (`pytest`, `jest`), `git add/commit/stash`
+- Auto-allows: reads, writes, package managers (`npm`, `pip`, `uv`, `cargo`), test runners (`pytest`, `jest`), `git add/commit/stash`, all browser tools
 - Requires approval: git push, network commands, anything not explicitly listed
 - 10-minute approval timeout
 
@@ -193,6 +195,29 @@ TETHER_STORAGE_PATH=tether.db
 ```
 
 With SQLite storage, Tether also logs every message (user and assistant) with cost, duration, and session metadata — giving you a queryable conversation history.
+
+## Browser Testing
+
+Tether integrates with [Playwright MCP](https://github.com/playwright-community/mcp) to give Claude browser automation capabilities — navigating pages, clicking elements, taking snapshots, and generating Playwright tests — all gated by the safety pipeline.
+
+**Prerequisites:** Node.js 18+ and a one-time browser install:
+
+```bash
+npx playwright install chromium
+```
+
+**It's already configured.** The `.mcp.json` at the project root tells Claude Code to spawn the Playwright MCP server (pinned to `@playwright/mcp@0.0.41`, headless). The 25 browser tools are classified in all three policy presets — readonly tools (snapshots, screenshots) are auto-allowed in default policy, while mutation tools (click, navigate, type) require your approval.
+
+**Typical workflow:**
+
+1. Start your dev server (`npm run dev`, `uv run uvicorn`, etc.)
+2. Launch Claude Code in the Tether project directory
+3. Ask Claude to test your UI — "Navigate to localhost:3000 and verify the login form"
+4. Claude uses browser tools, gated by your policy, and reports findings
+
+Tether also includes Playwright test agents (Planner, Generator, Healer) and a `/healer` slash command for automated test repair.
+
+See [docs/browser-testing.md](docs/browser-testing.md) for the full guide.
 
 ## Streaming
 

@@ -293,6 +293,97 @@ class TestClaudeCodeAgent:
         if sp:
             assert agent._PLAN_MODE_INSTRUCTION not in sp
 
+    def test_mode_instruction_prepends(self, agent, session):
+        session.mode_instruction = "You are in test mode."
+        opts = agent._build_options(session, can_use_tool=None)
+        assert opts.system_prompt == "You are in test mode."
+
+    def test_mode_instruction_with_existing_system_prompt(self, tmp_path):
+        config = TetherConfig(
+            approved_directories=[tmp_path],
+            system_prompt="Be helpful.",
+        )
+        agent = ClaudeCodeAgent(config)
+        session = Session(
+            session_id="s1",
+            user_id="u1",
+            chat_id="c1",
+            working_directory=str(tmp_path),
+        )
+        session.mode_instruction = "You are in test mode."
+        opts = agent._build_options(session, can_use_tool=None)
+        assert "You are in test mode." in opts.system_prompt
+        assert "Be helpful." in opts.system_prompt
+        assert opts.system_prompt.startswith("You are in test mode.")
+
+    def test_plan_mode_takes_priority_over_mode_instruction(self, agent, session):
+        session.mode = "plan"
+        session.mode_instruction = "This should be ignored."
+        opts = agent._build_options(session, can_use_tool=None)
+        assert agent._PLAN_MODE_INSTRUCTION in opts.system_prompt
+        assert "This should be ignored." not in opts.system_prompt
+
+    def test_build_options_merges_mcp_servers(self, tmp_path):
+        import json
+
+        mcp_file = tmp_path / ".mcp.json"
+        mcp_file.write_text(
+            json.dumps({"mcpServers": {"local-tool": {"command": "node"}}})
+        )
+        config = TetherConfig(
+            approved_directories=[tmp_path],
+            mcp_servers={"tether-tool": {"command": "python"}},
+        )
+        agent = ClaudeCodeAgent(config)
+        session = Session(
+            session_id="s1",
+            user_id="u1",
+            chat_id="c1",
+            working_directory=str(tmp_path),
+        )
+        opts = agent._build_options(session, can_use_tool=None)
+        assert "local-tool" in opts.mcp_servers
+        assert "tether-tool" in opts.mcp_servers
+
+    def test_build_options_tether_mcp_wins_collision(self, tmp_path):
+        import json
+
+        mcp_file = tmp_path / ".mcp.json"
+        mcp_file.write_text(
+            json.dumps({"mcpServers": {"shared": {"command": "local"}}})
+        )
+        config = TetherConfig(
+            approved_directories=[tmp_path],
+            mcp_servers={"shared": {"command": "tether"}},
+        )
+        agent = ClaudeCodeAgent(config)
+        session = Session(
+            session_id="s1",
+            user_id="u1",
+            chat_id="c1",
+            working_directory=str(tmp_path),
+        )
+        opts = agent._build_options(session, can_use_tool=None)
+        assert opts.mcp_servers["shared"]["command"] == "tether"
+
+    def test_build_options_no_mcp_servers(self, agent, session):
+        opts = agent._build_options(session, can_use_tool=None)
+        assert not opts.mcp_servers
+
+    def test_build_options_malformed_mcp_json(self, tmp_path):
+        mcp_file = tmp_path / ".mcp.json"
+        mcp_file.write_text("not valid json {{{")
+        config = TetherConfig(approved_directories=[tmp_path])
+        agent = ClaudeCodeAgent(config)
+        session = Session(
+            session_id="s1",
+            user_id="u1",
+            chat_id="c1",
+            working_directory=str(tmp_path),
+        )
+        opts = agent._build_options(session, can_use_tool=None)
+        assert not opts.mcp_servers
+
     @pytest.mark.asyncio
     async def test_shutdown_suppresses_disconnect_errors(self, agent):
         mock_client = AsyncMock()

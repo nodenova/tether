@@ -2157,6 +2157,124 @@ class TestHandleCommand:
         assert new_session.is_active is True
 
 
+class TestTestCommand:
+    async def _make_engine_with_plugin(
+        self, config, audit_logger, policy_engine, mock_connector
+    ):
+        from tether.core.events import EventBus
+        from tether.plugins.base import PluginContext
+        from tether.plugins.builtin.test_runner import TestRunnerPlugin
+
+        agent = FakeAgent()
+        bus = EventBus()
+        plugin = TestRunnerPlugin()
+
+        eng = Engine(
+            connector=mock_connector,
+            agent=agent,
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+            event_bus=bus,
+        )
+
+        ctx = PluginContext(event_bus=bus, config=config)
+        await plugin.initialize(ctx)
+
+        return eng, agent
+
+    @pytest.mark.asyncio
+    async def test_test_command_sets_mode(
+        self, config, audit_logger, policy_engine, mock_connector
+    ):
+        eng, _ = await self._make_engine_with_plugin(
+            config, audit_logger, policy_engine, mock_connector
+        )
+
+        await eng.handle_command("user1", "test", "verify login", "chat1")
+
+        session = eng.session_manager.get("user1", "chat1")
+        assert session.mode == "test"
+        assert session.mode_instruction is not None
+
+    @pytest.mark.asyncio
+    async def test_test_command_auto_approves_browser_tools(
+        self, config, audit_logger, policy_engine, mock_connector
+    ):
+        from tether.plugins.builtin.browser_tools import BROWSER_MUTATION_TOOLS
+
+        eng, _ = await self._make_engine_with_plugin(
+            config, audit_logger, policy_engine, mock_connector
+        )
+
+        await eng.handle_command("user1", "test", "", "chat1")
+
+        auto_tools = eng._gatekeeper._auto_approved_tools.get("chat1", set())
+        for tool in BROWSER_MUTATION_TOOLS:
+            assert tool in auto_tools
+
+    @pytest.mark.asyncio
+    async def test_test_command_routes_args_to_agent(
+        self, config, audit_logger, policy_engine, mock_connector
+    ):
+        eng, _ = await self._make_engine_with_plugin(
+            config, audit_logger, policy_engine, mock_connector
+        )
+
+        await eng.handle_command("user1", "test", "verify login", "chat1")
+
+        assert len(mock_connector.sent_messages) == 1
+        assert "Echo: verify login" in mock_connector.sent_messages[0]["text"]
+
+    @pytest.mark.asyncio
+    async def test_test_command_routes_default_prompt(
+        self, config, audit_logger, policy_engine, mock_connector
+    ):
+        eng, _ = await self._make_engine_with_plugin(
+            config, audit_logger, policy_engine, mock_connector
+        )
+
+        await eng.handle_command("user1", "test", "", "chat1")
+
+        assert len(mock_connector.sent_messages) == 1
+        assert "comprehensive tests" in mock_connector.sent_messages[0]["text"].lower()
+
+    @pytest.mark.asyncio
+    async def test_test_command_returns_empty(
+        self, config, audit_logger, policy_engine, mock_connector
+    ):
+        eng, _ = await self._make_engine_with_plugin(
+            config, audit_logger, policy_engine, mock_connector
+        )
+
+        result = await eng.handle_command("user1", "test", "check it", "chat1")
+
+        assert result == ""
+
+    @pytest.mark.asyncio
+    async def test_default_command_clears_test_mode(
+        self, config, audit_logger, policy_engine, mock_connector
+    ):
+        from tether.plugins.builtin.browser_tools import BROWSER_MUTATION_TOOLS
+
+        eng, _ = await self._make_engine_with_plugin(
+            config, audit_logger, policy_engine, mock_connector
+        )
+
+        await eng.handle_command("user1", "test", "", "chat1")
+        session = eng.session_manager.get("user1", "chat1")
+        assert session.mode == "test"
+        assert session.mode_instruction is not None
+        auto_tools = eng._gatekeeper._auto_approved_tools.get("chat1", set())
+        assert auto_tools >= BROWSER_MUTATION_TOOLS
+
+        await eng.handle_command("user1", "default", "", "chat1")
+        assert session.mode == "default"
+        assert session.mode_instruction is None
+        assert "chat1" not in eng._gatekeeper._auto_approved_tools
+
+
 class TestDirCommand:
     @pytest.mark.asyncio
     async def test_dir_lists_directories(

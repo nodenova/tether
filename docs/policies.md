@@ -99,8 +99,8 @@ Tether ships with three policy files in `policies/`:
 flowchart TB
     subgraph Default["default.yaml — Balanced"]
         d_deny["DENY: credentials, force push, rm -rf, sudo, curl\|bash, DROP/TRUNCATE"]
-        d_allow["ALLOW: agent tools, reads, safe bash, plan files"]
-        d_approval["APPROVAL: git mutations, file writes, network bash"]
+        d_allow["ALLOW: agent tools, reads, safe bash, plan files, browser readonly"]
+        d_approval["APPROVAL: git mutations, file writes, network bash, browser mutations"]
         d_default["Default: require_approval"]
         d_timeout["Timeout: 300s"]
     end
@@ -108,14 +108,14 @@ flowchart TB
     subgraph Strict["strict.yaml — Maximum Restrictions"]
         s_deny["DENY: credentials, any rm, sudo, cp, mv, chmod, curl\|bash"]
         s_allow["ALLOW: agent tools, reads (no Web*), minimal bash"]
-        s_approval["APPROVAL: all file writes, all bash, all web"]
+        s_approval["APPROVAL: all file writes, all bash, all web, all browser tools"]
         s_default["Default: require_approval"]
         s_timeout["Timeout: 120s"]
     end
 
     subgraph Permissive["permissive.yaml — Trusted Environments"]
         p_deny["DENY: credentials, force push, rm -rf, sudo, curl\|bash, DROP/TRUNCATE"]
-        p_allow["ALLOW: agent tools, all reads, all writes, safe bash + npm/pip/python, git add/commit/stash"]
+        p_allow["ALLOW: agent tools, all reads, all writes, safe bash + npm/pip/python, git add/commit/stash, all browser tools"]
         p_approval["APPROVAL: git mutations only"]
         p_default["Default: require_approval"]
         p_timeout["Timeout: 600s"]
@@ -131,6 +131,8 @@ flowchart TB
 | Web tools | Allow | Approval | Allow |
 | Safe bash (ls, git status) | Allow | Allow (minimal) | Allow (extended) |
 | Git mutations | Approval | Approval | Approval |
+| Browser tools (readonly) | Allow | Approval | Allow |
+| Browser tools (mutation) | Approval | Approval | Allow |
 | rm -rf / sudo | Deny | Deny | Deny |
 | Credential files | Deny | Deny | Deny |
 | Approval timeout | 300s | 120s | 600s |

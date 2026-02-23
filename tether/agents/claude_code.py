@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import time
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import structlog
@@ -183,6 +185,12 @@ class ClaudeCodeAgent(BaseAgent):
                 if system_prompt
                 else self._PLAN_MODE_INSTRUCTION
             )
+        elif session.mode_instruction:
+            system_prompt = (
+                session.mode_instruction + "\n\n" + system_prompt
+                if system_prompt
+                else session.mode_instruction
+            )
         if system_prompt:
             opts.system_prompt = system_prompt
         if self._config.allowed_tools:
@@ -191,7 +199,25 @@ class ClaudeCodeAgent(BaseAgent):
             opts.disallowed_tools = self._config.disallowed_tools
         if session.claude_session_id:
             opts.resume = session.claude_session_id
+
+        local_servers = self._read_local_mcp_servers(session.working_directory)
+        tether_servers = self._config.mcp_servers
+        if local_servers or tether_servers:
+            opts.mcp_servers = {**local_servers, **tether_servers}
+
         return opts
+
+    def _read_local_mcp_servers(self, directory: str) -> dict[str, Any]:
+        mcp_path = Path(directory) / ".mcp.json"
+        if not mcp_path.is_file():
+            return {}
+        try:
+            data = json.loads(mcp_path.read_text())
+            servers: dict[str, Any] = data.get("mcpServers", {})
+            return servers
+        except Exception:
+            logger.warning("mcp_json_read_failed", path=str(mcp_path))
+            return {}
 
     async def _run_with_resume(
         self,

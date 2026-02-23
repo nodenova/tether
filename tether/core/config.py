@@ -1,6 +1,8 @@
 """Unified configuration via pydantic-settings."""
 
+import json
 from pathlib import Path
+from typing import Any
 
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -41,6 +43,7 @@ class TetherConfig(BaseSettings):
     system_prompt: str | None = None
     allowed_tools: list[str] = []
     disallowed_tools: list[str] = []
+    mcp_servers: dict[str, Any] = {}
 
     # Safety settings
     policy_files: list[Path] = []
@@ -101,6 +104,14 @@ class TetherConfig(BaseSettings):
             return {str(v)}
         if isinstance(v, str):
             return {s.strip() for s in v.split(",") if s.strip()}
+        return v
+
+    @field_validator("mcp_servers", mode="before")
+    @classmethod
+    def parse_mcp_servers(cls, v: dict[str, Any] | str) -> dict[str, Any]:
+        if isinstance(v, str):
+            result: dict[str, Any] = json.loads(v)
+            return result
         return v
 
     @field_validator("policy_files", mode="before")

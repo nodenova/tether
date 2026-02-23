@@ -22,6 +22,7 @@ ENGINE_STARTED = "engine.started"
 ENGINE_STOPPED = "engine.stopped"
 INTERACTION_REQUESTED = "interaction.requested"
 INTERACTION_RESOLVED = "interaction.resolved"
+COMMAND_TEST = "command.test"
 
 
 class Event(BaseModel):

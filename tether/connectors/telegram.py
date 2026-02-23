@@ -55,7 +55,8 @@ class TelegramConnector(BaseConnector):
         )
         self._app.add_handler(
             CommandHandler(
-                ["plan", "edit", "default", "status", "clear", "dir"], self._on_command
+                ["plan", "edit", "default", "status", "clear", "dir", "test"],
+                self._on_command,
             )
         )
         self._app.add_handler(

@@ -11,6 +11,7 @@ import structlog
 
 from tether.core.config import build_directory_names
 from tether.core.events import (
+    COMMAND_TEST,
     ENGINE_STARTED,
     ENGINE_STOPPED,
     MESSAGE_IN,
@@ -510,6 +511,23 @@ class Engine:
             )
             return "Switched to plan mode. I'll create a plan before implementing."
 
+        if command == "test":
+            event = Event(
+                name=COMMAND_TEST,
+                data={
+                    "session": session,
+                    "chat_id": chat_id,
+                    "args": args,
+                    "gatekeeper": self._gatekeeper,
+                    "prompt": "",
+                },
+            )
+            await self.event_bus.emit(event)
+            prompt = event.data.get("prompt", "")
+            if prompt:
+                await self.handle_message(user_id, prompt, chat_id)
+            return ""
+
         if command == "edit":
             old_mode = session.mode
             session.mode = "auto"
@@ -530,6 +548,7 @@ class Engine:
         if command == "default":
             old_mode = session.mode
             session.mode = "default"
+            session.mode_instruction = None
             self._gatekeeper.disable_auto_approve(chat_id)
             logger.info(
                 "mode_switched",

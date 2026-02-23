@@ -65,6 +65,7 @@ The system follows a three-layer safety pipeline: **Sandbox → Policy → Appro
 - `PluginRegistry` for explicit registration (no auto-discovery)
 - Plugins receive a `PluginContext` (event bus + config) and subscribe to `EventBus` events in `initialize()`
 - Built-in: `AuditPlugin` logs sandbox violations from `tool.denied` events
+- Built-in: `BrowserToolsPlugin` provides structured logging for the 25 Playwright MCP browser tools (classifies as readonly vs mutation, logs gated/allowed/denied events)
 
 **Agent abstraction** (`agents/`): `BaseAgent` protocol with `ClaudeCodeAgent` implementation wrapping `claude-agent-sdk`. Supports session resume for multi-turn continuity.
 
@@ -75,6 +76,16 @@ The system follows a three-layer safety pipeline: **Sandbox → Policy → Appro
 **Configuration** (`core/config.py`): `TetherConfig` uses pydantic-settings, loaded from environment variables prefixed with `TETHER_`. Required: `TETHER_APPROVED_DIRECTORIES` (comma-separated paths). `build_directory_names()` derives short names from basenames for the `/dir` command.
 
 **Storage** (`storage/`): `SessionStore` ABC with two backends — `MemorySessionStore` (in-process dict) and `SqliteSessionStore` (persistent via aiosqlite). Sessions are keyed by user+chat pair.
+
+## Browser Testing (Playwright MCP)
+
+Tether integrates with Playwright MCP for browser automation. The `.mcp.json` at project root configures Claude Code to spawn the MCP server (pinned `@playwright/mcp@0.0.41`, `--headless`). Tether's Python process does not touch Playwright — Claude Code's SDK manages the MCP server lifecycle.
+
+- **Prerequisites:** Node.js 18+, one-time `npx playwright install chromium`
+- **25 browser tools** (7 readonly, 18 mutation) flow through the existing safety pipeline — policy rules are defined in all three YAML presets (`default.yaml`, `strict.yaml`, `permissive.yaml`)
+- **`BrowserToolsPlugin`** (`plugins/builtin/browser_tools.py`) provides structured logging; exports `BROWSER_READONLY_TOOLS`, `BROWSER_MUTATION_TOOLS`, `ALL_BROWSER_TOOLS`, `is_browser_tool()`
+- **Playwright test agents:** `npx playwright init-agents --loop=claude` initializes Planner, Generator, and Healer agents
+- **`/healer` slash command** at `.claude/commands/healer.md` runs the healer agent workflow to find and fix broken Playwright tests
 
 ## Code Conventions
 
@@ -98,3 +109,4 @@ The system follows a three-layer safety pipeline: **Sandbox → Policy → Appro
 - YAGNI: don't build for speculative future requirements
 - Rule of Three: don't abstract until third duplication
 - Test behavior, not implementation details
+- After building a feature, write a short concise summary under `CHANGELOG.md` if applicable

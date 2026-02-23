@@ -119,6 +119,44 @@ class AuditPlugin:
 
 The plugin only reacts to sandbox violations (not policy denials) to avoid duplicating audit entries that the gatekeeper already logs directly.
 
+## Built-In: `BrowserToolsPlugin`
+
+`BrowserToolsPlugin` (`plugins/builtin/browser_tools.py`) provides observability for the 25 Playwright MCP browser tools. It logs when browser tools enter the safety pipeline, are allowed, or are denied.
+
+```mermaid
+sequenceDiagram
+    participant GK as ToolGatekeeper
+    participant Bus as EventBus
+    participant Plugin as BrowserToolsPlugin
+
+    GK->>Bus: emit TOOL_GATED (tool_name="browser_navigate")
+    Bus->>Plugin: _on_tool_gated(event)
+    Plugin->>Plugin: log "browser_tool_gated" (is_mutation=true)
+```
+
+### Events
+
+| Event | Handler | Logged when |
+|---|---|---|
+| `TOOL_GATED` | `_on_tool_gated` | A browser tool call enters the safety pipeline |
+| `TOOL_ALLOWED` | `_on_tool_allowed` | A browser tool call is approved |
+| `TOOL_DENIED` | `_on_tool_denied` | A browser tool call is denied (logged at warning level) |
+
+Each log entry includes the `tool_name`, `session_id`, and (for gated events) an `is_mutation` flag indicating whether the tool modifies the browser state.
+
+### Exported Constants
+
+The module exports constants for classifying browser tools in other components:
+
+| Export | Type | Description |
+|---|---|---|
+| `BROWSER_READONLY_TOOLS` | `frozenset[str]` | 7 tools that observe without changing the page |
+| `BROWSER_MUTATION_TOOLS` | `frozenset[str]` | 18 tools that interact with or modify the page |
+| `ALL_BROWSER_TOOLS` | `frozenset[str]` | Union of readonly and mutation sets (25 total) |
+| `is_browser_tool(name)` | `function` | Returns `True` if the tool name is a Playwright browser tool |
+
+See [Browser Testing](browser-testing.md) for the full browser testing guide.
+
 ## Writing a Custom Plugin
 
 ### Step 1: Define the Plugin

@@ -26,6 +26,7 @@ class Session(BaseModel):
     total_cost: float = 0.0
     message_count: int = 0
     mode: str = "default"
+    mode_instruction: str | None = None
     is_active: bool = True
 
 

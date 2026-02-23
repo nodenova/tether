@@ -10,6 +10,7 @@ from tether.core.engine import Engine
 from tether.middleware.auth import AuthMiddleware
 from tether.middleware.rate_limit import RateLimitMiddleware
 from tether.plugins.builtin.audit_plugin import AuditPlugin
+from tether.plugins.builtin.browser_tools import BrowserToolsPlugin
 from tether.storage.memory import MemorySessionStore
 from tether.storage.sqlite import SqliteSessionStore
 
@@ -76,6 +77,13 @@ class TestBuildEngine:
         audit = engine.plugin_registry.get("audit")
         assert audit is not None
         assert isinstance(audit, AuditPlugin)
+
+    def test_plugin_registry_has_browser_tools_plugin(self, tmp_path):
+        config = TetherConfig(approved_directories=[tmp_path])
+        engine = _patched_build_engine(config=config)
+        bt = engine.plugin_registry.get("browser_tools")
+        assert bt is not None
+        assert isinstance(bt, BrowserToolsPlugin)
 
     def test_default_policy_loaded(self, tmp_path):
         config = TetherConfig(approved_directories=[tmp_path])

@@ -150,6 +150,25 @@ class TestTetherConfig:
         )
         assert config.max_turns == 50
 
+    def test_mcp_servers_default_empty(self, tmp_path):
+        config = TetherConfig(approved_directories=[tmp_path])
+        assert config.mcp_servers == {}
+
+    def test_mcp_servers_from_dict(self, tmp_path):
+        servers = {"playwright": {"command": "npx", "args": ["@playwright/mcp"]}}
+        config = TetherConfig(approved_directories=[tmp_path], mcp_servers=servers)
+        assert config.mcp_servers == servers
+
+    def test_mcp_servers_from_json_string(self, tmp_path):
+        import json
+
+        servers = {"playwright": {"command": "npx"}}
+        config = TetherConfig(
+            approved_directories=[tmp_path],
+            mcp_servers=json.dumps(servers),
+        )
+        assert config.mcp_servers == servers
+
 
 class TestConfigValidationEdgeCases:
     """Edge case validation tests."""

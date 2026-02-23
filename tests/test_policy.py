@@ -6,6 +6,11 @@ from pathlib import Path
 import pytest
 
 from tether.core.safety.policy import PolicyDecision, PolicyEngine
+from tether.plugins.builtin.browser_tools import (
+    ALL_BROWSER_TOOLS,
+    BROWSER_MUTATION_TOOLS,
+    BROWSER_READONLY_TOOLS,
+)
 
 
 @pytest.fixture
@@ -513,3 +518,48 @@ class TestGitRmPolicyClassification:
     def test_git_rm_requires_approval_permissive(self, permissive_policy_engine):
         c = permissive_policy_engine.classify("Bash", {"command": "git rm src/foo.py"})
         assert permissive_policy_engine.evaluate(c) == PolicyDecision.REQUIRE_APPROVAL
+
+
+class TestBrowserToolPolicies:
+    """Browser MCP tools should be gated correctly across all three policies."""
+
+    @pytest.mark.parametrize("tool", sorted(BROWSER_READONLY_TOOLS))
+    def test_default_readonly_allowed(self, engine, tool):
+        c = engine.classify(tool, {})
+        assert engine.evaluate(c) == PolicyDecision.ALLOW
+        assert c.matched_rule.name == "browser-readonly-tools"
+
+    @pytest.mark.parametrize("tool", sorted(BROWSER_MUTATION_TOOLS))
+    def test_default_mutation_requires_approval(self, engine, tool):
+        c = engine.classify(tool, {})
+        assert engine.evaluate(c) == PolicyDecision.REQUIRE_APPROVAL
+        assert c.matched_rule.name == "browser-mutation-tools"
+
+    @pytest.mark.parametrize("tool", sorted(ALL_BROWSER_TOOLS))
+    def test_strict_all_require_approval(self, strict_policy_engine, tool):
+        c = strict_policy_engine.classify(tool, {})
+        assert strict_policy_engine.evaluate(c) == PolicyDecision.REQUIRE_APPROVAL
+        assert c.matched_rule.name == "browser-tools"
+
+    @pytest.mark.parametrize("tool", sorted(ALL_BROWSER_TOOLS))
+    def test_permissive_all_allowed(self, permissive_policy_engine, tool):
+        c = permissive_policy_engine.classify(tool, {})
+        assert permissive_policy_engine.evaluate(c) == PolicyDecision.ALLOW
+        assert c.matched_rule.name == "browser-tools"
+
+    @pytest.mark.parametrize("tool", sorted(ALL_BROWSER_TOOLS))
+    def test_no_browser_tool_falls_through_default(self, engine, tool):
+        c = engine.classify(tool, {})
+        assert c.category != "unmatched"
+
+    @pytest.mark.parametrize("tool", sorted(ALL_BROWSER_TOOLS))
+    def test_no_browser_tool_falls_through_strict(self, strict_policy_engine, tool):
+        c = strict_policy_engine.classify(tool, {})
+        assert c.category != "unmatched"
+
+    @pytest.mark.parametrize("tool", sorted(ALL_BROWSER_TOOLS))
+    def test_no_browser_tool_falls_through_permissive(
+        self, permissive_policy_engine, tool
+    ):
+        c = permissive_policy_engine.classify(tool, {})
+        assert c.category != "unmatched"

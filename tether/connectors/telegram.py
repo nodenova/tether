@@ -36,6 +36,7 @@ _INTERACTION_PREFIX = "interact:"
 _INTERACTION_CLEANUP_DELAY = (
     4.0  # seconds before deleting resolved interaction messages
 )
+_GIT_PREFIX = "git:"
 
 
 class TelegramConnector(BaseConnector):
@@ -55,7 +56,8 @@ class TelegramConnector(BaseConnector):
         )
         self._app.add_handler(
             CommandHandler(
-                ["plan", "edit", "default", "status", "clear", "dir"], self._on_command
+                ["plan", "edit", "default", "status", "clear", "dir", "git"],
+                self._on_command,
             )
         )
         self._app.add_handler(
@@ -451,6 +453,10 @@ class TelegramConnector(BaseConnector):
 
         data = query.data or ""
 
+        if data.startswith(_GIT_PREFIX):
+            await self._handle_git_callback(query, data)
+            return
+
         if data.startswith(_INTERACTION_PREFIX):
             await self._handle_interaction_callback(query, data)
             return
@@ -574,6 +580,30 @@ class TelegramConnector(BaseConnector):
             msg_id = self._question_message_ids.pop(chat_id, None)
             if msg_id:
                 await self.delete_message(chat_id, msg_id)
+
+    async def _handle_git_callback(self, query: CallbackQuery, data: str) -> None:
+        """Route git inline button callbacks to the registered git handler."""
+        suffix = data[len(_GIT_PREFIX) :]
+        if ":" not in suffix:
+            action, payload = suffix, ""
+        else:
+            action, payload = suffix.split(":", 1)
+
+        if not self._git_handler:
+            return
+
+        user_id = str(query.from_user.id) if query.from_user else ""
+        chat_id = (
+            str(query.message.chat_id) if isinstance(query.message, Message) else ""
+        )
+
+        if not user_id or not chat_id:
+            return
+
+        try:
+            await self._git_handler(user_id, chat_id, action, payload)
+        except Exception:
+            logger.exception("telegram_git_callback_error", chat_id=chat_id)
 
     async def _on_error(
         self, update: object, context: ContextTypes.DEFAULT_TYPE

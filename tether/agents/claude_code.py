@@ -164,6 +164,13 @@ class ClaudeCodeAgent(BaseAgent):
         "even if a plan already exists from a previous turn."
     )
 
+    _AUTO_MODE_INSTRUCTION = (
+        "You are in accept-edits mode. Implement changes directly — do not create "
+        "plans or call EnterPlanMode/ExitPlanMode. File writes and edits are "
+        "auto-approved. Treat follow-up messages as continuations of the current "
+        "implementation task."
+    )
+
     def _build_options(
         self,
         session: Session,
@@ -182,6 +189,12 @@ class ClaudeCodeAgent(BaseAgent):
                 self._PLAN_MODE_INSTRUCTION + "\n\n" + system_prompt
                 if system_prompt
                 else self._PLAN_MODE_INSTRUCTION
+            )
+        elif session.mode == "auto":
+            system_prompt = (
+                self._AUTO_MODE_INSTRUCTION + "\n\n" + system_prompt
+                if system_prompt
+                else self._AUTO_MODE_INSTRUCTION
             )
         if system_prompt:
             opts.system_prompt = system_prompt

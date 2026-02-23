@@ -98,3 +98,14 @@ The system follows a three-layer safety pipeline: **Sandbox → Policy → Appro
 - YAGNI: don't build for speculative future requirements
 - Rule of Three: don't abstract until third duplication
 - Test behavior, not implementation details
+
+## Changelog
+
+After completing each feature, bug fix, or notable change, append a concise entry to `CHANGELOG.md` in the project root. Use the format:
+
+```markdown
+## [YYYY-MM-DD]
+- **category**: Short description of what changed
+```
+
+Categories: `added`, `fixed`, `changed`, `removed`. Keep entries to one line each.

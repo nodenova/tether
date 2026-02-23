@@ -1,0 +1,782 @@
+"""Tests for GitService with mocked subprocess."""
+
+from unittest.mock import AsyncMock, patch
+
+import pytest
+
+from tether.git.service import GitService, _porcelain_to_status
+
+
+@pytest.fixture
+def service():
+    return GitService()
+
+
+@pytest.fixture
+def cwd(tmp_path):
+    return tmp_path
+
+
+def _make_proc(returncode=0, stdout="", stderr=""):
+    """Create a mock subprocess result."""
+    proc = AsyncMock()
+    proc.returncode = returncode
+    proc.communicate = AsyncMock(return_value=(stdout.encode(), stderr.encode()))
+    proc.kill = AsyncMock()
+    return proc
+
+
+def _patch_subprocess(proc):
+    """Patch asyncio.create_subprocess_exec to return the given proc."""
+    return patch(
+        "tether.git.service.asyncio.create_subprocess_exec",
+        new_callable=AsyncMock,
+        return_value=proc,
+    )
+
+
+class TestIsRepo:
+    async def test_is_repo_true(self, service, cwd):
+        proc = _make_proc(returncode=0, stdout="true\n")
+        with _patch_subprocess(proc):
+            assert await service.is_repo(cwd) is True
+
+    async def test_is_repo_false(self, service, cwd):
+        proc = _make_proc(returncode=128, stderr="fatal: not a git repository")
+        with _patch_subprocess(proc):
+            assert await service.is_repo(cwd) is False
+
+    async def test_is_repo_nonexistent_dir(self, service, tmp_path):
+        nonexistent = tmp_path / "no_such_dir"
+        result = await service.is_repo(nonexistent)
+        assert result is False
+
+
+class TestStatus:
+    async def test_clean_status(self, service, cwd):
+        stdout = (
+            "# branch.head main\n# branch.upstream origin/main\n# branch.ab +0 -0\n"
+        )
+        proc = _make_proc(stdout=stdout)
+        with _patch_subprocess(proc):
+            status = await service.status(cwd)
+        assert status.branch == "main"
+        assert status.tracking == "origin/main"
+        assert status.ahead == 0
+        assert status.behind == 0
+        assert status.staged == []
+        assert status.unstaged == []
+        assert status.untracked == []
+
+    async def test_status_ahead_behind(self, service, cwd):
+        stdout = "# branch.head feature\n# branch.upstream origin/feature\n# branch.ab +3 -1\n"
+        proc = _make_proc(stdout=stdout)
+        with _patch_subprocess(proc):
+            status = await service.status(cwd)
+        assert status.ahead == 3
+        assert status.behind == 1
+
+    async def test_status_with_staged_modified(self, service, cwd):
+        stdout = (
+            "# branch.head main\n"
+            "1 M. N... 100644 100644 100644 abc123 def456 src/app.py\n"
+        )
+        proc = _make_proc(stdout=stdout)
+        with _patch_subprocess(proc):
+            status = await service.status(cwd)
+        assert len(status.staged) == 1
+        assert status.staged[0].path == "src/app.py"
+        assert status.staged[0].status == "modified"
+        assert status.unstaged == []
+
+    async def test_status_with_unstaged_modified(self, service, cwd):
+        stdout = (
+            "# branch.head main\n"
+            "1 .M N... 100644 100644 100644 abc123 def456 tests/test.py\n"
+        )
+        proc = _make_proc(stdout=stdout)
+        with _patch_subprocess(proc):
+            status = await service.status(cwd)
+        assert status.staged == []
+        assert len(status.unstaged) == 1
+        assert status.unstaged[0].path == "tests/test.py"
+        assert status.unstaged[0].status == "modified"
+
+    async def test_status_with_both_staged_and_unstaged(self, service, cwd):
+        stdout = (
+            "# branch.head main\n1 MM N... 100644 100644 100644 abc123 def456 both.py\n"
+        )
+        proc = _make_proc(stdout=stdout)
+        with _patch_subprocess(proc):
+            status = await service.status(cwd)
+        assert len(status.staged) == 1
+        assert len(status.unstaged) == 1
+        assert status.staged[0].path == "both.py"
+        assert status.unstaged[0].path == "both.py"
+
+    async def test_status_with_added_file(self, service, cwd):
+        stdout = (
+            "# branch.head main\n"
+            "1 A. N... 000000 100644 100644 000000 abc123 new_file.py\n"
+        )
+        proc = _make_proc(stdout=stdout)
+        with _patch_subprocess(proc):
+            status = await service.status(cwd)
+        assert len(status.staged) == 1
+        assert status.staged[0].status == "added"
+
+    async def test_status_with_deleted_file(self, service, cwd):
+        stdout = (
+            "# branch.head main\n"
+            "1 D. N... 100644 000000 000000 abc123 000000 removed.py\n"
+        )
+        proc = _make_proc(stdout=stdout)
+        with _patch_subprocess(proc):
+            status = await service.status(cwd)
+        assert len(status.staged) == 1
+        assert status.staged[0].status == "deleted"
+
+    async def test_status_with_renamed_file(self, service, cwd):
+        stdout = (
+            "# branch.head main\n"
+            "2 R. N... 100644 100644 100644 abc123 def456 R100 new_name.py\told_name.py\n"
+        )
+        proc = _make_proc(stdout=stdout)
+        with _patch_subprocess(proc):
+            status = await service.status(cwd)
+        assert len(status.staged) == 1
+        assert status.staged[0].status == "renamed"
+        assert status.staged[0].path == "new_name.py"
+
+    async def test_status_with_untracked_files(self, service, cwd):
+        stdout = "# branch.head main\n? notes.txt\n? scratch.py\n"
+        proc = _make_proc(stdout=stdout)
+        with _patch_subprocess(proc):
+            status = await service.status(cwd)
+        assert status.untracked == ["notes.txt", "scratch.py"]
+
+    async def test_status_with_unmerged(self, service, cwd):
+        stdout = (
+            "# branch.head main\n"
+            "u UU N... 100644 100644 100644 100644 abc123 def456 ghi789 conflict.py\n"
+        )
+        proc = _make_proc(stdout=stdout)
+        with _patch_subprocess(proc):
+            status = await service.status(cwd)
+        assert len(status.staged) == 1
+        assert status.staged[0].status == "conflicted"
+        assert status.staged[0].path == "conflict.py"
+
+    async def test_status_no_tracking(self, service, cwd):
+        stdout = "# branch.head new-branch\n"
+        proc = _make_proc(stdout=stdout)
+        with _patch_subprocess(proc):
+            status = await service.status(cwd)
+        assert status.tracking is None
+
+    async def test_status_command_failure(self, service, cwd):
+        proc = _make_proc(returncode=128, stderr="fatal: error")
+        with _patch_subprocess(proc):
+            status = await service.status(cwd)
+        assert status.branch == "unknown"
+
+    async def test_status_malformed_line_skipped(self, service, cwd):
+        stdout = (
+            "# branch.head main\n"
+            "1 M.\n"  # too few fields
+            "1 A. N... 100644 100644 100644 000000 abc123 valid.py\n"
+        )
+        proc = _make_proc(stdout=stdout)
+        with _patch_subprocess(proc):
+            status = await service.status(cwd)
+        assert len(status.staged) == 1
+        assert status.staged[0].path == "valid.py"
+
+    async def test_status_mixed_everything(self, service, cwd):
+        stdout = (
+            "# branch.head develop\n"
+            "# branch.upstream origin/develop\n"
+            "# branch.ab +5 -2\n"
+            "1 M. N... 100644 100644 100644 abc def src/staged.py\n"
+            "1 .M N... 100644 100644 100644 abc def src/unstaged.py\n"
+            "? untracked.txt\n"
+        )
+        proc = _make_proc(stdout=stdout)
+        with _patch_subprocess(proc):
+            status = await service.status(cwd)
+        assert status.branch == "develop"
+        assert status.tracking == "origin/develop"
+        assert status.ahead == 5
+        assert status.behind == 2
+        assert len(status.staged) == 1
+        assert len(status.unstaged) == 1
+        assert status.untracked == ["untracked.txt"]
+
+
+class TestBranches:
+    async def test_list_branches(self, service, cwd):
+        stdout = "* main\n  develop\n  feature/auth\n"
+        proc = _make_proc(stdout=stdout)
+        with _patch_subprocess(proc):
+            branches = await service.branches(cwd)
+        assert len(branches) == 3
+        assert branches[0].name == "main"
+        assert branches[0].is_current is True
+        assert branches[1].name == "develop"
+        assert branches[1].is_current is False
+
+    async def test_empty_branches(self, service, cwd):
+        proc = _make_proc(stdout="")
+        with _patch_subprocess(proc):
+            branches = await service.branches(cwd)
+        assert branches == []
+
+    async def test_branches_command_failure(self, service, cwd):
+        proc = _make_proc(returncode=128)
+        with _patch_subprocess(proc):
+            branches = await service.branches(cwd)
+        assert branches == []
+
+    async def test_skip_detached_head(self, service, cwd):
+        stdout = "* (HEAD detached at abc1234)\n  main\n"
+        proc = _make_proc(stdout=stdout)
+        with _patch_subprocess(proc):
+            branches = await service.branches(cwd)
+        assert len(branches) == 1
+        assert branches[0].name == "main"
+
+    async def test_skip_blank_lines(self, service, cwd):
+        stdout = "  main\n\n  develop\n"
+        proc = _make_proc(stdout=stdout)
+        with _patch_subprocess(proc):
+            branches = await service.branches(cwd)
+        assert len(branches) == 2
+
+
+class TestSearchBranches:
+    async def test_search_exact_match_first(self, service, cwd):
+        stdout = "  main\n  feature/main-page\n  old-main-backup\n"
+        proc = _make_proc(stdout=stdout)
+        with _patch_subprocess(proc):
+            results = await service.search_branches(cwd, "main")
+        assert results[0].name == "main"
+
+    async def test_search_prefix_before_substring(self, service, cwd):
+        stdout = "  feature/auth\n  old-feature-cleanup\n  feature/dashboard\n"
+        proc = _make_proc(stdout=stdout)
+        with _patch_subprocess(proc):
+            results = await service.search_branches(cwd, "feature")
+        names = [r.name for r in results]
+        assert names.index("feature/auth") < names.index("old-feature-cleanup")
+
+    async def test_search_case_insensitive(self, service, cwd):
+        stdout = "  Feature/Auth\n  MAIN\n"
+        proc = _make_proc(stdout=stdout)
+        with _patch_subprocess(proc):
+            results = await service.search_branches(cwd, "feature")
+        assert len(results) == 1
+        assert results[0].name == "Feature/Auth"
+
+    async def test_search_no_matches(self, service, cwd):
+        stdout = "  main\n  develop\n"
+        proc = _make_proc(stdout=stdout)
+        with _patch_subprocess(proc):
+            results = await service.search_branches(cwd, "zzz_nonexistent")
+        assert results == []
+
+    async def test_search_empty_query_returns_all(self, service, cwd):
+        stdout = "  main\n  develop\n"
+        proc = _make_proc(stdout=stdout)
+        with _patch_subprocess(proc):
+            results = await service.search_branches(cwd, "")
+        assert len(results) == 2
+
+    async def test_search_remote_branches(self, service, cwd):
+        stdout = "  main\n  remotes/origin/main\n  remotes/origin/feature/auth\n"
+        proc = _make_proc(stdout=stdout)
+        with _patch_subprocess(proc):
+            results = await service.search_branches(cwd, "auth")
+        assert len(results) == 1
+        assert results[0].is_remote is True
+
+    async def test_search_remote_match_by_short_name(self, service, cwd):
+        stdout = "  remotes/origin/feature/payments\n"
+        proc = _make_proc(stdout=stdout)
+        with _patch_subprocess(proc):
+            results = await service.search_branches(cwd, "payments")
+        assert len(results) == 1
+
+    async def test_search_skips_head_pointer(self, service, cwd):
+        stdout = (
+            "  main\n  remotes/origin/HEAD -> origin/main\n  remotes/origin/develop\n"
+        )
+        proc = _make_proc(stdout=stdout)
+        with _patch_subprocess(proc):
+            results = await service.search_branches(cwd, "")
+        names = [r.name for r in results]
+        assert all("HEAD ->" not in n for n in names)
+
+    async def test_search_command_failure(self, service, cwd):
+        proc = _make_proc(returncode=128)
+        with _patch_subprocess(proc):
+            results = await service.search_branches(cwd, "feat")
+        assert results == []
+
+
+class TestCheckout:
+    async def test_checkout_success(self, service, cwd):
+        proc = _make_proc(stdout="Switched to branch 'develop'\n")
+        with _patch_subprocess(proc):
+            result = await service.checkout(cwd, "develop")
+        assert result.success is True
+        assert "develop" in result.message
+
+    async def test_checkout_invalid_branch_name(self, service, cwd):
+        result = await service.checkout(cwd, "branch; rm -rf /")
+        assert result.success is False
+        assert "Invalid branch name" in result.message
+
+    async def test_checkout_invalid_name_backtick(self, service, cwd):
+        result = await service.checkout(cwd, "`whoami`")
+        assert result.success is False
+
+    async def test_checkout_invalid_name_space(self, service, cwd):
+        result = await service.checkout(cwd, "name with spaces")
+        assert result.success is False
+
+    async def test_checkout_remote_fallback(self, service, cwd):
+        """When local checkout fails, try remote tracking branch."""
+        call_count = 0
+
+        async def side_effect(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                # First call: git checkout feature/new — fails
+                return _make_proc(returncode=1, stderr="error: pathspec")
+            # Second call: git checkout -b feature/new origin/feature/new — succeeds
+            return _make_proc(
+                returncode=0, stdout="Switched to a new branch 'feature/new'\n"
+            )
+
+        with patch(
+            "tether.git.service.asyncio.create_subprocess_exec",
+            side_effect=side_effect,
+        ):
+            result = await service.checkout(cwd, "feature/new")
+        assert result.success is True
+        assert "tracking" in result.message
+
+    async def test_checkout_both_fail(self, service, cwd):
+        call_count = 0
+
+        async def side_effect(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            return _make_proc(returncode=1, stderr="error: not found")
+
+        with patch(
+            "tether.git.service.asyncio.create_subprocess_exec",
+            side_effect=side_effect,
+        ):
+            result = await service.checkout(cwd, "nonexistent")
+        assert result.success is False
+        assert "Failed to checkout" in result.message
+
+    async def test_checkout_valid_branch_names(self, service, cwd):
+        for name in ("main", "feature/auth", "fix-123", "v1.0.0", "user/my.branch"):
+            proc = _make_proc(returncode=0)
+            with _patch_subprocess(proc):
+                result = await service.checkout(cwd, name)
+            assert result.success is True
+
+
+class TestCreateBranch:
+    async def test_create_and_checkout(self, service, cwd):
+        proc = _make_proc(stdout="Switched to a new branch\n")
+        with _patch_subprocess(proc):
+            result = await service.create_branch(cwd, "new-feature")
+        assert result.success is True
+        assert "Created and switched to" in result.message
+
+    async def test_create_without_checkout(self, service, cwd):
+        proc = _make_proc(stdout="")
+        with _patch_subprocess(proc):
+            result = await service.create_branch(cwd, "new-branch", checkout=False)
+        assert result.success is True
+        assert "Created" in result.message
+        assert "switched" not in result.message.lower()
+
+    async def test_create_invalid_name(self, service, cwd):
+        result = await service.create_branch(cwd, "bad name!")
+        assert result.success is False
+        assert "Invalid" in result.message
+
+    async def test_create_fails(self, service, cwd):
+        proc = _make_proc(returncode=128, stderr="already exists")
+        with _patch_subprocess(proc):
+            result = await service.create_branch(cwd, "existing")
+        assert result.success is False
+
+
+class TestDiff:
+    async def test_diff_basic(self, service, cwd):
+        proc = _make_proc(stdout="--- a/file.py\n+++ b/file.py\n-old\n+new\n")
+        with _patch_subprocess(proc):
+            diff = await service.diff(cwd)
+        assert "--- a/file.py" in diff
+        assert "+new" in diff
+
+    async def test_diff_staged(self, service, cwd):
+        proc = _make_proc(stdout="staged diff output\n")
+        with _patch_subprocess(proc) as mock_exec:
+            await service.diff(cwd, staged=True)
+        args = mock_exec.call_args[0]
+        assert "--cached" in args
+
+    async def test_diff_with_path(self, service, cwd):
+        proc = _make_proc(stdout="path diff\n")
+        with _patch_subprocess(proc) as mock_exec:
+            await service.diff(cwd, path="src/app.py")
+        args = mock_exec.call_args[0]
+        assert "--" in args
+        assert "src/app.py" in args
+
+    async def test_diff_empty(self, service, cwd):
+        proc = _make_proc(stdout="")
+        with _patch_subprocess(proc):
+            diff = await service.diff(cwd)
+        assert diff == ""
+
+    async def test_diff_command_failure(self, service, cwd):
+        proc = _make_proc(returncode=1, stderr="error")
+        with _patch_subprocess(proc):
+            diff = await service.diff(cwd)
+        assert diff == ""
+
+
+class TestLog:
+    async def test_log_parsing(self, service, cwd):
+        stdout = (
+            "abc123||abc||Alice||2 hours ago||fix: auth bug\n"
+            "def456||def||Bob||3 days ago||feat: add login\n"
+        )
+        proc = _make_proc(stdout=stdout)
+        with _patch_subprocess(proc):
+            entries = await service.log(cwd)
+        assert len(entries) == 2
+        assert entries[0].hash == "abc123"
+        assert entries[0].short_hash == "abc"
+        assert entries[0].author == "Alice"
+        assert entries[0].date == "2 hours ago"
+        assert entries[0].message == "fix: auth bug"
+        assert entries[1].author == "Bob"
+
+    async def test_log_custom_count(self, service, cwd):
+        proc = _make_proc(stdout="")
+        with _patch_subprocess(proc) as mock_exec:
+            await service.log(cwd, count=5)
+        args = mock_exec.call_args[0]
+        assert "-5" in args
+
+    async def test_log_empty(self, service, cwd):
+        proc = _make_proc(stdout="")
+        with _patch_subprocess(proc):
+            entries = await service.log(cwd)
+        assert entries == []
+
+    async def test_log_command_failure(self, service, cwd):
+        proc = _make_proc(returncode=128)
+        with _patch_subprocess(proc):
+            entries = await service.log(cwd)
+        assert entries == []
+
+    async def test_log_malformed_line_skipped(self, service, cwd):
+        stdout = (
+            "abc123||abc||Alice||2 hours ago||fix: bug\n"
+            "malformed line without delimiters\n"
+            "def456||def||Bob||1 day ago||feat: new\n"
+        )
+        proc = _make_proc(stdout=stdout)
+        with _patch_subprocess(proc):
+            entries = await service.log(cwd)
+        assert len(entries) == 2
+
+    async def test_log_message_with_delimiter(self, service, cwd):
+        stdout = "abc123||abc||Alice||now||message with || in it\n"
+        proc = _make_proc(stdout=stdout)
+        with _patch_subprocess(proc):
+            entries = await service.log(cwd)
+        assert len(entries) == 1
+        assert entries[0].message == "message with || in it"
+
+
+class TestAdd:
+    async def test_add_single_file(self, service, cwd):
+        proc = _make_proc(stdout="")
+        with _patch_subprocess(proc) as mock_exec:
+            result = await service.add(cwd, ["src/app.py"])
+        assert result.success is True
+        assert "1 file(s)" in result.message
+        args = mock_exec.call_args[0]
+        assert "src/app.py" in args
+
+    async def test_add_multiple_files(self, service, cwd):
+        proc = _make_proc(stdout="")
+        with _patch_subprocess(proc):
+            result = await service.add(cwd, ["a.py", "b.py", "c.py"])
+        assert result.success is True
+        assert "3 file(s)" in result.message
+
+    async def test_add_empty_list(self, service, cwd):
+        result = await service.add(cwd, [])
+        assert result.success is False
+        assert "No files specified" in result.message
+
+    async def test_add_failure(self, service, cwd):
+        proc = _make_proc(returncode=128, stderr="pathspec error")
+        with _patch_subprocess(proc):
+            result = await service.add(cwd, ["nonexistent.py"])
+        assert result.success is False
+
+
+class TestAddAll:
+    async def test_add_all_success(self, service, cwd):
+        proc = _make_proc(stdout="")
+        with _patch_subprocess(proc) as mock_exec:
+            result = await service.add_all(cwd)
+        assert result.success is True
+        assert "Staged all" in result.message
+        args = mock_exec.call_args[0]
+        assert "-A" in args
+
+    async def test_add_all_failure(self, service, cwd):
+        proc = _make_proc(returncode=1, stderr="error")
+        with _patch_subprocess(proc):
+            result = await service.add_all(cwd)
+        assert result.success is False
+
+
+class TestCommit:
+    async def test_commit_success(self, service, cwd):
+        stdout = "[main abc1234] fix: handle edge case\n 1 file changed\n"
+        proc = _make_proc(stdout=stdout)
+        with _patch_subprocess(proc):
+            result = await service.commit(cwd, "fix: handle edge case")
+        assert result.success is True
+        assert "abc1234" in result.message
+        assert "fix: handle edge case" in result.message
+
+    async def test_commit_success_no_bracket(self, service, cwd):
+        proc = _make_proc(stdout="some output without brackets\n")
+        with _patch_subprocess(proc):
+            result = await service.commit(cwd, "msg")
+        assert result.success is True
+        assert result.message == "msg"
+
+    async def test_commit_failure(self, service, cwd):
+        proc = _make_proc(returncode=1, stderr="nothing to commit")
+        with _patch_subprocess(proc):
+            result = await service.commit(cwd, "msg")
+        assert result.success is False
+        assert "Failed to commit" in result.message
+
+    async def test_commit_message_passed(self, service, cwd):
+        proc = _make_proc(stdout="[main abc] msg\n")
+        with _patch_subprocess(proc) as mock_exec:
+            await service.commit(cwd, "my commit message")
+        args = mock_exec.call_args[0]
+        assert "-m" in args
+        assert "my commit message" in args
+
+    async def test_commit_failure_uses_stderr_or_stdout(self, service, cwd):
+        proc = _make_proc(returncode=1, stderr="", stdout="error in stdout")
+        with _patch_subprocess(proc):
+            result = await service.commit(cwd, "msg")
+        assert result.success is False
+        assert "error in stdout" in result.details
+
+
+class TestPush:
+    async def test_push_success(self, service, cwd):
+        proc = _make_proc(stderr="Everything up-to-date\n")
+        with _patch_subprocess(proc):
+            result = await service.push(cwd)
+        assert result.success is True
+        assert "Push successful" in result.message
+
+    async def test_push_with_branch(self, service, cwd):
+        proc = _make_proc(stderr="")
+        with _patch_subprocess(proc) as mock_exec:
+            await service.push(cwd, branch="feature")
+        args = mock_exec.call_args[0]
+        assert "feature" in args
+
+    async def test_push_custom_remote(self, service, cwd):
+        proc = _make_proc(stderr="")
+        with _patch_subprocess(proc) as mock_exec:
+            await service.push(cwd, remote="upstream")
+        args = mock_exec.call_args[0]
+        assert "upstream" in args
+
+    async def test_push_failure(self, service, cwd):
+        proc = _make_proc(returncode=1, stderr="rejected")
+        with _patch_subprocess(proc):
+            result = await service.push(cwd)
+        assert result.success is False
+        assert "Push failed" in result.message
+
+
+class TestPull:
+    async def test_pull_success(self, service, cwd):
+        proc = _make_proc(stdout="Already up to date.\n")
+        with _patch_subprocess(proc):
+            result = await service.pull(cwd)
+        assert result.success is True
+        assert "Pull successful" in result.message
+
+    async def test_pull_failure(self, service, cwd):
+        proc = _make_proc(returncode=1, stderr="merge conflict")
+        with _patch_subprocess(proc):
+            result = await service.pull(cwd)
+        assert result.success is False
+        assert "Pull failed" in result.message
+
+
+class TestRun:
+    async def test_nonexistent_directory(self, service, tmp_path):
+        nonexistent = tmp_path / "no_such_dir"
+        code, _stdout, stderr = await service._run("status", cwd=nonexistent)
+        assert code == 1
+        assert "does not exist" in stderr
+
+    async def test_timeout_handling(self, service, cwd):
+        proc = AsyncMock()
+        proc.returncode = 0
+        proc.kill = AsyncMock()
+
+        async def slow_communicate():
+            import asyncio
+
+            await asyncio.sleep(100)  # Will be interrupted by timeout
+
+        proc.communicate = slow_communicate
+
+        with patch(
+            "tether.git.service.asyncio.create_subprocess_exec",
+            new_callable=AsyncMock,
+            return_value=proc,
+        ):
+            code, _stdout, stderr = await service._run("status", cwd=cwd, timeout=0)
+        assert code == 1
+        assert "timed out" in stderr
+
+    async def test_git_not_installed(self, service, cwd):
+        with patch(
+            "tether.git.service.asyncio.create_subprocess_exec",
+            side_effect=FileNotFoundError,
+        ):
+            code, _stdout, stderr = await service._run("status", cwd=cwd)
+        assert code == 1
+        assert "not installed" in stderr
+
+    async def test_os_error(self, service, cwd):
+        with patch(
+            "tether.git.service.asyncio.create_subprocess_exec",
+            side_effect=OSError("Permission denied"),
+        ):
+            code, _stdout, stderr = await service._run("status", cwd=cwd)
+        assert code == 1
+        assert "Permission denied" in stderr
+
+    async def test_kill_on_timeout_process_already_dead(self, service, cwd):
+        proc = AsyncMock()
+        proc.kill = AsyncMock(side_effect=ProcessLookupError)
+
+        async def slow_communicate():
+            import asyncio
+
+            await asyncio.sleep(100)
+
+        proc.communicate = slow_communicate
+
+        with patch(
+            "tether.git.service.asyncio.create_subprocess_exec",
+            new_callable=AsyncMock,
+            return_value=proc,
+        ):
+            code, _, _ = await service._run("status", cwd=cwd, timeout=0)
+        assert code == 1
+
+
+class TestPorcelainToStatus:
+    def test_modified(self):
+        assert _porcelain_to_status("M") == "modified"
+
+    def test_type_changed(self):
+        assert _porcelain_to_status("T") == "modified"
+
+    def test_added(self):
+        assert _porcelain_to_status("A") == "added"
+
+    def test_deleted(self):
+        assert _porcelain_to_status("D") == "deleted"
+
+    def test_renamed(self):
+        assert _porcelain_to_status("R") == "renamed"
+
+    def test_copied(self):
+        assert _porcelain_to_status("C") == "copied"
+
+    def test_unmerged(self):
+        assert _porcelain_to_status("U") == "conflicted"
+
+    def test_unknown_defaults_to_modified(self):
+        assert _porcelain_to_status("X") == "modified"
+        assert _porcelain_to_status("?") == "modified"
+
+
+class TestBranchNameValidation:
+    async def test_rejects_semicolon(self, service, cwd):
+        result = await service.checkout(cwd, "main; echo pwned")
+        assert result.success is False
+
+    async def test_rejects_pipe(self, service, cwd):
+        result = await service.checkout(cwd, "main|cat /etc/passwd")
+        assert result.success is False
+
+    async def test_rejects_dollar(self, service, cwd):
+        result = await service.checkout(cwd, "$HOME")
+        assert result.success is False
+
+    async def test_rejects_ampersand(self, service, cwd):
+        result = await service.checkout(cwd, "main&&echo")
+        assert result.success is False
+
+    async def test_rejects_backtick(self, service, cwd):
+        result = await service.checkout(cwd, "`id`")
+        assert result.success is False
+
+    async def test_accepts_slashes(self, service, cwd):
+        proc = _make_proc(returncode=0)
+        with _patch_subprocess(proc):
+            result = await service.checkout(cwd, "feature/auth/v2")
+        assert result.success is True
+
+    async def test_accepts_dots(self, service, cwd):
+        proc = _make_proc(returncode=0)
+        with _patch_subprocess(proc):
+            result = await service.checkout(cwd, "release-1.2.3")
+        assert result.success is True
+
+    async def test_accepts_hyphens(self, service, cwd):
+        proc = _make_proc(returncode=0)
+        with _patch_subprocess(proc):
+            result = await service.checkout(cwd, "fix-login-bug")
+        assert result.success is True
+
+    async def test_accepts_underscores(self, service, cwd):
+        proc = _make_proc(returncode=0)
+        with _patch_subprocess(proc):
+            result = await service.checkout(cwd, "my_branch_name")
+        assert result.success is True

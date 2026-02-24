@@ -2409,7 +2409,7 @@ class TestDirCommand:
         assert "Directories:" in result
         assert "tether" in result
         assert "api" in result
-        assert "(active)" in result
+        assert "✅" in result
 
     @pytest.mark.asyncio
     async def test_dir_switches_directory(
@@ -4087,7 +4087,7 @@ class TestMessageQueuing:
         assert "second" in agent.prompts
 
     @pytest.mark.asyncio
-    async def test_queued_message_acknowledgment(
+    async def test_queued_message_sends_interrupt_prompt(
         self, config, audit_logger, mock_connector
     ):
         gate = asyncio.Event()
@@ -4106,12 +4106,8 @@ class TestMessageQueuing:
 
         await eng.handle_message("u1", "second", "c1")
 
-        ack_msgs = [
-            m
-            for m in mock_connector.sent_messages
-            if "will process after current task" in m.get("text", "")
-        ]
-        assert len(ack_msgs) == 1
+        assert len(mock_connector.interrupt_prompts) == 1
+        assert mock_connector.interrupt_prompts[0]["message_preview"] == "second"
 
         gate.set()
         await task
@@ -4365,11 +4361,576 @@ class TestMessageQueuing:
         assert "chat-B" in agent.prompts
 
 
+class TestMessageInterrupt:
+    """Verify interrupt prompt during agent execution."""
+
+    @staticmethod
+    def _make_slow_agent(gate: asyncio.Event):
+        """Agent that blocks until gate is set. Cancel sets the gate."""
+
+        class SlowFakeAgent(BaseAgent):
+            def __init__(self):
+                self.prompts: list[str] = []
+                self.cancelled: list[str] = []
+
+            async def execute(self, prompt, session, **kwargs):
+                self.prompts.append(prompt)
+                await gate.wait()
+                return AgentResponse(
+                    content=f"Done: {prompt}",
+                    session_id="slow-sid",
+                    cost=0.01,
+                )
+
+            async def cancel(self, session_id):
+                self.cancelled.append(session_id)
+                gate.set()
+
+            async def shutdown(self):
+                pass
+
+        return SlowFakeAgent()
+
+    @pytest.mark.asyncio
+    async def test_interrupt_prompt_shown_on_queued_message(
+        self, config, audit_logger, mock_connector
+    ):
+        gate = asyncio.Event()
+        agent = self._make_slow_agent(gate)
+
+        eng = Engine(
+            connector=mock_connector,
+            agent=agent,
+            config=config,
+            session_manager=SessionManager(),
+            audit=audit_logger,
+        )
+
+        task = asyncio.create_task(eng.handle_message("u1", "first", "c1"))
+        await asyncio.sleep(0)
+
+        await eng.handle_message("u1", "second msg", "c1")
+
+        assert len(mock_connector.interrupt_prompts) == 1
+        prompt = mock_connector.interrupt_prompts[0]
+        assert prompt["chat_id"] == "c1"
+        assert prompt["message_preview"] == "second msg"
+
+        # No static acknowledgment sent
+        ack_msgs = [
+            m
+            for m in mock_connector.sent_messages
+            if "will process after current task" in m.get("text", "")
+        ]
+        assert len(ack_msgs) == 0
+
+        gate.set()
+        await task
+
+    @pytest.mark.asyncio
+    async def test_interrupt_send_now_cancels_agent(
+        self, config, audit_logger, mock_connector
+    ):
+        gate = asyncio.Event()
+        agent = self._make_slow_agent(gate)
+
+        eng = Engine(
+            connector=mock_connector,
+            agent=agent,
+            config=config,
+            session_manager=SessionManager(),
+            audit=audit_logger,
+        )
+
+        task = asyncio.create_task(eng.handle_message("u1", "first", "c1"))
+        await asyncio.sleep(0)
+
+        await eng.handle_message("u1", "urgent fix", "c1")
+        interrupt_id = mock_connector.interrupt_prompts[0]["interrupt_id"]
+
+        # Cancel sets gate → agent returns normally → interrupt detected post-return
+        await mock_connector.simulate_interrupt(interrupt_id, send_now=True)
+        await task
+
+        assert len(agent.cancelled) == 1
+        # Queued message processed after interrupted first task
+        assert "urgent fix" in agent.prompts
+        # "Task interrupted" sent for the first execution
+        interrupted_msgs = [
+            m
+            for m in mock_connector.sent_messages
+            if "Task interrupted" in m.get("text", "")
+        ]
+        assert len(interrupted_msgs) == 1
+
+    @pytest.mark.asyncio
+    async def test_interrupt_wait_queues_normally(
+        self, config, audit_logger, mock_connector
+    ):
+        gate = asyncio.Event()
+        agent = self._make_slow_agent(gate)
+
+        eng = Engine(
+            connector=mock_connector,
+            agent=agent,
+            config=config,
+            session_manager=SessionManager(),
+            audit=audit_logger,
+        )
+
+        task = asyncio.create_task(eng.handle_message("u1", "first", "c1"))
+        await asyncio.sleep(0)
+
+        await eng.handle_message("u1", "wait msg", "c1")
+        interrupt_id = mock_connector.interrupt_prompts[0]["interrupt_id"]
+
+        await mock_connector.simulate_interrupt(interrupt_id, send_now=False)
+
+        # Interrupt state cleared but message stays queued
+        assert "c1" not in eng._pending_interrupts
+        assert "c1" not in eng._interrupted_chats
+
+        gate.set()
+        result = await task
+
+        assert "Done:" in result
+        assert "wait msg" in agent.prompts
+
+    @pytest.mark.asyncio
+    async def test_interrupt_prompt_shown_once_per_pending(
+        self, config, audit_logger, mock_connector
+    ):
+        gate = asyncio.Event()
+        agent = self._make_slow_agent(gate)
+
+        eng = Engine(
+            connector=mock_connector,
+            agent=agent,
+            config=config,
+            session_manager=SessionManager(),
+            audit=audit_logger,
+        )
+
+        task = asyncio.create_task(eng.handle_message("u1", "first", "c1"))
+        await asyncio.sleep(0)
+
+        await eng.handle_message("u1", "second", "c1")
+        await eng.handle_message("u1", "third", "c1")
+
+        # Only one prompt despite two queued messages
+        assert len(mock_connector.interrupt_prompts) == 1
+
+        gate.set()
+        await task
+
+    @pytest.mark.asyncio
+    async def test_interrupt_prompt_after_wait_shows_again(
+        self, config, audit_logger, mock_connector
+    ):
+        gate = asyncio.Event()
+        agent = self._make_slow_agent(gate)
+
+        eng = Engine(
+            connector=mock_connector,
+            agent=agent,
+            config=config,
+            session_manager=SessionManager(),
+            audit=audit_logger,
+        )
+
+        task = asyncio.create_task(eng.handle_message("u1", "first", "c1"))
+        await asyncio.sleep(0)
+
+        await eng.handle_message("u1", "msg A", "c1")
+        interrupt_id = mock_connector.interrupt_prompts[0]["interrupt_id"]
+
+        await mock_connector.simulate_interrupt(interrupt_id, send_now=False)
+
+        await eng.handle_message("u1", "msg B", "c1")
+
+        # Second prompt after wait
+        assert len(mock_connector.interrupt_prompts) == 2
+
+        gate.set()
+        await task
+
+    @pytest.mark.asyncio
+    async def test_interrupt_cleanup_on_natural_completion(
+        self, config, audit_logger, mock_connector
+    ):
+        gate = asyncio.Event()
+        agent = self._make_slow_agent(gate)
+
+        eng = Engine(
+            connector=mock_connector,
+            agent=agent,
+            config=config,
+            session_manager=SessionManager(),
+            audit=audit_logger,
+        )
+
+        task = asyncio.create_task(eng.handle_message("u1", "first", "c1"))
+        await asyncio.sleep(0)
+
+        await eng.handle_message("u1", "queued", "c1")
+        msg_id = mock_connector.interrupt_prompts[0]["message_id"]
+
+        # Don't click any button — let execution finish naturally
+        gate.set()
+        await task
+
+        # Prompt should be edited to "completed"
+        completed_edits = [
+            m
+            for m in mock_connector.edited_messages
+            if m["message_id"] == msg_id and "Task completed" in m["text"]
+        ]
+        assert len(completed_edits) == 1
+
+    @pytest.mark.asyncio
+    async def test_interrupt_stale_button_returns_false(
+        self, config, audit_logger, mock_connector
+    ):
+        gate = asyncio.Event()
+        agent = self._make_slow_agent(gate)
+
+        eng = Engine(
+            connector=mock_connector,
+            agent=agent,
+            config=config,
+            session_manager=SessionManager(),
+            audit=audit_logger,
+        )
+
+        task = asyncio.create_task(eng.handle_message("u1", "first", "c1"))
+        await asyncio.sleep(0)
+
+        await eng.handle_message("u1", "queued", "c1")
+        interrupt_id = mock_connector.interrupt_prompts[0]["interrupt_id"]
+
+        gate.set()
+        await task
+
+        # Click after execution completed — interrupt_id already cleaned up
+        result = await mock_connector.simulate_interrupt(interrupt_id, send_now=True)
+        assert result is False
+
+    @pytest.mark.asyncio
+    async def test_interrupt_event_emitted(self, config, audit_logger, mock_connector):
+        from tether.core.events import EXECUTION_INTERRUPTED
+
+        events = []
+
+        async def capture(event):
+            events.append(event)
+
+        bus = EventBus()
+        bus.subscribe(EXECUTION_INTERRUPTED, capture)
+
+        gate = asyncio.Event()
+        agent = self._make_slow_agent(gate)
+
+        eng = Engine(
+            connector=mock_connector,
+            agent=agent,
+            config=config,
+            session_manager=SessionManager(),
+            audit=audit_logger,
+            event_bus=bus,
+        )
+
+        task = asyncio.create_task(eng.handle_message("u1", "first", "c1"))
+        await asyncio.sleep(0)
+
+        await eng.handle_message("u1", "urgent", "c1")
+        interrupt_id = mock_connector.interrupt_prompts[0]["interrupt_id"]
+
+        # Cancel sets gate → execute returns normally → interrupt detected
+        await mock_connector.simulate_interrupt(interrupt_id, send_now=True)
+        await task
+
+        assert len(events) == 1
+        assert events[0].data["chat_id"] == "c1"
+
+    @pytest.mark.asyncio
+    async def test_interrupt_suppresses_partial_response(
+        self, config, audit_logger, mock_connector
+    ):
+        gate = asyncio.Event()
+        agent = self._make_slow_agent(gate)
+
+        eng = Engine(
+            connector=mock_connector,
+            agent=agent,
+            config=config,
+            session_manager=SessionManager(),
+            audit=audit_logger,
+        )
+
+        task = asyncio.create_task(eng.handle_message("u1", "first", "c1"))
+        await asyncio.sleep(0)
+
+        await eng.handle_message("u1", "interrupt me", "c1")
+        interrupt_id = mock_connector.interrupt_prompts[0]["interrupt_id"]
+
+        await mock_connector.simulate_interrupt(interrupt_id, send_now=True)
+        await task
+
+        # The first task's "Done: first" should NOT appear in sent messages
+        first_response_msgs = [
+            m
+            for m in mock_connector.sent_messages
+            if "Done: first" in m.get("text", "")
+        ]
+        assert len(first_response_msgs) == 0
+
+    @pytest.mark.asyncio
+    async def test_interrupt_cleanup_schedules_deletion(
+        self, config, audit_logger, mock_connector
+    ):
+        """Natural completion edits prompt to 'Task completed.' and schedules cleanup."""
+        gate = asyncio.Event()
+        agent = self._make_slow_agent(gate)
+
+        eng = Engine(
+            connector=mock_connector,
+            agent=agent,
+            config=config,
+            session_manager=SessionManager(),
+            audit=audit_logger,
+        )
+
+        task = asyncio.create_task(eng.handle_message("u1", "first", "c1"))
+        await asyncio.sleep(0)
+
+        await eng.handle_message("u1", "queued", "c1")
+        msg_id = mock_connector.interrupt_prompts[0]["message_id"]
+
+        gate.set()
+        await task
+
+        cleanups = [
+            c for c in mock_connector.scheduled_cleanups if c["message_id"] == msg_id
+        ]
+        assert len(cleanups) == 1
+        assert cleanups[0]["chat_id"] == "c1"
+        assert cleanups[0]["delay"] == 5.0
+
+    @pytest.mark.asyncio
+    async def test_interrupt_send_now_schedules_interrupted_msg_cleanup(
+        self, config, audit_logger
+    ):
+        """After interrupt, the 'Task interrupted.' message is scheduled for cleanup."""
+        from tests.conftest import MockConnector
+
+        gate = asyncio.Event()
+        agent = self._make_slow_agent(gate)
+        connector = MockConnector(support_streaming=True)
+
+        eng = Engine(
+            connector=connector,
+            agent=agent,
+            config=config,
+            session_manager=SessionManager(),
+            audit=audit_logger,
+        )
+
+        task = asyncio.create_task(eng.handle_message("u1", "first", "c1"))
+        await asyncio.sleep(0)
+
+        await eng.handle_message("u1", "urgent fix", "c1")
+        interrupt_id = connector.interrupt_prompts[0]["interrupt_id"]
+
+        await connector.simulate_interrupt(interrupt_id, send_now=True)
+        await task
+
+        interrupted_cleanups = [
+            c
+            for c in connector.scheduled_cleanups
+            if any(
+                m["text"] == "\u26a1 Task interrupted."
+                and m.get("message_id") == c["message_id"]
+                for m in connector.sent_messages
+            )
+        ]
+        assert len(interrupted_cleanups) == 1
+        assert interrupted_cleanups[0]["delay"] == 5.0
+
+    @pytest.mark.asyncio
+    async def test_fallback_ack_schedules_cleanup(self, config, audit_logger):
+        """Fallback ack (when send_interrupt_prompt returns None) schedules cleanup."""
+        from tests.conftest import MockConnector
+
+        gate = asyncio.Event()
+        agent = self._make_slow_agent(gate)
+        connector = MockConnector(support_streaming=True)
+
+        # Override send_interrupt_prompt to return None (simulate unsupported)
+        async def _no_interrupt_prompt(chat_id, interrupt_id, preview):
+            return None
+
+        connector.send_interrupt_prompt = _no_interrupt_prompt
+
+        eng = Engine(
+            connector=connector,
+            agent=agent,
+            config=config,
+            session_manager=SessionManager(),
+            audit=audit_logger,
+        )
+
+        task = asyncio.create_task(eng.handle_message("u1", "first", "c1"))
+        await asyncio.sleep(0)
+
+        await eng.handle_message("u1", "queued msg", "c1")
+
+        gate.set()
+        await task
+
+        fallback_cleanups = [
+            c
+            for c in connector.scheduled_cleanups
+            if any(
+                "will process after current task" in m.get("text", "")
+                and m.get("message_id") == c["message_id"]
+                for m in connector.sent_messages
+            )
+        ]
+        assert len(fallback_cleanups) == 1
+        assert fallback_cleanups[0]["delay"] == 5.0
+
+
+class TestInterruptIsolation:
+    """Cross-chat interrupt isolation and message ordering after interrupt."""
+
+    @staticmethod
+    def _make_slow_agent(gate: asyncio.Event):
+        """Agent that blocks until gate is set. Cancel sets the gate."""
+
+        class SlowFakeAgent(BaseAgent):
+            def __init__(self):
+                self.prompts: list[str] = []
+                self.cancelled: list[str] = []
+
+            async def execute(self, prompt, session, **kwargs):
+                self.prompts.append(prompt)
+                await gate.wait()
+                return AgentResponse(
+                    content=f"Done: {prompt}",
+                    session_id="slow-sid",
+                    cost=0.01,
+                )
+
+            async def cancel(self, session_id):
+                self.cancelled.append(session_id)
+                gate.set()
+
+            async def shutdown(self):
+                pass
+
+        return SlowFakeAgent()
+
+    @pytest.mark.asyncio
+    async def test_cross_chat_interrupt_isolation(
+        self, config, audit_logger, mock_connector
+    ):
+        """Interrupt in chat A must not produce interrupt side-effects in chat B."""
+        gate = asyncio.Event()
+        agent = self._make_slow_agent(gate)
+
+        eng = Engine(
+            connector=mock_connector,
+            agent=agent,
+            config=config,
+            session_manager=SessionManager(),
+            audit=audit_logger,
+        )
+
+        task_a = asyncio.create_task(eng.handle_message("u1", "task A", "chatA"))
+        await asyncio.sleep(0)
+
+        # Chat B starts after A is executing — gets its own execution slot
+        # We need a separate gate for B since A's gate will be set by cancel
+        gate_b = asyncio.Event()
+
+        # Override agent to use separate gate for second prompt
+        original_execute = agent.execute
+
+        async def dual_execute(prompt, session, **kwargs):
+            if "task B" in prompt:
+                agent.prompts.append(prompt)
+                await gate_b.wait()
+                return AgentResponse(
+                    content=f"Done: {prompt}", session_id="sid-b", cost=0.01
+                )
+            return await original_execute(prompt, session, **kwargs)
+
+        agent.execute = dual_execute
+
+        # Queue interrupt on chat A
+        await eng.handle_message("u1", "interrupt A", "chatA")
+        assert len(mock_connector.interrupt_prompts) == 1
+        assert mock_connector.interrupt_prompts[0]["chat_id"] == "chatA"
+
+        interrupt_id = mock_connector.interrupt_prompts[0]["interrupt_id"]
+        await mock_connector.simulate_interrupt(interrupt_id, send_now=True)
+        await task_a
+
+        # Now start chat B after A is done
+        task_b = asyncio.create_task(eng.handle_message("u2", "task B", "chatB"))
+        await asyncio.sleep(0)
+        gate_b.set()
+        await task_b
+
+        # Chat B should have no interrupted messages
+        b_interrupted = [
+            m
+            for m in mock_connector.sent_messages
+            if m.get("chat_id") == "chatB"
+            and "interrupted" in m.get("text", "").lower()
+        ]
+        assert len(b_interrupted) == 0
+
+        # Chat B should NOT appear in any interrupt prompts
+        b_prompts = [
+            p for p in mock_connector.interrupt_prompts if p["chat_id"] == "chatB"
+        ]
+        assert len(b_prompts) == 0
+
+    @pytest.mark.asyncio
+    async def test_message_ordering_after_interrupt(
+        self, config, audit_logger, mock_connector
+    ):
+        """After Send Now, the queued message executes next in correct order."""
+        gate = asyncio.Event()
+        agent = self._make_slow_agent(gate)
+
+        eng = Engine(
+            connector=mock_connector,
+            agent=agent,
+            config=config,
+            session_manager=SessionManager(),
+            audit=audit_logger,
+        )
+
+        task = asyncio.create_task(eng.handle_message("u1", "first", "c1"))
+        await asyncio.sleep(0)
+
+        await eng.handle_message("u1", "second-urgent", "c1")
+        interrupt_id = mock_connector.interrupt_prompts[0]["interrupt_id"]
+        await mock_connector.simulate_interrupt(interrupt_id, send_now=True)
+        await task
+
+        # Agent received "first" then "second-urgent" — correct execution order
+        assert agent.prompts[0] == "first"
+        assert agent.prompts[1] == "second-urgent"
+
+
 class TestPlanModeRegression:
     """Verify /plan clears session context and blocks non-plan edits."""
 
     @pytest.mark.asyncio
-    async def test_plan_command_clears_claude_session_id(
+    async def test_plan_command_preserves_claude_session_id(
         self, config, audit_logger, policy_engine, mock_connector
     ):
         agent = FakeAgent()
@@ -4391,7 +4952,7 @@ class TestPlanModeRegression:
         # Switch to plan mode
         await eng.handle_command("user1", "plan", "", "chat1")
         session = sm.get("user1", "chat1")
-        assert session.claude_session_id is None
+        assert session.claude_session_id == "test-session-123"
         assert session.mode == "plan"
 
     @pytest.mark.asyncio
@@ -4424,7 +4985,7 @@ class TestPlanModeRegression:
 
             loaded = await store.load("user1", "chat1")
             assert loaded is not None
-            assert loaded.claude_session_id is None
+            assert loaded.claude_session_id is not None
         finally:
             await store.teardown()
 

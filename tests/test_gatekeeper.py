@@ -525,14 +525,16 @@ class TestGatekeeperAutoApprove:
         assert result.behavior == "allow"
         assert len(mock_connector.approval_requests) == 0
 
-        # npm install should still require approval
+        # curl should still require approval (different prefix, not in dev-tools)
         async def approve():
             await asyncio.sleep(0.05)
             req = mock_connector.approval_requests[0]
             await approval_coordinator.resolve_approval(req["approval_id"], True)
 
         task = asyncio.create_task(approve())
-        result2 = await gk.check("Bash", {"command": "npm install foo"}, "s1", "c1")
+        result2 = await gk.check(
+            "Bash", {"command": "curl https://example.com"}, "s1", "c1"
+        )
         await task
         assert result2.behavior == "allow"
         assert len(mock_connector.approval_requests) == 1
@@ -546,14 +548,16 @@ class TestGatekeeperAutoApprove:
         gk = auto_approve_gatekeeper
         gk.enable_tool_auto_approve("c1", "Bash::git")
 
-        # uv run pytest should still require approval
+        # curl should still require approval (different prefix, not in dev-tools)
         async def approve():
             await asyncio.sleep(0.05)
             req = mock_connector.approval_requests[0]
             await approval_coordinator.resolve_approval(req["approval_id"], True)
 
         task = asyncio.create_task(approve())
-        result = await gk.check("Bash", {"command": "uv run pytest tests/"}, "s1", "c1")
+        result = await gk.check(
+            "Bash", {"command": "curl https://example.com"}, "s1", "c1"
+        )
         await task
         assert result.behavior == "allow"
         assert len(mock_connector.approval_requests) == 1
@@ -567,14 +571,14 @@ class TestGatekeeperAutoApprove:
         gk = auto_approve_gatekeeper
         gk.enable_tool_auto_approve("c1", "Bash::uv run")
 
-        # uv sync has a different subcommand — should NOT be auto-approved
+        # uv publish has a different subcommand — should NOT be auto-approved
         async def approve():
             await asyncio.sleep(0.05)
             req = mock_connector.approval_requests[0]
             await approval_coordinator.resolve_approval(req["approval_id"], True)
 
         task = asyncio.create_task(approve())
-        result = await gk.check("Bash", {"command": "uv sync"}, "s1", "c1")
+        result = await gk.check("Bash", {"command": "uv publish"}, "s1", "c1")
         await task
         assert result.behavior == "allow"
         assert len(mock_connector.approval_requests) == 1

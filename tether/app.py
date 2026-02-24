@@ -119,9 +119,13 @@ def build_engine(
     # Safety components
     policy_paths = list(config.policy_files)
     if not policy_paths:
-        default_policy = Path(__file__).parent / "policies" / "default.yaml"
+        policies_dir = Path(__file__).parent / "policies"
+        default_policy = policies_dir / "default.yaml"
+        dev_tools_policy = policies_dir / "dev-tools.yaml"
         if default_policy.exists():
             policy_paths = [default_policy]
+        if dev_tools_policy.exists():
+            policy_paths.append(dev_tools_policy)
 
     policy_engine = PolicyEngine(policy_paths) if policy_paths else None
     sandbox = SandboxEnforcer(

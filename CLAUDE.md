@@ -86,6 +86,8 @@ Tether integrates with Playwright MCP for browser automation. The `.mcp.json` at
 - **`BrowserToolsPlugin`** (`plugins/builtin/browser_tools.py`) provides structured logging; exports `BROWSER_READONLY_TOOLS`, `BROWSER_MUTATION_TOOLS`, `ALL_BROWSER_TOOLS`, `is_browser_tool()`
 - **Playwright test agents:** `npx playwright init-agents --loop=claude` initializes Planner, Generator, and Healer agents
 - **`/healer` slash command** at `.claude/commands/healer.md` runs the healer agent workflow to find and fix broken Playwright tests
+- **`/test` command** activates 9-phase test workflow via `TestRunnerPlugin` (`plugins/builtin/test_runner.py`) — auto-approves all browser tools, test bash commands, and file writes. Accepts `--url`, `--server`, `--framework`, `--dir`, `--no-e2e`, `--no-unit`, `--no-backend` flags.
+- **Setup guide:** `docs/testing-setup.md` covers how to configure target repos for e2e testing (three tiers: zero-config, Playwright Test framework, AI agents)
 
 ## Code Conventions
 

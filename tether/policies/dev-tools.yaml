@@ -1,0 +1,28 @@
+version: "1.0"
+name: dev-tools
+rules:
+  - name: dev-linters
+    tool: Bash
+    command_patterns:
+      - "^(pytest|ruff|jest|vitest|mypy|black|flake8|eslint|prettier)\\b"
+    action: allow
+    description: "Standalone linters, formatters, and test runners"
+
+  - name: dev-build-tools
+    tool: Bash
+    command_patterns:
+      # JS package managers — local-only subcommands
+      - "^(npm|yarn|pnpm|bun)\\s+(install|ci|test|run|ls|outdated|audit|add|remove|uninstall|info|list|why|dedupe|prune|cache)\\b"
+      # pip — safe subcommands
+      - "^pip\\s+(install|list|show|freeze|check|uninstall)\\b"
+      # uv — safe subcommands + only known-safe runners
+      - "^uv\\s+(sync|lock|add|remove|pip|venv|tool)\\b"
+      - "^uv\\s+run\\s+(pytest|ruff|mypy|black|flake8)\\b"
+      # cargo — local subcommands (excludes publish, install)
+      - "^cargo\\s+(build|test|check|clippy|fmt|doc|add|remove|update)\\b"
+      # go — local subcommands (excludes run, install, get)
+      - "^go\\s+(build|test|vet|fmt|mod|generate)\\b"
+      # make — common safe targets only (excludes deploy, release, push)
+      - "^make\\s+(test|check|lint|build|clean|format|fmt|all|dev|install)\\b"
+    action: allow
+    description: "Package managers restricted to safe subcommands"

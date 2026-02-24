@@ -24,6 +24,9 @@ INTERACTION_REQUESTED = "interaction.requested"
 INTERACTION_RESOLVED = "interaction.resolved"
 MESSAGE_QUEUED = "message.queued"
 COMMAND_TEST = "command.test"
+TEST_STARTED = "test.started"
+TEST_COMPLETED = "test.completed"
+EXECUTION_INTERRUPTED = "execution.interrupted"
 
 
 class Event(BaseModel):

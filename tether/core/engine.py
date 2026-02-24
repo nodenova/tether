@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -14,6 +15,7 @@ from tether.core.events import (
     COMMAND_TEST,
     ENGINE_STARTED,
     ENGINE_STOPPED,
+    EXECUTION_INTERRUPTED,
     MESSAGE_IN,
     MESSAGE_OUT,
     MESSAGE_QUEUED,
@@ -44,6 +46,7 @@ logger = structlog.get_logger()
 
 _STREAMING_CURSOR = "\u258d"
 _MAX_STREAMING_DISPLAY = 4000
+_TRANSIENT_MESSAGE_DELAY = 5.0  # seconds before auto-deleting status messages (longer than connector's 4.0s approval cleanup)
 
 
 class _ToolCallbackState:
@@ -254,6 +257,11 @@ class Engine:
         self._git_handler = git_handler
         self._executing_chats: set[str] = set()
         self._pending_messages: dict[str, list[tuple[str, str]]] = {}
+        self._pending_interrupts: dict[str, str] = {}  # chat_id -> interrupt_id
+        self._interrupt_to_chat: dict[str, str] = {}  # interrupt_id -> chat_id
+        self._interrupt_message_ids: dict[str, str] = {}  # chat_id -> msg_id
+        self._interrupted_chats: set[str] = set()
+        self._executing_sessions: dict[str, str] = {}  # chat_id -> session_id
 
         if connector:
             if self.middleware_chain and self.middleware_chain.has_middleware():
@@ -270,6 +278,7 @@ class Engine:
                 self._gatekeeper.enable_tool_auto_approve
             )
             connector.set_command_handler(self.handle_command)
+            connector.set_interrupt_resolver(self._resolve_interrupt)
             if git_handler:
                 connector.set_git_handler(self._handle_git_callback)
 
@@ -282,6 +291,25 @@ class Engine:
         await self._git_handler.handle_callback(  # type: ignore[union-attr]
             user_id, chat_id, action, payload, session
         )
+
+    async def _resolve_interrupt(self, interrupt_id: str, send_now: bool) -> bool:
+        chat_id = self._interrupt_to_chat.pop(interrupt_id, None)
+        if not chat_id:
+            return False
+
+        self._pending_interrupts.pop(chat_id, None)
+        self._interrupt_message_ids.pop(chat_id, None)
+
+        if send_now:
+            self._interrupted_chats.add(chat_id)
+            session_id = self._executing_sessions.get(chat_id)
+            if session_id:
+                await self.agent.cancel(session_id)
+            logger.info("interrupt_send_now", chat_id=chat_id)
+        else:
+            logger.info("interrupt_wait", chat_id=chat_id)
+
+        return True
 
     async def startup(self) -> None:
         if self._store:
@@ -345,11 +373,31 @@ class Engine:
                     data={"user_id": user_id, "text": text, "chat_id": chat_id},
                 )
             )
-            if self.connector:
-                await self.connector.send_message(
-                    chat_id,
-                    "Message received, will process after current task completes.",
+            if self.connector and chat_id not in self._pending_interrupts:
+                interrupt_id = uuid.uuid4().hex[:12]
+                msg_id = await self.connector.send_interrupt_prompt(
+                    chat_id, interrupt_id, text
                 )
+                if msg_id:
+                    self._pending_interrupts[chat_id] = interrupt_id
+                    self._interrupt_to_chat[interrupt_id] = chat_id
+                    self._interrupt_message_ids[chat_id] = msg_id
+                else:
+                    fallback_id = await self.connector.send_message_with_id(
+                        chat_id,
+                        "Message received, will process after current task completes.",
+                    )
+                    if fallback_id:
+                        self.connector.schedule_message_cleanup(
+                            chat_id,
+                            fallback_id,
+                            delay=_TRANSIENT_MESSAGE_DELAY,
+                        )
+                    else:
+                        await self.connector.send_message(
+                            chat_id,
+                            "Message received, will process after current task completes.",
+                        )
             return ""
 
         self._executing_chats.add(chat_id)
@@ -370,10 +418,24 @@ class Engine:
 
             return result
         except AgentError as e:
-            self._pending_messages.pop(chat_id, None)
+            if chat_id not in self._interrupted_chats:
+                self._pending_messages.pop(chat_id, None)
             return f"Error: {e}"
         finally:
             self._executing_chats.discard(chat_id)
+            self._executing_sessions.pop(chat_id, None)
+            self._interrupted_chats.discard(chat_id)
+            old_iid = self._pending_interrupts.pop(chat_id, None)
+            if old_iid:
+                self._interrupt_to_chat.pop(old_iid, None)
+                mid = self._interrupt_message_ids.pop(chat_id, None)
+                if mid and self.connector:
+                    await self.connector.edit_message(
+                        chat_id, mid, "\u2713 Task completed."
+                    )
+                    self.connector.schedule_message_cleanup(
+                        chat_id, mid, delay=_TRANSIENT_MESSAGE_DELAY
+                    )
 
     @staticmethod
     def _combine_queued_messages(
@@ -409,6 +471,7 @@ class Engine:
         session = await self.session_manager.get_or_create(
             user_id, chat_id, self._default_directory
         )
+        self._executing_sessions[chat_id] = session.session_id
 
         responder = None
         on_text_chunk = None
@@ -438,6 +501,31 @@ class Engine:
                 claude_session_id=response.session_id,
                 cost=response.cost,
             )
+
+            if chat_id in self._interrupted_chats:
+                self._interrupted_chats.discard(chat_id)
+                if responder:
+                    await responder.deactivate()
+                if self.connector:
+                    int_msg_id = await self.connector.send_message_with_id(
+                        chat_id, "\u26a1 Task interrupted."
+                    )
+                    if int_msg_id:
+                        self.connector.schedule_message_cleanup(
+                            chat_id, int_msg_id, delay=_TRANSIENT_MESSAGE_DELAY
+                        )
+                    else:
+                        await self.connector.send_message(
+                            chat_id, "\u26a1 Task interrupted."
+                        )
+                logger.info("execution_interrupted", chat_id=chat_id)
+                await self.event_bus.emit(
+                    Event(
+                        name=EXECUTION_INTERRUPTED,
+                        data={"chat_id": chat_id, "user_id": user_id},
+                    )
+                )
+                return ""
 
             duration_ms = round((time.monotonic() - start) * 1000)
             await self._log_message(
@@ -551,6 +639,11 @@ class Engine:
             return response.content
 
         except AgentError as e:
+            if chat_id in self._interrupted_chats:
+                self._interrupted_chats.discard(chat_id)
+                if responder:
+                    await responder.deactivate()
+                return ""
             duration_ms = round((time.monotonic() - start) * 1000)
             logger.error(
                 "request_failed",
@@ -632,7 +725,6 @@ class Engine:
         if command == "plan":
             old_mode = session.mode
             session.mode = "plan"
-            session.claude_session_id = None
             self._gatekeeper.disable_auto_approve(chat_id)
             await self.session_manager.save(session)
             logger.info(
@@ -736,7 +828,7 @@ class Engine:
         if not args:
             lines = []
             for name, path in self._dir_names.items():
-                marker = " (active)" if str(path) == session.working_directory else ""
+                marker = " ✅" if str(path) == session.working_directory else ""
                 lines.append(f"  {name} → {path}{marker}")
             return "Directories:\n" + "\n".join(lines)
 

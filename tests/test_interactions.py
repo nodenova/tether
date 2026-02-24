@@ -62,6 +62,7 @@ class TestQuestionHandling:
 
         assert result.behavior == "allow"
         assert result.updated_input["answers"]["Project name?"] == "my-cool-project"
+        assert "chat1" in mock_connector.cleared_question_chats
 
     @pytest.mark.asyncio
     async def test_timeout_denies(self, mock_connector, config):

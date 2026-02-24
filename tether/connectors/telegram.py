@@ -4,16 +4,27 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable, Coroutine
+from datetime import timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 import structlog
-from telegram import (CallbackQuery, InlineKeyboardButton,
-                      InlineKeyboardMarkup, Message, Update)
+from telegram import (
+    CallbackQuery,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Message,
+    Update,
+)
 from telegram.constants import ChatAction
 from telegram.error import NetworkError, RetryAfter
-from telegram.ext import (Application, CallbackQueryHandler, CommandHandler,
-                          MessageHandler, filters)
+from telegram.ext import (
+    Application,
+    CallbackQueryHandler,
+    CommandHandler,
+    MessageHandler,
+    filters,
+)
 
 from tether.connectors.base import BaseConnector, InlineButton
 from tether.exceptions import ConnectorError
@@ -30,6 +41,7 @@ _INTERACTION_CLEANUP_DELAY = (
     4.0  # seconds before deleting resolved interaction messages
 )
 _GIT_PREFIX = "git:"
+_INTERRUPT_PREFIX = "interrupt:"
 
 _STARTUP_MAX_RETRIES = 5
 _STARTUP_BASE_DELAY = 2.0
@@ -57,7 +69,12 @@ async def _retry_on_network_error[T](
         try:
             return await factory()
         except RetryAfter as exc:
-            delay = float(exc.retry_after)
+            retry_after = exc.retry_after
+            delay = (
+                retry_after.total_seconds()
+                if isinstance(retry_after, timedelta)
+                else float(retry_after)
+            )
             last_exc = exc
             logger.warning(
                 "telegram_retry_after",
@@ -147,7 +164,7 @@ class TelegramConnector(BaseConnector):
                 is_last = i == len(chunks) - 1
                 rm = markup if is_last else None
                 await _retry_on_network_error(
-                    lambda _c=chunk, _rm=rm: bot.send_message(
+                    lambda _c=chunk, _rm=rm: bot.send_message(  # type: ignore[misc]
                         chat_id=int(chat_id), text=_c, reply_markup=_rm
                     ),
                     max_retries=_SEND_MAX_RETRIES,
@@ -298,16 +315,51 @@ class TelegramConnector(BaseConnector):
         for msg_id in plan_ids:
             await self.delete_message(chat_id, msg_id)
 
+    async def clear_question_message(self, chat_id: str) -> None:
+        msg_id = self._question_message_ids.pop(chat_id, None)
+        if msg_id:
+            await self.delete_message(chat_id, msg_id)
+
+    async def send_interrupt_prompt(
+        self,
+        chat_id: str,
+        interrupt_id: str,
+        message_preview: str,
+    ) -> str | None:
+        preview = (
+            message_preview[:200] if len(message_preview) > 200 else message_preview
+        )
+        text = (
+            f'\U0001f4ac New message received:\n"{preview}"\n\nInterrupt current task?'
+        )
+        buttons = [
+            [
+                InlineButton(
+                    text="Send Now \U0001f4e9",
+                    callback_data=f"{_INTERRUPT_PREFIX}send:{interrupt_id}",
+                ),
+                InlineButton(
+                    text="Wait \u23f3",
+                    callback_data=f"{_INTERRUPT_PREFIX}wait:{interrupt_id}",
+                ),
+            ]
+        ]
+        return await self._send_message_with_id_and_buttons(chat_id, text, buttons)
+
     async def _delayed_delete(
         self, chat_id: str, message_id: str, delay: float
     ) -> None:
         await asyncio.sleep(delay)
         await self.delete_message(chat_id, message_id)
 
-    def _schedule_cleanup(self, chat_id: str, message_id: str) -> None:
-        task = asyncio.create_task(
-            self._delayed_delete(chat_id, message_id, _INTERACTION_CLEANUP_DELAY)
-        )
+    def schedule_message_cleanup(
+        self,
+        chat_id: str,
+        message_id: str,
+        *,
+        delay: float = _INTERACTION_CLEANUP_DELAY,
+    ) -> None:
+        task = asyncio.create_task(self._delayed_delete(chat_id, message_id, delay))
         self._cleanup_tasks.add(task)
         task.add_done_callback(self._cleanup_tasks.discard)
 
@@ -537,6 +589,10 @@ class TelegramConnector(BaseConnector):
 
         data = query.data or ""
 
+        if data.startswith(_INTERRUPT_PREFIX):
+            await self._handle_interrupt_callback(query, data)
+            return
+
         if data.startswith(_GIT_PREFIX):
             await self._handle_git_callback(query, data)
             return
@@ -611,7 +667,7 @@ class TelegramConnector(BaseConnector):
             if resolved and isinstance(query.message, Message):
                 chat_id = str(query.message.chat_id)
                 msg_id = str(query.message.message_id)
-                self._schedule_cleanup(chat_id, msg_id)
+                self.schedule_message_cleanup(chat_id, msg_id)
         except Exception:
             logger.exception("telegram_edit_approval_message_failed")
 
@@ -664,6 +720,51 @@ class TelegramConnector(BaseConnector):
             msg_id = self._question_message_ids.pop(chat_id, None)
             if msg_id:
                 await self.delete_message(chat_id, msg_id)
+
+    async def _handle_interrupt_callback(self, query: CallbackQuery, data: str) -> None:
+        suffix = data[len(_INTERRUPT_PREFIX) :]
+        if ":" not in suffix:
+            return
+
+        decision, interrupt_id = suffix.split(":", 1)
+        if not interrupt_id:
+            return
+
+        send_now = decision == "send"
+        logger.info(
+            "telegram_interrupt_resolved",
+            interrupt_id=interrupt_id,
+            send_now=send_now,
+        )
+
+        resolved = False
+        if self._interrupt_resolver:
+            try:
+                resolved = await self._interrupt_resolver(interrupt_id, send_now)
+            except Exception:
+                logger.exception(
+                    "telegram_interrupt_resolver_error",
+                    interrupt_id=interrupt_id,
+                )
+
+        if resolved:
+            status = (
+                "\u26a1 Interrupting current task..."
+                if send_now
+                else "Queued \u2713 \u2014 will process after current task."
+            )
+        else:
+            status = "Expired (task already completed)"
+
+        try:
+            raw = f"{query.message.text}\n\n{status}"  # type: ignore[union-attr]
+            await query.edit_message_text(raw)
+            if resolved and isinstance(query.message, Message):
+                chat_id = str(query.message.chat_id)
+                msg_id = str(query.message.message_id)
+                self.schedule_message_cleanup(chat_id, msg_id)
+        except Exception:
+            logger.exception("telegram_edit_interrupt_message_failed")
 
     async def _handle_git_callback(self, query: CallbackQuery, data: str) -> None:
         """Route git inline button callbacks to the registered git handler."""

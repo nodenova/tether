@@ -281,6 +281,7 @@ class InteractionCoordinator:
             interaction_id=interaction_id,
             text_length=len(text),
         )
+        await self.connector.clear_question_message(chat_id)
         pending.answer = text
         pending.event.set()
         return True

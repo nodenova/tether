@@ -34,6 +34,9 @@ class BaseConnector(ABC):
         self._git_handler: (
             Callable[[str, str, str, str], Coroutine[Any, Any, None]] | None
         ) = None
+        self._interrupt_resolver: (
+            Callable[[str, bool], Coroutine[Any, Any, bool]] | None
+        ) = None
 
     @abstractmethod
     async def start(self) -> None: ...
@@ -81,6 +84,15 @@ class BaseConnector(ABC):
     ) -> None:
         """Delete a message by ID. Default: no-op."""
 
+    def schedule_message_cleanup(  # noqa: B027
+        self,
+        chat_id: str,
+        message_id: str,
+        *,
+        delay: float = 4.0,
+    ) -> None:
+        """Schedule a message for deletion after a delay. Default: no-op."""
+
     def set_message_handler(
         self,
         handler: Callable[[str, str, str], Coroutine[Any, Any, str]],
@@ -123,6 +135,13 @@ class BaseConnector(ABC):
         """Register handler(user_id, chat_id, action, payload) for /git callbacks."""
         self._git_handler = handler
 
+    def set_interrupt_resolver(
+        self,
+        resolver: Callable[[str, bool], Coroutine[Any, Any, bool]],
+    ) -> None:
+        """Register resolver(interrupt_id, send_now) for interrupt callbacks."""
+        self._interrupt_resolver = resolver
+
     async def send_question(  # noqa: B027
         self,
         chat_id: str,
@@ -164,6 +183,18 @@ class BaseConnector(ABC):
 
     async def clear_plan_messages(self, chat_id: str) -> None:  # noqa: B027
         """Delete tracked plan messages for a chat. Default: no-op."""
+
+    async def clear_question_message(self, chat_id: str) -> None:  # noqa: B027
+        """Delete tracked question message for a chat. Default: no-op."""
+
+    async def send_interrupt_prompt(
+        self,
+        chat_id: str,  # noqa: ARG002
+        interrupt_id: str,  # noqa: ARG002
+        message_preview: str,  # noqa: ARG002
+    ) -> str | None:
+        """Send interrupt prompt with Send Now / Wait buttons. Returns message ID."""
+        return None
 
     async def send_plan_review(  # noqa: B027
         self,

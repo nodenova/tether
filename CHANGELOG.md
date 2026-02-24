@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.3.0] - 2026-02-24
+- **added**: Message interrupt during agent execution — inline buttons let the user interrupt or wait instead of silent queuing
+- **fixed**: Question message with stale buttons now deleted from Telegram when user replies with text
+- **added**: Enhanced `/test` command with structured args (`--url`, `--framework`, `--server`, `--dir`, `--no-e2e`, `--no-unit`, `--no-backend`)
+- **added**: 9-phase agent-driven test workflow (discovery → server startup → smoke test → unit → backend → E2E → error analysis → healing → report)
+- **added**: `dev-tools.yaml` policy overlay — auto-allows common dev commands (package managers, linters, test runners) via `TETHER_POLICY_FILES`
+- **added**: Policy overlay documentation in `docs/policies.md` — covers loading order, creating custom overlays, security considerations
+- **added**: Auto-delete transient messages — interrupt prompts, "Task interrupted", "Task completed", and fallback ack messages are scheduled for deletion after a short delay
+- **changed**: `dev-tools.yaml` now auto-loaded alongside `default.yaml` by default
+
 ## [0.2.1] - 2026-02-23
 - **added**: Network resilience for Telegram connector — exponential-backoff retries on `NetworkError`/`TimedOut` for startup and send operations
 - **fixed**: Streaming freezes on long responses — overflow now finalizes current message and chains into a new one instead of silently truncating at 4000 chars

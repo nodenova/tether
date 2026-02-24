@@ -786,7 +786,9 @@ class TestDelayedDelete:
         connector._app = mock_app
 
         with patch.object(
-            connector, "_schedule_cleanup", wraps=connector._schedule_cleanup
+            connector,
+            "schedule_message_cleanup",
+            wraps=connector.schedule_message_cleanup,
         ) as mock_sched:
             await connector._on_callback_query(update, MagicMock())
 
@@ -1435,3 +1437,125 @@ class TestSendMessageRetry:
 
         assert result == "42"
         assert mock_app.bot.send_message.await_count == 2
+
+
+class TestInterruptPrompt:
+    @pytest.mark.asyncio
+    async def test_send_interrupt_prompt_sends_buttons(self, connector):
+        mock_app = _make_mock_app()
+        connector._app = mock_app
+        mock_msg = MagicMock()
+        mock_msg.message_id = 99
+        mock_app.bot.send_message = AsyncMock(return_value=mock_msg)
+
+        msg_id = await connector.send_interrupt_prompt("123", "int-abc", "Fix the bug")
+
+        assert msg_id == "99"
+        call_args = mock_app.bot.send_message.call_args
+        text = call_args.kwargs.get("text", call_args[1].get("text", ""))
+        assert "Fix the bug" in text
+        assert "Interrupt current task?" in text
+        markup = call_args.kwargs.get("reply_markup", call_args[1].get("reply_markup"))
+        assert markup is not None
+
+        buttons = markup.inline_keyboard
+        assert len(buttons) == 1
+        row = buttons[0]
+        assert len(row) == 2
+        assert "Send Now" in row[0].text
+        assert "Wait" in row[1].text
+        assert "interrupt:send:int-abc" in row[0].callback_data
+        assert "interrupt:wait:int-abc" in row[1].callback_data
+
+    @pytest.mark.asyncio
+    async def test_interrupt_callback_send_now(self, connector):
+        resolver = AsyncMock(return_value=True)
+        connector.set_interrupt_resolver(resolver)
+
+        update = _make_callback_update("interrupt:send:int-xyz")
+        await connector._on_callback_query(update, MagicMock())
+
+        resolver.assert_awaited_once_with("int-xyz", True)
+        update.callback_query.edit_message_text.assert_awaited_once()
+        edited = update.callback_query.edit_message_text.await_args[0][0]
+        assert "Interrupting" in edited
+
+    @pytest.mark.asyncio
+    async def test_interrupt_callback_wait(self, connector):
+        resolver = AsyncMock(return_value=True)
+        connector.set_interrupt_resolver(resolver)
+
+        update = _make_callback_update("interrupt:wait:int-xyz")
+        await connector._on_callback_query(update, MagicMock())
+
+        resolver.assert_awaited_once_with("int-xyz", False)
+        update.callback_query.edit_message_text.assert_awaited_once()
+        edited = update.callback_query.edit_message_text.await_args[0][0]
+        assert "Queued" in edited
+
+    @pytest.mark.asyncio
+    async def test_interrupt_callback_expired(self, connector):
+        resolver = AsyncMock(return_value=False)
+        connector.set_interrupt_resolver(resolver)
+
+        update = _make_callback_update("interrupt:send:int-old")
+        await connector._on_callback_query(update, MagicMock())
+
+        resolver.assert_awaited_once_with("int-old", True)
+        update.callback_query.edit_message_text.assert_awaited_once()
+        edited = update.callback_query.edit_message_text.await_args[0][0]
+        assert "Expired" in edited
+
+    @pytest.mark.asyncio
+    async def test_interrupt_callback_send_now_schedules_cleanup(self, connector):
+        resolver = AsyncMock(return_value=True)
+        connector.set_interrupt_resolver(resolver)
+
+        update = _make_callback_update("interrupt:send:int-cleanup")
+        update.callback_query.message.chat_id = 555
+        update.callback_query.message.message_id = 42
+
+        with patch.object(connector, "schedule_message_cleanup") as mock_cleanup:
+            await connector._on_callback_query(update, MagicMock())
+            mock_cleanup.assert_called_once_with("555", "42")
+
+    @pytest.mark.asyncio
+    async def test_interrupt_callback_wait_schedules_cleanup(self, connector):
+        resolver = AsyncMock(return_value=True)
+        connector.set_interrupt_resolver(resolver)
+
+        update = _make_callback_update("interrupt:wait:int-cleanup2")
+        update.callback_query.message.chat_id = 555
+        update.callback_query.message.message_id = 43
+
+        with patch.object(connector, "schedule_message_cleanup") as mock_cleanup:
+            await connector._on_callback_query(update, MagicMock())
+            mock_cleanup.assert_called_once_with("555", "43")
+
+    @pytest.mark.asyncio
+    async def test_interrupt_callback_expired_no_cleanup(self, connector):
+        resolver = AsyncMock(return_value=False)
+        connector.set_interrupt_resolver(resolver)
+
+        update = _make_callback_update("interrupt:send:int-expired")
+
+        with patch.object(connector, "schedule_message_cleanup") as mock_cleanup:
+            await connector._on_callback_query(update, MagicMock())
+            mock_cleanup.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_interrupt_callback_edit_failure_does_not_crash(self, connector):
+        """If edit_message_text fails, the error is swallowed (logged, not raised)."""
+        resolver = AsyncMock(return_value=True)
+        connector.set_interrupt_resolver(resolver)
+
+        update = _make_callback_update("interrupt:send:int-edit-fail")
+        update.callback_query.edit_message_text = AsyncMock(
+            side_effect=RuntimeError("edit failed")
+        )
+
+        # Should not raise
+        await connector._on_callback_query(update, MagicMock())
+
+        # Resolver was still called regardless of edit failure
+        resolver.assert_awaited_once_with("int-edit-fail", True)

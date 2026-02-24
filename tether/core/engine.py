@@ -81,13 +81,16 @@ class _StreamingResponder:
         self._active = True
         self._has_activity: bool = False
         self._tool_counts: dict[str, int] = {}
+        self._display_offset: int = 0
 
     @property
     def buffer(self) -> str:
         return self._buffer
 
     def _build_display(self) -> str:
-        text = self._buffer[:_MAX_STREAMING_DISPLAY]
+        text = self._buffer[
+            self._display_offset : self._display_offset + _MAX_STREAMING_DISPLAY
+        ]
         return text + _STREAMING_CURSOR
 
     def _build_tools_summary(self) -> str:
@@ -107,6 +110,25 @@ class _StreamingResponder:
             self._has_activity = False
 
         self._buffer += text
+
+        # Overflow: finalize current message and start a new one
+        while (
+            self._message_id is not None
+            and len(self._buffer) > self._display_offset + _MAX_STREAMING_DISPLAY
+        ):
+            window_end = self._display_offset + _MAX_STREAMING_DISPLAY
+            committed = self._buffer[self._display_offset : window_end]
+            await self._connector.edit_message(
+                self._chat_id, self._message_id, committed
+            )
+            self._display_offset = window_end
+            display = self._build_display()
+            msg_id = await self._connector.send_message_with_id(self._chat_id, display)
+            if msg_id is None:
+                self._active = False
+                return
+            self._message_id = msg_id
+            self._last_edit = time.monotonic()
 
         if self._message_id is None:
             display = self._build_display()
@@ -145,6 +167,7 @@ class _StreamingResponder:
         self._has_activity = False
         self._tool_counts = {}
         self._last_edit = 0.0
+        self._display_offset = 0
 
     async def deactivate(self) -> None:
         """Suppress all further streaming and clear any visible activity."""
@@ -155,20 +178,24 @@ class _StreamingResponder:
         if not self._active or self._message_id is None:
             return False
 
+        tail = (
+            self._buffer[self._display_offset :]
+            if self._display_offset > 0
+            else final_text
+        )
+
         summary = self._build_tools_summary()
         if summary:
-            final_text = final_text + "\n\n" + summary
+            tail = tail + "\n\n" + summary
 
-        if len(final_text) <= _MAX_STREAMING_DISPLAY:
-            await self._connector.edit_message(
-                self._chat_id, self._message_id, final_text
-            )
+        if len(tail) <= _MAX_STREAMING_DISPLAY:
+            await self._connector.edit_message(self._chat_id, self._message_id, tail)
         else:
-            first_chunk = final_text[:_MAX_STREAMING_DISPLAY]
+            first_chunk = tail[:_MAX_STREAMING_DISPLAY]
             await self._connector.edit_message(
                 self._chat_id, self._message_id, first_chunk
             )
-            remainder = final_text[_MAX_STREAMING_DISPLAY:]
+            remainder = tail[_MAX_STREAMING_DISPLAY:]
             await self._connector.send_message(self._chat_id, remainder)
 
         return True

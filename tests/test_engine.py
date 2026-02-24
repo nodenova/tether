@@ -4606,6 +4606,8 @@ class TestResolvePlanContentFallbacks:
         assert result == "# Cached Plan"
 
     def test_response_fallback_when_neither_exists(self, config, audit_logger):
+        from unittest.mock import patch
+
         from tether.core.engine import _ToolCallbackState
 
         eng = Engine(
@@ -4619,7 +4621,8 @@ class TestResolvePlanContentFallbacks:
         state = _ToolCallbackState()
         # No plan_file_path, no cached content
 
-        result = eng._resolve_plan_content(state, "the agent response content")
+        with patch.object(eng, "_discover_plan_file", return_value=None):
+            result = eng._resolve_plan_content(state, "the agent response content")
         assert result == "the agent response content"
 
     def test_disk_error_falls_back_to_cached_write(

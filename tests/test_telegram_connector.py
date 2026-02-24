@@ -4,14 +4,17 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from telegram import Message
+from telegram.error import InvalidToken, NetworkError, RetryAfter, TimedOut
 
 from tether.connectors.base import InlineButton
 from tether.connectors.telegram import (
     _MAX_MESSAGE_LENGTH,
     TelegramConnector,
+    _retry_on_network_error,
     _split_text,
     _to_telegram_markup,
 )
+from tether.exceptions import ConnectorError
 
 # --- Pure function tests ---
 
@@ -1201,3 +1204,234 @@ class TestSendPlanReviewLongContent:
 
         assert "123" in connector._plan_message_ids
         assert len(connector._plan_message_ids["123"]) >= 2  # plan msg + review msg
+
+
+# --- Retry helper tests ---
+
+
+class TestRetryOnNetworkError:
+    @pytest.mark.asyncio
+    async def test_succeeds_first_attempt(self):
+        factory = AsyncMock(return_value="ok")
+        result = await _retry_on_network_error(
+            factory,
+            max_retries=3,
+            base_delay=1.0,
+            max_delay=10.0,
+            operation="test_op",
+        )
+        assert result == "ok"
+        factory.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_retries_on_timed_out_then_succeeds(self):
+        factory = AsyncMock(side_effect=[TimedOut(), "ok"])
+        with patch("tether.connectors.telegram.asyncio.sleep") as mock_sleep:
+            result = await _retry_on_network_error(
+                factory,
+                max_retries=3,
+                base_delay=1.0,
+                max_delay=10.0,
+                operation="test_op",
+            )
+        assert result == "ok"
+        assert factory.await_count == 2
+        mock_sleep.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_retries_on_network_error_then_succeeds(self):
+        factory = AsyncMock(side_effect=[NetworkError("conn reset"), "ok"])
+        with patch("tether.connectors.telegram.asyncio.sleep"):
+            result = await _retry_on_network_error(
+                factory,
+                max_retries=3,
+                base_delay=1.0,
+                max_delay=10.0,
+                operation="test_op",
+            )
+        assert result == "ok"
+
+    @pytest.mark.asyncio
+    async def test_exhausts_retries_raises_connector_error(self):
+        factory = AsyncMock(side_effect=NetworkError("down"))
+        with (
+            patch("tether.connectors.telegram.asyncio.sleep"),
+            pytest.raises(ConnectorError, match="test_op failed after 3 retries"),
+        ):
+            await _retry_on_network_error(
+                factory,
+                max_retries=3,
+                base_delay=1.0,
+                max_delay=10.0,
+                operation="test_op",
+            )
+        assert factory.await_count == 3
+
+    @pytest.mark.asyncio
+    async def test_non_network_error_propagates_immediately(self):
+        factory = AsyncMock(side_effect=InvalidToken("bad token"))
+        with pytest.raises(InvalidToken):
+            await _retry_on_network_error(
+                factory,
+                max_retries=3,
+                base_delay=1.0,
+                max_delay=10.0,
+                operation="test_op",
+            )
+        factory.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_exponential_backoff_delays(self):
+        factory = AsyncMock(
+            side_effect=[NetworkError("1"), NetworkError("2"), NetworkError("3")]
+        )
+        with (
+            patch("tether.connectors.telegram.asyncio.sleep") as mock_sleep,
+            pytest.raises(ConnectorError),
+        ):
+            await _retry_on_network_error(
+                factory,
+                max_retries=3,
+                base_delay=2.0,
+                max_delay=60.0,
+                operation="test_op",
+            )
+        delays = [call.args[0] for call in mock_sleep.await_args_list]
+        assert delays == [2.0, 4.0, 8.0]
+
+    @pytest.mark.asyncio
+    async def test_delay_capped_at_max(self):
+        factory = AsyncMock(
+            side_effect=[NetworkError("1"), NetworkError("2"), NetworkError("3")]
+        )
+        with (
+            patch("tether.connectors.telegram.asyncio.sleep") as mock_sleep,
+            pytest.raises(ConnectorError),
+        ):
+            await _retry_on_network_error(
+                factory,
+                max_retries=3,
+                base_delay=5.0,
+                max_delay=8.0,
+                operation="test_op",
+            )
+        delays = [call.args[0] for call in mock_sleep.await_args_list]
+        assert delays == [5.0, 8.0, 8.0]
+
+    @pytest.mark.asyncio
+    async def test_retry_after_uses_server_delay(self):
+        factory = AsyncMock(side_effect=[RetryAfter(42), "ok"])
+        with patch("tether.connectors.telegram.asyncio.sleep") as mock_sleep:
+            result = await _retry_on_network_error(
+                factory,
+                max_retries=3,
+                base_delay=1.0,
+                max_delay=10.0,
+                operation="test_op",
+            )
+        assert result == "ok"
+        mock_sleep.assert_awaited_once_with(42.0)
+
+
+class TestStartRetry:
+    @pytest.mark.asyncio
+    async def test_start_retries_initialize_on_timeout(self, connector):
+        mock_app = _make_mock_app()
+        mock_app.add_error_handler = MagicMock()
+        mock_app.initialize = AsyncMock(side_effect=[TimedOut(), None])
+        mock_builder = MagicMock()
+        mock_builder.token.return_value = mock_builder
+        mock_builder.concurrent_updates.return_value = mock_builder
+        mock_builder.build.return_value = mock_app
+
+        with (
+            patch(
+                "tether.connectors.telegram.Application.builder",
+                return_value=mock_builder,
+            ),
+            patch("tether.connectors.telegram.asyncio.sleep"),
+        ):
+            await connector.start()
+
+        assert mock_app.initialize.await_count == 2
+        mock_app.start.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_start_raises_connector_error_after_exhausted(self, connector):
+        mock_app = _make_mock_app()
+        mock_app.add_error_handler = MagicMock()
+        mock_app.initialize = AsyncMock(side_effect=TimedOut())
+        mock_builder = MagicMock()
+        mock_builder.token.return_value = mock_builder
+        mock_builder.concurrent_updates.return_value = mock_builder
+        mock_builder.build.return_value = mock_app
+
+        with (
+            patch(
+                "tether.connectors.telegram.Application.builder",
+                return_value=mock_builder,
+            ),
+            patch("tether.connectors.telegram.asyncio.sleep"),
+            pytest.raises(ConnectorError),
+        ):
+            await connector.start()
+
+    @pytest.mark.asyncio
+    async def test_start_does_not_retry_invalid_token(self, connector):
+        mock_app = _make_mock_app()
+        mock_app.add_error_handler = MagicMock()
+        mock_app.initialize = AsyncMock(side_effect=InvalidToken("bad"))
+        mock_builder = MagicMock()
+        mock_builder.token.return_value = mock_builder
+        mock_builder.concurrent_updates.return_value = mock_builder
+        mock_builder.build.return_value = mock_app
+
+        with (
+            patch(
+                "tether.connectors.telegram.Application.builder",
+                return_value=mock_builder,
+            ),
+            pytest.raises(InvalidToken),
+        ):
+            await connector.start()
+
+        mock_app.initialize.assert_awaited_once()
+
+
+class TestSendMessageRetry:
+    @pytest.mark.asyncio
+    async def test_send_message_retries_on_network_error(self, connector):
+        mock_app = _make_mock_app()
+        connector._app = mock_app
+        mock_app.bot.send_message = AsyncMock(side_effect=[NetworkError("blip"), None])
+
+        with patch("tether.connectors.telegram.asyncio.sleep"):
+            await connector.send_message("123", "hello")
+
+        assert mock_app.bot.send_message.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_send_message_exhausted_retries_caught(self, connector):
+        mock_app = _make_mock_app()
+        connector._app = mock_app
+        mock_app.bot.send_message = AsyncMock(side_effect=NetworkError("down"))
+
+        with patch("tether.connectors.telegram.asyncio.sleep"):
+            await connector.send_message("123", "hello")
+        # ConnectorError caught by the outer except — no raise
+
+    @pytest.mark.asyncio
+    async def test_send_message_with_id_retries(self, connector):
+        mock_app = _make_mock_app()
+        connector._app = mock_app
+        mock_msg = MagicMock()
+        mock_msg.message_id = 42
+        mock_app.bot.send_message = AsyncMock(
+            side_effect=[NetworkError("blip"), mock_msg]
+        )
+
+        with patch("tether.connectors.telegram.asyncio.sleep"):
+            result = await connector.send_message_with_id("123", "hello")
+
+        assert result == "42"
+        assert mock_app.bot.send_message.await_count == 2

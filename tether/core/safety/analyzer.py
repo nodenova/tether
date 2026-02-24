@@ -48,6 +48,24 @@ _CREDENTIAL_PATTERNS = [
 ]
 
 
+_CD_PREFIX_RE = re.compile(r"^cd(\s+[^$`|<>&;]*)?\s*(&&|;|\|\|)\s*")
+
+
+def strip_cd_prefix(command: str) -> str:
+    """Strip leading ``cd <path> &&`` segments from a shell command.
+
+    Loops to handle chained cds: ``cd /a && cd /b && ls`` → ``ls``.
+    Paths containing dangerous characters (``$`|<>&;``) are NOT stripped
+    so that ``cd$(rm -rf /) && ls`` passes through unchanged.
+    A bare ``cd /path`` with no chain operator is returned as-is.
+    """
+    prev = None
+    while command != prev:
+        prev = command
+        command = _CD_PREFIX_RE.sub("", command)
+    return command
+
+
 class CommandAnalyzer:
     @staticmethod
     def analyze_bash(command: str) -> CommandAnalysis:

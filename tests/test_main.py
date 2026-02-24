@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from tether.exceptions import ConnectorError
 from tether.main import main, run
 
 
@@ -154,3 +155,53 @@ class TestTelegramMode:
         mock_connector.stop.assert_awaited_once()
         mock_engine.startup.assert_awaited_once()
         mock_engine.shutdown.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_connector_start_failure_calls_engine_shutdown(self, mock_engine):
+        cfg = MagicMock()
+        cfg.approved_directories = ["/tmp"]
+        cfg.telegram_bot_token = "fake:token"
+
+        mock_connector = AsyncMock()
+        mock_connector.start.side_effect = ConnectorError("network down")
+
+        with (
+            patch("tether.main.TetherConfig", return_value=cfg),
+            patch("tether.main.build_engine", return_value=mock_engine),
+            patch(
+                "tether.connectors.telegram.TelegramConnector",
+                return_value=mock_connector,
+            ),
+        ):
+            with pytest.raises(SystemExit) as exc_info:
+                await main()
+            assert exc_info.value.code == 1
+
+        mock_engine.startup.assert_awaited_once()
+        mock_engine.shutdown.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_connector_error_clean_exit(self, mock_engine, capsys):
+        cfg = MagicMock()
+        cfg.approved_directories = ["/tmp"]
+        cfg.telegram_bot_token = "fake:token"
+
+        mock_connector = AsyncMock()
+        mock_connector.start.side_effect = ConnectorError(
+            "initialize failed after 5 retries"
+        )
+
+        with (
+            patch("tether.main.TetherConfig", return_value=cfg),
+            patch("tether.main.build_engine", return_value=mock_engine),
+            patch(
+                "tether.connectors.telegram.TelegramConnector",
+                return_value=mock_connector,
+            ),
+        ):
+            with pytest.raises(SystemExit) as exc_info:
+                await main()
+            assert exc_info.value.code == 1
+
+        captured = capsys.readouterr()
+        assert "Connector failed" in captured.err

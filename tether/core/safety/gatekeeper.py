@@ -8,6 +8,7 @@ import structlog
 from claude_agent_sdk.types import PermissionResultAllow, PermissionResultDeny
 
 from tether.core.events import TOOL_ALLOWED, TOOL_DENIED, TOOL_GATED, Event
+from tether.core.safety.analyzer import strip_cd_prefix
 from tether.core.safety.policy import PolicyDecision
 
 if TYPE_CHECKING:
@@ -20,17 +21,22 @@ if TYPE_CHECKING:
 logger = structlog.get_logger()
 
 
+_SKIP_CHARS = frozenset("-/.~$")
+
+
 def _approval_key(tool_name: str, tool_input: dict[str, Any]) -> str:
     """Build a scoped key for auto-approve matching.
 
-    For Bash: 'Bash::uv run', 'Bash::git', 'Bash::docker compose', etc.
-    Uses up to two words if the second word looks like a subcommand.
+    For Bash: 'Bash::uv run pytest', 'Bash::git push origin', etc.
+    Uses up to three words, skipping tokens that start with flag/path/variable
+    characters (``-``, ``/``, ``.``, ``~``, ``$``).
+    Strips leading ``cd <path> &&`` prefixes so the real command is keyed.
     Skips leading inline env var assignments (VAR=value).
     For others: just the tool name ('Write', 'Edit', etc.)
     """
     if tool_name != "Bash":
         return tool_name
-    command = tool_input.get("command", "").strip()
+    command = strip_cd_prefix(tool_input.get("command", "").strip())
     tokens = command.split()
     if not tokens:
         return "Bash"
@@ -45,8 +51,10 @@ def _approval_key(tool_name: str, tool_input: dict[str, Any]) -> str:
     if idx >= len(tokens):
         return "Bash"
     prefix = tokens[idx]
-    if idx + 1 < len(tokens) and tokens[idx + 1][:1] not in ("-", "/", ".", "~", "$"):
+    if idx + 1 < len(tokens) and tokens[idx + 1][:1] not in _SKIP_CHARS:
         prefix = f"{tokens[idx]} {tokens[idx + 1]}"
+        if idx + 2 < len(tokens) and tokens[idx + 2][:1] not in _SKIP_CHARS:
+            prefix = f"{tokens[idx]} {tokens[idx + 1]} {tokens[idx + 2]}"
     return f"Bash::{prefix}"
 
 
@@ -204,6 +212,28 @@ class ToolGatekeeper:
         )
         return PermissionResultAllow(updated_input=tool_input)
 
+    def _matches_auto_approved(self, chat_id: str, key: str) -> bool:
+        """Check if *key* is covered by any stored auto-approve entry.
+
+        Exact match first (covers non-Bash tools and identical keys).
+        For Bash keys, a stored broader key covers a narrower current key:
+        stored ``Bash::uv run`` matches current ``Bash::uv run pytest``.
+        Word-boundary check prevents ``Bash::git`` matching ``Bash::gitx``.
+        """
+        approved = self._auto_approved_tools.get(chat_id, set())
+        if key in approved:
+            return True
+        if not key.startswith("Bash::"):
+            return False
+        for stored in approved:
+            if not stored.startswith("Bash::"):
+                continue
+            if key.startswith(stored) and (
+                len(key) == len(stored) or key[len(stored)] == " "
+            ):
+                return True
+        return False
+
     async def _handle_approval(
         self,
         session_id: str,
@@ -214,7 +244,7 @@ class ToolGatekeeper:
     ) -> PermissionResultAllow | PermissionResultDeny:
         blanket = chat_id in self._auto_approved_chats
         key = _approval_key(tool_name, tool_input)
-        if blanket or key in self._auto_approved_tools.get(chat_id, set()):
+        if blanket or self._matches_auto_approved(chat_id, key):
             logger.info(
                 "tool_auto_approved",
                 session_id=session_id,

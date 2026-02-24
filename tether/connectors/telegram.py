@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable, Coroutine
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -15,6 +16,7 @@ from telegram import (
     Update,
 )
 from telegram.constants import ChatAction
+from telegram.error import NetworkError, RetryAfter
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -24,6 +26,7 @@ from telegram.ext import (
 )
 
 from tether.connectors.base import BaseConnector, InlineButton
+from tether.exceptions import ConnectorError
 
 if TYPE_CHECKING:
     from telegram.ext import ContextTypes
@@ -37,6 +40,57 @@ _INTERACTION_CLEANUP_DELAY = (
     4.0  # seconds before deleting resolved interaction messages
 )
 _GIT_PREFIX = "git:"
+
+_STARTUP_MAX_RETRIES = 5
+_STARTUP_BASE_DELAY = 2.0
+_STARTUP_MAX_DELAY = 60.0
+_SEND_MAX_RETRIES = 3
+_SEND_BASE_DELAY = 1.0
+_SEND_MAX_DELAY = 10.0
+
+
+async def _retry_on_network_error[T](
+    factory: Callable[[], Coroutine[object, object, T]],
+    *,
+    max_retries: int,
+    base_delay: float,
+    max_delay: float,
+    operation: str,
+) -> T:
+    """Retry a coroutine on transient Telegram network errors.
+
+    Catches ``NetworkError`` (includes ``TimedOut``) and ``RetryAfter``.
+    Permanent errors like ``InvalidToken`` propagate immediately.
+    """
+    last_exc: Exception | None = None
+    for attempt in range(max_retries):
+        try:
+            return await factory()
+        except RetryAfter as exc:
+            delay = float(exc.retry_after)
+            last_exc = exc
+            logger.warning(
+                "telegram_retry_after",
+                operation=operation,
+                attempt=attempt + 1,
+                max_retries=max_retries,
+                delay=delay,
+            )
+            await asyncio.sleep(delay)
+        except NetworkError as exc:
+            delay = min(base_delay * (2**attempt), max_delay)
+            last_exc = exc
+            logger.warning(
+                "telegram_network_retry",
+                operation=operation,
+                attempt=attempt + 1,
+                max_retries=max_retries,
+                delay=delay,
+                error=str(exc),
+            )
+            await asyncio.sleep(delay)
+
+    raise ConnectorError(f"{operation} failed after {max_retries} retries: {last_exc}")
 
 
 class TelegramConnector(BaseConnector):
@@ -65,7 +119,13 @@ class TelegramConnector(BaseConnector):
         )
         self._app.add_handler(CallbackQueryHandler(self._on_callback_query))
         self._app.add_error_handler(self._on_error)
-        await self._app.initialize()
+        await _retry_on_network_error(
+            self._app.initialize,
+            max_retries=_STARTUP_MAX_RETRIES,
+            base_delay=_STARTUP_BASE_DELAY,
+            max_delay=_STARTUP_MAX_DELAY,
+            operation="initialize",
+        )
         await self._app.start()
         await self._app.updater.start_polling(  # type: ignore[union-attr]
             allowed_updates=Update.ALL_TYPES,
@@ -91,13 +151,19 @@ class TelegramConnector(BaseConnector):
             return
         chunks = _split_text(text)
         markup = _to_telegram_markup(buttons) if buttons else None
+        bot = self._app.bot
         try:
             for i, chunk in enumerate(chunks):
                 is_last = i == len(chunks) - 1
-                await self._app.bot.send_message(
-                    chat_id=int(chat_id),
-                    text=chunk,
-                    reply_markup=markup if is_last else None,
+                rm = markup if is_last else None
+                await _retry_on_network_error(
+                    lambda _c=chunk, _rm=rm: bot.send_message(
+                        chat_id=int(chat_id), text=_c, reply_markup=_rm
+                    ),
+                    max_retries=_SEND_MAX_RETRIES,
+                    base_delay=_SEND_BASE_DELAY,
+                    max_delay=_SEND_MAX_DELAY,
+                    operation="send_message",
                 )
             logger.info(
                 "telegram_message_sent",
@@ -111,10 +177,15 @@ class TelegramConnector(BaseConnector):
     async def send_message_with_id(self, chat_id: str, text: str) -> str | None:
         if self._app is None:
             return None
+        bot = self._app.bot
+        truncated = text[:_MAX_MESSAGE_LENGTH]
         try:
-            msg = await self._app.bot.send_message(
-                chat_id=int(chat_id),
-                text=text[:_MAX_MESSAGE_LENGTH],
+            msg = await _retry_on_network_error(
+                lambda: bot.send_message(chat_id=int(chat_id), text=truncated),
+                max_retries=_SEND_MAX_RETRIES,
+                base_delay=_SEND_BASE_DELAY,
+                max_delay=_SEND_MAX_DELAY,
+                operation="send_message_with_id",
             )
             return str(msg.message_id)
         except Exception:
@@ -124,11 +195,19 @@ class TelegramConnector(BaseConnector):
     async def edit_message(self, chat_id: str, message_id: str, text: str) -> None:
         if self._app is None:
             return
+        bot = self._app.bot
+        truncated = text[:_MAX_MESSAGE_LENGTH]
         try:
-            await self._app.bot.edit_message_text(
-                chat_id=int(chat_id),
-                message_id=int(message_id),
-                text=text[:_MAX_MESSAGE_LENGTH],
+            await _retry_on_network_error(
+                lambda: bot.edit_message_text(
+                    chat_id=int(chat_id),
+                    message_id=int(message_id),
+                    text=truncated,
+                ),
+                max_retries=_SEND_MAX_RETRIES,
+                base_delay=_SEND_BASE_DELAY,
+                max_delay=_SEND_MAX_DELAY,
+                operation="edit_message",
             )
         except Exception:
             logger.debug("telegram_edit_message_failed", chat_id=chat_id)
@@ -152,12 +231,20 @@ class TelegramConnector(BaseConnector):
     ) -> str | None:
         if self._app is None:
             return None
+        bot = self._app.bot
+        markup = _to_telegram_markup(buttons)
+        truncated = text[:_MAX_MESSAGE_LENGTH]
         try:
-            markup = _to_telegram_markup(buttons)
-            msg = await self._app.bot.send_message(
-                chat_id=int(chat_id),
-                text=text[:_MAX_MESSAGE_LENGTH],
-                reply_markup=markup,
+            msg = await _retry_on_network_error(
+                lambda: bot.send_message(
+                    chat_id=int(chat_id),
+                    text=truncated,
+                    reply_markup=markup,
+                ),
+                max_retries=_SEND_MAX_RETRIES,
+                base_delay=_SEND_BASE_DELAY,
+                max_delay=_SEND_MAX_DELAY,
+                operation="send_message_with_buttons",
             )
             return str(msg.message_id)
         except Exception:
@@ -288,10 +375,17 @@ class TelegramConnector(BaseConnector):
     async def send_file(self, chat_id: str, file_path: str) -> None:
         if self._app is None:
             return
+        bot = self._app.bot
         try:
             path = Path(file_path)
             with path.open("rb") as f:
-                await self._app.bot.send_document(chat_id=int(chat_id), document=f)
+                await _retry_on_network_error(
+                    lambda: bot.send_document(chat_id=int(chat_id), document=f),
+                    max_retries=_SEND_MAX_RETRIES,
+                    base_delay=_SEND_BASE_DELAY,
+                    max_delay=_SEND_MAX_DELAY,
+                    operation="send_file",
+                )
             logger.info(
                 "telegram_file_sent",
                 chat_id=chat_id,

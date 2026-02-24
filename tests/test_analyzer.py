@@ -1,6 +1,6 @@
 """Tests for bash command and path analyzers."""
 
-from tether.core.safety.analyzer import CommandAnalyzer, PathAnalyzer
+from tether.core.safety.analyzer import CommandAnalyzer, PathAnalyzer, strip_cd_prefix
 
 
 class TestCommandAnalyzer:
@@ -234,3 +234,42 @@ class TestPathAnalyzerMissingPatterns:
     def test_read_operation_normal(self):
         a = PathAnalyzer.analyze("/project/main.py", "read")
         assert a.sensitivity == "normal"
+
+
+class TestStripCdPrefix:
+    def test_bare_cd_unchanged(self):
+        assert strip_cd_prefix("cd /some/path") == "cd /some/path"
+
+    def test_cd_and_then(self):
+        assert strip_cd_prefix("cd /project && ls") == "ls"
+
+    def test_cd_semicolon(self):
+        assert strip_cd_prefix("cd /project ; uv run pytest") == "uv run pytest"
+
+    def test_cd_or(self):
+        assert strip_cd_prefix("cd /project || echo fail") == "echo fail"
+
+    def test_chained_cds(self):
+        assert strip_cd_prefix("cd /a && cd /b && ls") == "ls"
+
+    def test_dangerous_path_not_stripped(self):
+        assert strip_cd_prefix("cd$(rm -rf /) && ls") == "cd$(rm -rf /) && ls"
+
+    def test_dangerous_backtick_not_stripped(self):
+        assert strip_cd_prefix("cd `pwd` && ls") == "cd `pwd` && ls"
+
+    def test_dangerous_pipe_in_path_not_stripped(self):
+        assert strip_cd_prefix("cd /a|b && ls") == "cd /a|b && ls"
+
+    def test_empty_string(self):
+        assert strip_cd_prefix("") == ""
+
+    def test_cd_with_quoted_path(self):
+        # Quotes don't contain dangerous chars, so the regex still strips
+        assert strip_cd_prefix('cd "/my project" && make') == "make"
+
+    def test_no_cd_prefix(self):
+        assert strip_cd_prefix("uv run pytest tests/") == "uv run pytest tests/"
+
+    def test_cd_no_path_with_chain(self):
+        assert strip_cd_prefix("cd && ls") == "ls"

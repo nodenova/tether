@@ -8,6 +8,7 @@ import structlog
 
 from tether.app import build_engine
 from tether.core.config import TetherConfig
+from tether.exceptions import ConnectorError
 
 logger = structlog.get_logger()
 
@@ -54,7 +55,12 @@ async def _run_telegram(config: TetherConfig) -> None:
     connector = TelegramConnector(config.telegram_bot_token)  # type: ignore[arg-type]
     engine = build_engine(config, connector=connector)
     await engine.startup()
-    await connector.start()
+    try:
+        await connector.start()
+    except Exception:
+        logger.error("telegram_startup_failed")
+        await engine.shutdown()
+        raise
 
     logger.info(
         "telegram_starting",
@@ -84,10 +90,14 @@ async def main() -> None:
         print("Set TETHER_APPROVED_DIRECTORIES or create a .env file.", file=sys.stderr)
         sys.exit(1)
 
-    if config.telegram_bot_token:
-        await _run_telegram(config)
-    else:
-        await _run_cli(config)
+    try:
+        if config.telegram_bot_token:
+            await _run_telegram(config)
+        else:
+            await _run_cli(config)
+    except ConnectorError as e:
+        print(f"Connector failed: {e}", file=sys.stderr)
+        sys.exit(1)
 
 
 def run() -> None:

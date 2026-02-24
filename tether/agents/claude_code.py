@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import time
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 import structlog
 from claude_agent_sdk import (
@@ -43,6 +43,19 @@ def _truncate(text: str, max_len: int = 60) -> str:
 
 
 _RETRYABLE_PATTERNS = ("api_error", "overloaded", "rate_limit", "529", "500")
+
+# Maps Tether session modes to Claude Agent SDK PermissionMode values.
+# The main agent uses can_use_tool for its own permissions; this only
+# affects sub-agents spawned via Task, which don't inherit can_use_tool.
+# Limitation: in "default" mode, sub-agents can't route approval requests
+# back through Tether's connector. Use /edit (auto) mode for parallel work.
+_PermissionMode = Literal["default", "acceptEdits", "plan", "bypassPermissions"]
+
+_SESSION_TO_PERMISSION_MODE: dict[str, _PermissionMode] = {
+    "auto": "acceptEdits",
+    "plan": "plan",
+    "default": "default",
+}
 
 
 def _is_retryable_error(content: str) -> bool:
@@ -180,7 +193,7 @@ class ClaudeCodeAgent(BaseAgent):
             cwd=session.working_directory,
             max_turns=self._config.max_turns,
             can_use_tool=can_use_tool,
-            permission_mode=None,
+            permission_mode=_SESSION_TO_PERMISSION_MODE.get(session.mode, "default"),
             setting_sources=["project"],
         )
         system_prompt = self._config.system_prompt or ""

@@ -101,11 +101,11 @@ The system follows a three-layer safety pipeline: **Sandbox → Policy → Appro
 
 ## Changelog
 
-After completing each feature, bug fix, or notable change, append a concise entry to `CHANGELOG.md` in the project root. Use the format:
+After completing each feature, bug fix, or notable change, add a concise entry to `CHANGELOG.md` under the **current (latest) version heading**. All new entries accumulate under that version until a new version is explicitly introduced (e.g., bumping from `0.2.1` to `0.2.2` or `0.3.0`).
 
 ```markdown
-## [YYYY-MM-DD]
+## [0.2.1] - 2026-02-23
 - **category**: Short description of what changed
 ```
 
-Categories: `added`, `fixed`, `changed`, `removed`. Keep entries to one line each.
+Categories: `added`, `fixed`, `changed`, `removed`. Keep entries to one line each. Do not create a new version heading — append to the existing one.

@@ -130,7 +130,7 @@ class TestClaudeCodeAgent:
         opts = agent._build_options(session, can_use_tool=None)
         assert opts.cwd == session.working_directory
         assert opts.max_turns == 5  # from config fixture
-        assert opts.permission_mode is None
+        assert opts.permission_mode == "default"
         assert opts.setting_sources == ["project"]
         assert opts.resume is None
 
@@ -322,6 +322,26 @@ class TestClaudeCodeAgent:
         sp = getattr(opts, "system_prompt", None)
         if sp:
             assert agent._AUTO_MODE_INSTRUCTION not in sp
+
+    def test_build_options_auto_mode_sets_accept_edits_permission(self, agent, session):
+        session.mode = "auto"
+        opts = agent._build_options(session, can_use_tool=None)
+        assert opts.permission_mode == "acceptEdits"
+
+    def test_build_options_plan_mode_sets_plan_permission(self, agent, session):
+        session.mode = "plan"
+        opts = agent._build_options(session, can_use_tool=None)
+        assert opts.permission_mode == "plan"
+
+    def test_build_options_default_mode_sets_default_permission(self, agent, session):
+        session.mode = "default"
+        opts = agent._build_options(session, can_use_tool=None)
+        assert opts.permission_mode == "default"
+
+    def test_build_options_unknown_mode_falls_back_to_default(self, agent, session):
+        session.mode = "unknown"
+        opts = agent._build_options(session, can_use_tool=None)
+        assert opts.permission_mode == "default"
 
     @pytest.mark.asyncio
     async def test_shutdown_suppresses_disconnect_errors(self, agent):

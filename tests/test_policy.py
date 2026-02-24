@@ -6,11 +6,9 @@ from pathlib import Path
 import pytest
 
 from tether.core.safety.policy import PolicyDecision, PolicyEngine
-from tether.plugins.builtin.browser_tools import (
-    ALL_BROWSER_TOOLS,
-    BROWSER_MUTATION_TOOLS,
-    BROWSER_READONLY_TOOLS,
-)
+from tether.plugins.builtin.browser_tools import (ALL_BROWSER_TOOLS,
+                                                  BROWSER_MUTATION_TOOLS,
+                                                  BROWSER_READONLY_TOOLS)
 
 
 @pytest.fixture
@@ -518,6 +516,38 @@ class TestGitRmPolicyClassification:
     def test_git_rm_requires_approval_permissive(self, permissive_policy_engine):
         c = permissive_policy_engine.classify("Bash", {"command": "git rm src/foo.py"})
         assert permissive_policy_engine.evaluate(c) == PolicyDecision.REQUIRE_APPROVAL
+
+
+class TestCdPrefixStripping:
+    """cd prefix should be stripped so ^-anchored patterns match the real command."""
+
+    def test_cd_git_status_allowed(self, engine):
+        c = engine.classify("Bash", {"command": "cd /project && git status"})
+        assert engine.evaluate(c) == PolicyDecision.ALLOW
+
+    def test_cd_rm_rf_denied(self, engine):
+        c = engine.classify("Bash", {"command": "cd /project && rm -rf /"})
+        assert engine.evaluate(c) == PolicyDecision.DENY
+
+    def test_cd_git_push_requires_approval(self, engine):
+        c = engine.classify("Bash", {"command": "cd /project && git push origin main"})
+        assert engine.evaluate(c) == PolicyDecision.REQUIRE_APPROVAL
+
+    def test_dangerous_cd_path_not_stripped(self, engine):
+        c = engine.classify("Bash", {"command": "cd$(rm -rf /) && git status"})
+        # Dangerous cd should NOT be stripped — command won't match read-only-bash
+        assert engine.evaluate(c) != PolicyDecision.ALLOW or c.category == "unmatched"
+
+    def test_tool_input_not_mutated(self, engine):
+        tool_input = {"command": "cd /project && git status"}
+        engine.classify("Bash", tool_input)
+        assert tool_input["command"] == "cd /project && git status"
+
+    def test_chained_cd_git_log_allowed(self, engine):
+        c = engine.classify(
+            "Bash", {"command": "cd /a && cd /b && git log --oneline -10"}
+        )
+        assert engine.evaluate(c) == PolicyDecision.ALLOW
 
 
 class TestBrowserToolPolicies:

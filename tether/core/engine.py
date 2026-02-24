@@ -16,6 +16,7 @@ from tether.core.events import (
     ENGINE_STOPPED,
     MESSAGE_IN,
     MESSAGE_OUT,
+    MESSAGE_QUEUED,
     Event,
     EventBus,
 )
@@ -34,6 +35,7 @@ if TYPE_CHECKING:
     from tether.core.interactions import InteractionCoordinator
     from tether.core.safety.approvals import ApprovalCoordinator
     from tether.core.session import Session, SessionManager
+    from tether.git.handler import GitCommandHandler
     from tether.middleware.base import MiddlewareChain
     from tether.plugins.registry import PluginRegistry
     from tether.storage.base import SessionStore
@@ -80,13 +82,16 @@ class _StreamingResponder:
         self._active = True
         self._has_activity: bool = False
         self._tool_counts: dict[str, int] = {}
+        self._display_offset: int = 0
 
     @property
     def buffer(self) -> str:
         return self._buffer
 
     def _build_display(self) -> str:
-        text = self._buffer[:_MAX_STREAMING_DISPLAY]
+        text = self._buffer[
+            self._display_offset : self._display_offset + _MAX_STREAMING_DISPLAY
+        ]
         return text + _STREAMING_CURSOR
 
     def _build_tools_summary(self) -> str:
@@ -106,6 +111,25 @@ class _StreamingResponder:
             self._has_activity = False
 
         self._buffer += text
+
+        # Overflow: finalize current message and start a new one
+        while (
+            self._message_id is not None
+            and len(self._buffer) > self._display_offset + _MAX_STREAMING_DISPLAY
+        ):
+            window_end = self._display_offset + _MAX_STREAMING_DISPLAY
+            committed = self._buffer[self._display_offset : window_end]
+            await self._connector.edit_message(
+                self._chat_id, self._message_id, committed
+            )
+            self._display_offset = window_end
+            display = self._build_display()
+            msg_id = await self._connector.send_message_with_id(self._chat_id, display)
+            if msg_id is None:
+                self._active = False
+                return
+            self._message_id = msg_id
+            self._last_edit = time.monotonic()
 
         if self._message_id is None:
             display = self._build_display()
@@ -144,6 +168,7 @@ class _StreamingResponder:
         self._has_activity = False
         self._tool_counts = {}
         self._last_edit = 0.0
+        self._display_offset = 0
 
     async def deactivate(self) -> None:
         """Suppress all further streaming and clear any visible activity."""
@@ -154,20 +179,24 @@ class _StreamingResponder:
         if not self._active or self._message_id is None:
             return False
 
+        tail = (
+            self._buffer[self._display_offset :]
+            if self._display_offset > 0
+            else final_text
+        )
+
         summary = self._build_tools_summary()
         if summary:
-            final_text = final_text + "\n\n" + summary
+            tail = tail + "\n\n" + summary
 
-        if len(final_text) <= _MAX_STREAMING_DISPLAY:
-            await self._connector.edit_message(
-                self._chat_id, self._message_id, final_text
-            )
+        if len(tail) <= _MAX_STREAMING_DISPLAY:
+            await self._connector.edit_message(self._chat_id, self._message_id, tail)
         else:
-            first_chunk = final_text[:_MAX_STREAMING_DISPLAY]
+            first_chunk = tail[:_MAX_STREAMING_DISPLAY]
             await self._connector.edit_message(
                 self._chat_id, self._message_id, first_chunk
             )
-            remainder = final_text[_MAX_STREAMING_DISPLAY:]
+            remainder = tail[_MAX_STREAMING_DISPLAY:]
             await self._connector.send_message(self._chat_id, remainder)
 
         return True
@@ -190,6 +219,7 @@ class Engine:
         plugin_registry: PluginRegistry | None = None,
         middleware_chain: MiddlewareChain | None = None,
         store: SessionStore | None = None,
+        git_handler: GitCommandHandler | None = None,
     ) -> None:
         self.connector = connector
         self.agent = agent
@@ -221,6 +251,10 @@ class Engine:
             approval_timeout=config.approval_timeout_seconds,
         )
 
+        self._git_handler = git_handler
+        self._executing_chats: set[str] = set()
+        self._pending_messages: dict[str, list[tuple[str, str]]] = {}
+
         if connector:
             if self.middleware_chain and self.middleware_chain.has_middleware():
                 connector.set_message_handler(self._handle_with_middleware)
@@ -236,6 +270,18 @@ class Engine:
                 self._gatekeeper.enable_tool_auto_approve
             )
             connector.set_command_handler(self.handle_command)
+            if git_handler:
+                connector.set_git_handler(self._handle_git_callback)
+
+    async def _handle_git_callback(
+        self, user_id: str, chat_id: str, action: str, payload: str
+    ) -> None:
+        session = await self.session_manager.get_or_create(
+            user_id, chat_id, self._default_directory
+        )
+        await self._git_handler.handle_callback(  # type: ignore[union-attr]
+            user_id, chat_id, action, payload, session
+        )
 
     async def startup(self) -> None:
         if self._store:
@@ -279,6 +325,65 @@ class Engine:
                 )
                 return ""
 
+        if self._git_handler and self._git_handler.has_pending_input(chat_id):
+            resolved = await self._git_handler.resolve_input(chat_id, text)
+            if resolved:
+                logger.debug("message_routed_to_git_input", chat_id=chat_id)
+                return ""
+
+        if chat_id in self._executing_chats:
+            self._pending_messages.setdefault(chat_id, []).append((user_id, text))
+            logger.info(
+                "message_queued",
+                user_id=user_id,
+                chat_id=chat_id,
+                queue_depth=len(self._pending_messages[chat_id]),
+            )
+            await self.event_bus.emit(
+                Event(
+                    name=MESSAGE_QUEUED,
+                    data={"user_id": user_id, "text": text, "chat_id": chat_id},
+                )
+            )
+            if self.connector:
+                await self.connector.send_message(
+                    chat_id,
+                    "Message received, will process after current task completes.",
+                )
+            return ""
+
+        self._executing_chats.add(chat_id)
+        try:
+            result = await self._execute_turn(user_id, text, chat_id)
+
+            while self._pending_messages.get(chat_id):
+                queued = self._pending_messages.pop(chat_id)
+                for q_user_id, q_text in queued:
+                    await self._log_message(
+                        user_id=q_user_id,
+                        chat_id=chat_id,
+                        role="user",
+                        content=q_text,
+                    )
+                combined = self._combine_queued_messages(queued)
+                result = await self._execute_turn(queued[0][0], combined, chat_id)
+
+            return result
+        except AgentError as e:
+            self._pending_messages.pop(chat_id, None)
+            return f"Error: {e}"
+        finally:
+            self._executing_chats.discard(chat_id)
+
+    @staticmethod
+    def _combine_queued_messages(
+        messages: list[tuple[str, str]],
+    ) -> str:
+        if len(messages) == 1:
+            return messages[0][1]
+        return "\n\n".join(text for _, text in messages)
+
+    async def _execute_turn(self, user_id: str, text: str, chat_id: str) -> str:
         start = time.monotonic()
         logger.info(
             "request_started",
@@ -371,8 +476,26 @@ class Engine:
                 num_turns=response.num_turns,
             )
 
+            if response.num_turns >= self.config.max_turns and self.connector:
+                await self.connector.send_message(
+                    chat_id,
+                    f"\u26a0\ufe0f Agent reached the turn limit ({self.config.max_turns} turns). "
+                    "The task may be incomplete.\n\n"
+                    "\u2022 Send a message to continue where it left off\n"
+                    "\u2022 /clear to start fresh\n"
+                    "\u2022 Set TETHER_MAX_TURNS to increase the limit",
+                )
+                logger.warning(
+                    "turn_limit_reached",
+                    chat_id=chat_id,
+                    num_turns=response.num_turns,
+                    max_turns=self.config.max_turns,
+                )
+
             if tool_state.clean_proceed:
-                plan = self._resolve_plan_content(tool_state, response.content)
+                plan = self._resolve_plan_content(
+                    tool_state, response.content, session.working_directory
+                )
                 return await self._exit_plan_mode(
                     session,
                     chat_id,
@@ -394,6 +517,7 @@ class Engine:
                 fallback_content = self._resolve_plan_content(
                     tool_state,
                     response.content,
+                    session.working_directory,
                 )
                 logger.info(
                     "fallback_plan_review_triggered",
@@ -422,7 +546,7 @@ class Engine:
                         target_mode=review.target_mode,
                     )
                 if review.behavior == "deny":
-                    return await self.handle_message(user_id, review.message, chat_id)
+                    return await self._execute_turn(user_id, review.message, chat_id)
 
             return response.content
 
@@ -442,7 +566,7 @@ class Engine:
             error_msg = f"Error: {e}"
             if self.connector:
                 await self.connector.send_message(chat_id, error_msg)
-            return error_msg
+            raise
 
     async def _log_message(
         self,
@@ -495,13 +619,22 @@ class Engine:
             user_id, chat_id, self._default_directory
         )
 
+        if command == "git":
+            if not self._git_handler:
+                return "Git commands not available."
+            return await self._git_handler.handle_command(
+                user_id, args, chat_id, session
+            )
+
         if command == "dir":
-            return self._handle_dir_command(session, args, chat_id)
+            return await self._handle_dir_command(session, args, chat_id)
 
         if command == "plan":
             old_mode = session.mode
             session.mode = "plan"
+            session.claude_session_id = None
             self._gatekeeper.disable_auto_approve(chat_id)
+            await self.session_manager.save(session)
             logger.info(
                 "mode_switched",
                 user_id=user_id,
@@ -560,8 +693,9 @@ class Engine:
             return "Default mode. All file writes require per-call approval."
 
         if command == "clear":
-            await self.session_manager.deactivate(user_id, chat_id)
+            await self.session_manager.reset(user_id, chat_id)
             self._gatekeeper.disable_auto_approve(chat_id)
+            self._pending_messages.pop(chat_id, None)
             logger.info("session_cleared", user_id=user_id, chat_id=chat_id)
             return "Session cleared. Next message starts a fresh conversation."
 
@@ -596,7 +730,9 @@ class Engine:
                 return name
         return wd.name
 
-    def _handle_dir_command(self, session: Session, args: str, chat_id: str) -> str:
+    async def _handle_dir_command(
+        self, session: Session, args: str, chat_id: str
+    ) -> str:
         if not args:
             lines = []
             for name, path in self._dir_names.items():
@@ -616,6 +752,7 @@ class Engine:
         session.working_directory = str(target_path)
         session.claude_session_id = None
         self._gatekeeper.disable_auto_approve(chat_id)
+        await self.session_manager.save(session)
         logger.info(
             "directory_switched",
             chat_id=chat_id,
@@ -624,7 +761,41 @@ class Engine:
         )
         return f"Switched to {target} ({target_path})"
 
-    def _resolve_plan_content(self, state: _ToolCallbackState, fallback: str) -> str:
+    @staticmethod
+    def _discover_plan_file(working_directory: str | None = None) -> str | None:
+        """Scan ~/.claude/plans/ and project-local .claude/plans/ for a recently-modified .md file."""
+        candidates: list[Path] = []
+        home_plans = Path.home() / ".claude" / "plans"
+        if home_plans.exists():
+            candidates.extend(home_plans.glob("*.md"))
+        if working_directory:
+            local_plans = Path(working_directory) / ".claude" / "plans"
+            if local_plans.exists():
+                candidates.extend(local_plans.glob("*.md"))
+        if not candidates:
+            return None
+        candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+        newest = candidates[0]
+        age = time.time() - newest.stat().st_mtime
+        if age < 600:
+            logger.info(
+                "plan_file_discovered_from_disk",
+                path=str(newest),
+                age_seconds=round(age),
+            )
+            return str(newest)
+        return None
+
+    def _resolve_plan_content(
+        self,
+        state: _ToolCallbackState,
+        fallback: str,
+        working_directory: str | None = None,
+    ) -> str:
+        if not state.plan_file_path:
+            discovered = self._discover_plan_file(working_directory)
+            if discovered:
+                state.plan_file_path = discovered
         plan_path = state.plan_file_path
         if plan_path:
             try:
@@ -670,6 +841,7 @@ class Engine:
         if clear_context:
             session.claude_session_id = None
         session.mode = "auto" if target_mode == "edit" else "default"
+        await self.session_manager.save(session)
         if target_mode == "edit":
             self._gatekeeper.enable_tool_auto_approve(chat_id, "Write")
             self._gatekeeper.enable_tool_auto_approve(chat_id, "Edit")
@@ -677,7 +849,7 @@ class Engine:
             await self.connector.send_message(
                 chat_id, "Context cleared. Starting implementation..."
             )
-        return await self.handle_message(
+        return await self._execute_turn(
             user_id,
             self._build_implementation_prompt(plan_content),
             chat_id,
@@ -709,13 +881,25 @@ class Engine:
 
             if tool_name in ("Write", "Edit"):
                 file_path = tool_input.get("file_path", "")
-                if file_path.endswith(".plan") or ".claude/plans/" in file_path:
+                is_plan_file = (
+                    file_path.endswith(".plan") or ".claude/plans/" in file_path
+                )
+                if is_plan_file:
                     state.plan_file_path = file_path
                     if tool_name == "Write":
                         state.plan_file_content = tool_input.get("content")
+                elif session.mode == "plan":
+                    return {
+                        "behavior": "deny",
+                        "message": "In plan mode — create a plan first, then call ExitPlanMode.",
+                    }
 
             if self.interaction_coordinator and tool_name == "ExitPlanMode":
                 state.plan_review_shown = True
+                if not state.plan_file_path:
+                    discovered = self._discover_plan_file(session.working_directory)
+                    if discovered:
+                        state.plan_file_path = discovered
                 plan_content = None
                 content_source = "none"
                 plan_path = state.plan_file_path

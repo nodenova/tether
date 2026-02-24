@@ -1,6 +1,7 @@
 """Tests for the central engine — safety hook wiring."""
 
 import asyncio
+import time
 
 import pytest
 
@@ -1569,7 +1570,7 @@ class TestPlanContentInEngine:
 
     @pytest.mark.asyncio
     async def test_streaming_buffer_used_when_no_plan_file(
-        self, config, policy_engine, audit_logger
+        self, config, policy_engine, audit_logger, monkeypatch
     ):
         """When no .plan file is written, streaming buffer is used as fallback."""
         from tests.conftest import MockConnector
@@ -1577,6 +1578,10 @@ class TestPlanContentInEngine:
         streaming_connector = MockConnector(support_streaming=True)
         coordinator = InteractionCoordinator(streaming_connector, config)
         config.streaming_enabled = True
+        # Prevent discovery of real plan files on the test machine
+        monkeypatch.setattr(
+            Engine, "_discover_plan_file", staticmethod(lambda wd=None: None)
+        )
 
         class NoPlanFileAgent(BaseAgent):
             async def execute(
@@ -1707,10 +1712,11 @@ class TestFallbackPlanReview:
             async def execute(self, prompt, session, *, can_use_tool=None, **kwargs):
                 # Agent writes a plan file but never calls ExitPlanMode
                 if can_use_tool:
+                    plan_path = f"{session.working_directory}/.claude/plans/plan.md"
                     await can_use_tool(
                         "Write",
                         {
-                            "file_path": ".claude/plans/plan.md",
+                            "file_path": plan_path,
                             "content": "Here is my plan:\n1. Do thing\n2. Do other thing",
                         },
                         None,
@@ -2146,15 +2152,116 @@ class TestHandleCommand:
 
         assert "cleared" in result.lower()
         assert "fresh" in result.lower()
-        assert session.is_active is False
+        assert session.is_active is True
+        assert session.session_id != original_id
+        assert session.claude_session_id is None
+        assert session.message_count == 0
+        assert session.total_cost == 0.0
         assert "chat1" not in eng._gatekeeper._auto_approved_chats
 
-        # Next get_or_create returns a new session
-        new_session = await eng.session_manager.get_or_create(
-            "user1", "chat1", str(config.approved_directories[0])
+    @pytest.mark.asyncio
+    async def test_clear_preserves_working_directory(
+        self, audit_logger, policy_engine, mock_connector, tmp_path
+    ):
+        d1 = tmp_path / "tether"
+        d2 = tmp_path / "api"
+        d1.mkdir()
+        d2.mkdir()
+        config = TetherConfig(
+            approved_directories=[d1, d2],
+            audit_log_path=tmp_path / "audit.jsonl",
         )
-        assert new_session.session_id != original_id
-        assert new_session.is_active is True
+        eng = Engine(
+            connector=mock_connector,
+            agent=FakeAgent(),
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+        )
+
+        # Establish session, switch to d2
+        await eng.handle_message("user1", "hello", "chat1")
+        await eng.handle_command("user1", "dir", "api", "chat1")
+        session = eng.session_manager.get("user1", "chat1")
+        assert session.working_directory == str(d2.resolve())
+
+        # Clear and send a new message
+        await eng.handle_command("user1", "clear", "", "chat1")
+        await eng.handle_message("user1", "hi again", "chat1")
+
+        session = eng.session_manager.get("user1", "chat1")
+        assert session.working_directory == str(d2.resolve())
+
+    @pytest.mark.asyncio
+    async def test_clear_preserves_directory_with_sqlite(
+        self, audit_logger, policy_engine, mock_connector, tmp_path
+    ):
+        from tether.storage.sqlite import SqliteSessionStore
+
+        d1 = tmp_path / "tether"
+        d2 = tmp_path / "api"
+        d1.mkdir()
+        d2.mkdir()
+        config = TetherConfig(
+            approved_directories=[d1, d2],
+            audit_log_path=tmp_path / "audit.jsonl",
+        )
+        store = SqliteSessionStore(tmp_path / "test.db")
+        await store.setup()
+        try:
+            eng = Engine(
+                connector=mock_connector,
+                agent=FakeAgent(),
+                config=config,
+                session_manager=SessionManager(store=store),
+                policy_engine=policy_engine,
+                audit=audit_logger,
+            )
+
+            await eng.handle_message("user1", "hello", "chat1")
+            await eng.handle_command("user1", "dir", "api", "chat1")
+
+            await eng.handle_command("user1", "clear", "", "chat1")
+
+            loaded = await store.load("user1", "chat1")
+            assert loaded is not None
+            assert loaded.working_directory == str(d2.resolve())
+            assert loaded.is_active is True
+        finally:
+            await store.teardown()
+
+    @pytest.mark.asyncio
+    async def test_clear_preserves_directory_across_multiple_clears(
+        self, audit_logger, policy_engine, mock_connector, tmp_path
+    ):
+        d1 = tmp_path / "tether"
+        d2 = tmp_path / "api"
+        d1.mkdir()
+        d2.mkdir()
+        config = TetherConfig(
+            approved_directories=[d1, d2],
+            audit_log_path=tmp_path / "audit.jsonl",
+        )
+        eng = Engine(
+            connector=mock_connector,
+            agent=FakeAgent(),
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+        )
+
+        await eng.handle_message("user1", "hello", "chat1")
+        await eng.handle_command("user1", "dir", "api", "chat1")
+
+        # Multiple clears
+        await eng.handle_command("user1", "clear", "", "chat1")
+        await eng.handle_command("user1", "clear", "", "chat1")
+
+        await eng.handle_message("user1", "still here", "chat1")
+        session = eng.session_manager.get("user1", "chat1")
+        assert session.working_directory == str(d2.resolve())
 
 
 class TestTestCommand:
@@ -2917,3 +3024,1954 @@ class TestPlanContentSourceTracking:
 
         desc = mock_connector.plan_review_requests[0]["description"]
         assert "Cached Plan" in desc
+
+
+class TestPlanFileDiscoveryFromDisk:
+    """Bug 1 regression: when SDK bypasses can_use_tool for plan file writes,
+    _discover_plan_file finds the plan from ~/.claude/plans/ on disk."""
+
+    @pytest.mark.asyncio
+    async def test_discover_plan_file_finds_recent_md(self, tmp_path, monkeypatch):
+        plans_dir = tmp_path / ".claude" / "plans"
+        plans_dir.mkdir(parents=True)
+        plan_file = plans_dir / "test-plan.md"
+        plan_file.write_text("# Discovered Plan")
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+
+        result = Engine._discover_plan_file()
+        assert result == str(plan_file)
+
+    @pytest.mark.asyncio
+    async def test_discover_plan_file_ignores_old_files(self, tmp_path, monkeypatch):
+        import os
+
+        plans_dir = tmp_path / ".claude" / "plans"
+        plans_dir.mkdir(parents=True)
+        plan_file = plans_dir / "old-plan.md"
+        plan_file.write_text("# Old Plan")
+        # Set mtime to 20 minutes ago (beyond 600s threshold)
+        old_time = time.time() - 1200
+        os.utime(plan_file, (old_time, old_time))
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+
+        result = Engine._discover_plan_file()
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_discover_plan_file_returns_none_when_no_dir(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+        result = Engine._discover_plan_file()
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_exit_plan_mode_uses_discovered_file(
+        self, config, policy_engine, audit_logger, mock_connector, tmp_path, monkeypatch
+    ):
+        """When can_use_tool is never called for the plan Write (SDK bypass),
+        ExitPlanMode discovers the plan file from disk."""
+        plans_dir = tmp_path / ".claude" / "plans"
+        plans_dir.mkdir(parents=True)
+        plan_file = plans_dir / "discovered-plan.md"
+        plan_file.write_text("# Discovered Plan\n\n1. Step one\n2. Step two")
+        monkeypatch.setattr(
+            Engine,
+            "_discover_plan_file",
+            staticmethod(lambda wd=None: str(plan_file)),
+        )
+
+        coordinator = InteractionCoordinator(mock_connector, config)
+
+        class BypassAgent(BaseAgent):
+            """Agent that calls ExitPlanMode without prior Write (simulates SDK bypass)."""
+
+            async def execute(self, prompt, session, *, can_use_tool=None, **kwargs):
+                if not prompt.startswith("Implement"):
+
+                    async def click():
+                        await asyncio.sleep(0.05)
+                        req = mock_connector.plan_review_requests[0]
+                        await coordinator.resolve_option(req["interaction_id"], "edit")
+
+                    t = asyncio.create_task(click())
+                    await can_use_tool("ExitPlanMode", {}, None)
+                    await t
+                return AgentResponse(content="Done", session_id="sid", cost=0.01)
+
+            async def cancel(self, session_id):
+                pass
+
+            async def shutdown(self):
+                pass
+
+        eng = Engine(
+            connector=mock_connector,
+            agent=BypassAgent(),
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+            interaction_coordinator=coordinator,
+        )
+
+        await eng.handle_message("user1", "Plan it", "chat1")
+
+        desc = mock_connector.plan_review_requests[0]["description"]
+        assert "Discovered Plan" in desc
+        assert "Step one" in desc
+
+    @pytest.mark.asyncio
+    async def test_resolve_plan_content_uses_discovered_file(
+        self, config, policy_engine, audit_logger, mock_connector, tmp_path, monkeypatch
+    ):
+        """_resolve_plan_content discovers plan file when state.plan_file_path is None."""
+        plans_dir = tmp_path / ".claude" / "plans"
+        plans_dir.mkdir(parents=True)
+        plan_file = plans_dir / "resolve-plan.md"
+        plan_file.write_text(
+            "# Resolved Plan\n\nStep 1: Refactor the module structure\n"
+            "Step 2: Add comprehensive validation logic\n"
+            "Step 3: Write integration tests for the new flow"
+        )
+        monkeypatch.setattr(
+            Engine,
+            "_discover_plan_file",
+            staticmethod(lambda wd=None: str(plan_file)),
+        )
+
+        coordinator = InteractionCoordinator(mock_connector, config)
+        prompts_seen: list[str] = []
+
+        class BypassCleanAgent(BaseAgent):
+            """Agent that calls ExitPlanMode with clean_proceed (no prior Write)."""
+
+            async def execute(self, prompt, session, *, can_use_tool=None, **kwargs):
+                prompts_seen.append(prompt)
+                if not prompt.startswith("Implement"):
+
+                    async def click():
+                        await asyncio.sleep(0.05)
+                        req = mock_connector.plan_review_requests[0]
+                        await coordinator.resolve_option(
+                            req["interaction_id"], "clean_edit"
+                        )
+
+                    t = asyncio.create_task(click())
+                    await can_use_tool("ExitPlanMode", {}, None)
+                    await t
+                return AgentResponse(
+                    content="Narration only", session_id="sid", cost=0.01
+                )
+
+            async def cancel(self, session_id):
+                pass
+
+            async def shutdown(self):
+                pass
+
+        eng = Engine(
+            connector=mock_connector,
+            agent=BypassCleanAgent(),
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+            interaction_coordinator=coordinator,
+        )
+
+        await eng.handle_message("user1", "Plan it", "chat1")
+
+        # Implementation prompt should use discovered plan content, not narration
+        assert len(prompts_seen) == 2
+        impl_prompt = prompts_seen[1]
+        assert "Resolved Plan" in impl_prompt
+        assert "Narration only" not in impl_prompt
+
+
+class TestLocalPlanFileDiscovery:
+    """Plan discovery should also check project-local .claude/plans/ directory."""
+
+    @pytest.mark.asyncio
+    async def test_discover_plan_file_finds_local_plan(self, tmp_path, monkeypatch):
+        """Plan file in project-local .claude/plans/ is discovered."""
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path / "fake_home")
+        local_plans = tmp_path / "project" / ".claude" / "plans"
+        local_plans.mkdir(parents=True)
+        plan_file = local_plans / "local-plan.md"
+        plan_file.write_text("# Local Plan")
+
+        result = Engine._discover_plan_file(str(tmp_path / "project"))
+        assert result == str(plan_file)
+
+    @pytest.mark.asyncio
+    async def test_discover_prefers_newest_across_both_dirs(
+        self, tmp_path, monkeypatch
+    ):
+        """When both home and local plans exist, the newest one wins."""
+        import os
+
+        home_plans = tmp_path / "home" / ".claude" / "plans"
+        home_plans.mkdir(parents=True)
+        home_plan = home_plans / "home-plan.md"
+        home_plan.write_text("# Home Plan")
+        old_time = time.time() - 300
+        os.utime(home_plan, (old_time, old_time))
+
+        local_plans = tmp_path / "project" / ".claude" / "plans"
+        local_plans.mkdir(parents=True)
+        local_plan = local_plans / "local-plan.md"
+        local_plan.write_text("# Local Plan (newer)")
+
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path / "home")
+
+        result = Engine._discover_plan_file(str(tmp_path / "project"))
+        assert result == str(local_plan)
+
+    @pytest.mark.asyncio
+    async def test_discover_prefers_newest_home_over_old_local(
+        self, tmp_path, monkeypatch
+    ):
+        """When home plan is newer than local plan, home plan wins."""
+        import os
+
+        local_plans = tmp_path / "project" / ".claude" / "plans"
+        local_plans.mkdir(parents=True)
+        local_plan = local_plans / "local-plan.md"
+        local_plan.write_text("# Local Plan (older)")
+        old_time = time.time() - 300
+        os.utime(local_plan, (old_time, old_time))
+
+        home_plans = tmp_path / "home" / ".claude" / "plans"
+        home_plans.mkdir(parents=True)
+        home_plan = home_plans / "home-plan.md"
+        home_plan.write_text("# Home Plan (newer)")
+
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path / "home")
+
+        result = Engine._discover_plan_file(str(tmp_path / "project"))
+        assert result == str(home_plan)
+
+    @pytest.mark.asyncio
+    async def test_discover_without_working_directory_only_checks_home(
+        self, tmp_path, monkeypatch
+    ):
+        """Without working_directory, only home dir is scanned (backward compat)."""
+        home_plans = tmp_path / ".claude" / "plans"
+        home_plans.mkdir(parents=True)
+        plan_file = home_plans / "home-plan.md"
+        plan_file.write_text("# Home Plan")
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+
+        result = Engine._discover_plan_file()
+        assert result == str(plan_file)
+
+
+class TestSessionPersistenceOnDirSwitch:
+    """Bug 2 regression: session state persisted after /dir and _exit_plan_mode."""
+
+    @pytest.mark.asyncio
+    async def test_dir_switch_persists_to_store(
+        self, audit_logger, policy_engine, mock_connector, tmp_path
+    ):
+        from unittest.mock import AsyncMock
+
+        d1 = tmp_path / "tether"
+        d2 = tmp_path / "api"
+        d1.mkdir()
+        d2.mkdir()
+        config = TetherConfig(
+            approved_directories=[d1, d2],
+            audit_log_path=tmp_path / "audit.jsonl",
+        )
+        store = AsyncMock()
+        store.save = AsyncMock()
+        sm = SessionManager(store=store)
+
+        eng = Engine(
+            connector=mock_connector,
+            agent=FakeAgent(),
+            config=config,
+            session_manager=sm,
+            policy_engine=policy_engine,
+            audit=audit_logger,
+        )
+
+        await eng.handle_message("user1", "hello", "chat1")
+        store.save.reset_mock()
+
+        await eng.handle_command("user1", "dir", "api", "chat1")
+
+        store.save.assert_awaited_once()
+        saved_session = store.save.call_args[0][0]
+        assert saved_session.working_directory == str(d2.resolve())
+        assert saved_session.claude_session_id is None
+
+    @pytest.mark.asyncio
+    async def test_exit_plan_mode_persists_to_store(
+        self, policy_engine, audit_logger, mock_connector, tmp_path, monkeypatch
+    ):
+        from unittest.mock import AsyncMock, MagicMock
+
+        monkeypatch.setattr(
+            Engine, "_discover_plan_file", staticmethod(lambda wd=None: None)
+        )
+        config = TetherConfig(
+            approved_directories=[tmp_path],
+            audit_log_path=tmp_path / "audit.jsonl",
+        )
+        store = MagicMock()
+        store.load = AsyncMock(return_value=None)
+
+        # Capture session state snapshots at each save() call
+        save_snapshots: list[dict] = []
+
+        async def capture_save(session):
+            save_snapshots.append(
+                {
+                    "mode": session.mode,
+                    "claude_session_id": session.claude_session_id,
+                    "working_directory": session.working_directory,
+                }
+            )
+
+        store.save = AsyncMock(side_effect=capture_save)
+        sm = SessionManager(store=store)
+        coordinator = InteractionCoordinator(mock_connector, config)
+
+        class PlanAgent(BaseAgent):
+            async def execute(self, prompt, session, *, can_use_tool=None, **kwargs):
+                if not prompt.startswith("Implement"):
+
+                    async def click():
+                        await asyncio.sleep(0.05)
+                        req = mock_connector.plan_review_requests[0]
+                        await coordinator.resolve_option(
+                            req["interaction_id"], "clean_edit"
+                        )
+
+                    t = asyncio.create_task(click())
+                    await can_use_tool("ExitPlanMode", {}, None)
+                    await t
+                return AgentResponse(content="Done", session_id="sid", cost=0.01)
+
+            async def cancel(self, session_id):
+                pass
+
+            async def shutdown(self):
+                pass
+
+        eng = Engine(
+            connector=mock_connector,
+            agent=PlanAgent(),
+            config=config,
+            session_manager=sm,
+            policy_engine=policy_engine,
+            audit=audit_logger,
+            interaction_coordinator=coordinator,
+        )
+
+        await eng.handle_message("user1", "Plan it", "chat1")
+
+        # save() should have been called multiple times
+        assert len(save_snapshots) >= 2
+        # One of the saves should be from _exit_plan_mode with cleared session
+        exit_saves = [s for s in save_snapshots if s["claude_session_id"] is None]
+        assert len(exit_saves) >= 1
+        assert exit_saves[0]["mode"] == "auto"
+
+    @pytest.mark.asyncio
+    async def test_dir_switch_persists_to_sqlite(
+        self, audit_logger, policy_engine, mock_connector, tmp_path
+    ):
+        """End-to-end: /dir switch persists working_directory in SQLite."""
+        from tether.storage.sqlite import SqliteSessionStore
+
+        d1 = tmp_path / "tether"
+        d2 = tmp_path / "api"
+        d1.mkdir()
+        d2.mkdir()
+        config = TetherConfig(
+            approved_directories=[d1, d2],
+            audit_log_path=tmp_path / "audit.jsonl",
+        )
+        store = SqliteSessionStore(tmp_path / "sessions.db")
+        await store.setup()
+        try:
+            sm = SessionManager(store=store)
+            eng = Engine(
+                connector=mock_connector,
+                agent=FakeAgent(),
+                config=config,
+                session_manager=sm,
+                policy_engine=policy_engine,
+                audit=audit_logger,
+                store=store,
+            )
+
+            await eng.handle_message("user1", "hello", "chat1")
+            await eng.handle_command("user1", "dir", "api", "chat1")
+
+            # Verify: load from store should have updated working_directory
+            loaded = await store.load("user1", "chat1")
+            assert loaded is not None
+            assert loaded.working_directory == str(d2.resolve())
+            assert loaded.claude_session_id is None
+        finally:
+            await store.teardown()
+
+
+class TestDirectoryPersistenceThroughPlanMode:
+    """Directory should survive all plan mode transitions (edit, clean_edit, fallback)."""
+
+    @pytest.mark.asyncio
+    async def test_dir_persists_through_clean_edit_proceed(
+        self, audit_logger, policy_engine, mock_connector, tmp_path, monkeypatch
+    ):
+        """ExitPlanMode → 'clean_edit': dir survives _exit_plan_mode + recursive handle_message."""
+        monkeypatch.setattr(
+            Engine, "_discover_plan_file", staticmethod(lambda wd=None: None)
+        )
+        d1 = tmp_path / "project"
+        d2 = tmp_path / "api"
+        d1.mkdir()
+        d2.mkdir()
+        config = TetherConfig(
+            approved_directories=[d1, d2],
+            audit_log_path=tmp_path / "audit.jsonl",
+        )
+        coordinator = InteractionCoordinator(mock_connector, config)
+
+        class DirTrackingAgent(BaseAgent):
+            def __init__(self):
+                self.working_dirs: list[str] = []
+                self.prompts: list[str] = []
+                self.session_ids: list[str | None] = []
+
+            async def execute(self, prompt, session, *, can_use_tool=None, **kwargs):
+                self.working_dirs.append(session.working_directory)
+                self.prompts.append(prompt)
+                self.session_ids.append(session.claude_session_id)
+                if session.mode == "plan":
+
+                    async def click():
+                        await asyncio.sleep(0.05)
+                        req = mock_connector.plan_review_requests[-1]
+                        await coordinator.resolve_option(
+                            req["interaction_id"], "clean_edit"
+                        )
+
+                    t = asyncio.create_task(click())
+                    await can_use_tool("ExitPlanMode", {}, None)
+                    await t
+                return AgentResponse(content="Done", session_id="sid", cost=0.01)
+
+            async def cancel(self, session_id):
+                pass
+
+            async def shutdown(self):
+                pass
+
+        agent = DirTrackingAgent()
+        sm = SessionManager()
+        eng = Engine(
+            connector=mock_connector,
+            agent=agent,
+            config=config,
+            session_manager=sm,
+            policy_engine=policy_engine,
+            audit=audit_logger,
+            interaction_coordinator=coordinator,
+        )
+
+        await eng.handle_message("user1", "hello", "chat1")
+        await eng.handle_command("user1", "dir", "api", "chat1")
+        await eng.handle_command("user1", "plan", "", "chat1")
+        await eng.handle_message("user1", "make plan", "chat1")
+
+        session = sm.get("user1", "chat1")
+        d2_resolved = str(d2.resolve())
+        assert session.working_directory == d2_resolved
+        # 3 agent calls: hello, plan, implement (recursive from _exit_plan_mode)
+        assert len(agent.working_dirs) == 3
+        assert all(d == d2_resolved for d in agent.working_dirs[1:])
+        assert agent.prompts[2].startswith("Implement")
+        # clean_edit nulls session_id before implementation call
+        assert agent.session_ids[2] is None
+
+    @pytest.mark.asyncio
+    async def test_dir_persists_through_edit_proceed(
+        self, audit_logger, policy_engine, mock_connector, tmp_path, monkeypatch
+    ):
+        """ExitPlanMode → 'edit': dir preserved (no recursive handle_message)."""
+        monkeypatch.setattr(
+            Engine, "_discover_plan_file", staticmethod(lambda wd=None: None)
+        )
+        d1 = tmp_path / "project"
+        d2 = tmp_path / "api"
+        d1.mkdir()
+        d2.mkdir()
+        config = TetherConfig(
+            approved_directories=[d1, d2],
+            audit_log_path=tmp_path / "audit.jsonl",
+        )
+        coordinator = InteractionCoordinator(mock_connector, config)
+
+        class DirTrackingAgent(BaseAgent):
+            def __init__(self):
+                self.working_dirs: list[str] = []
+
+            async def execute(self, prompt, session, *, can_use_tool=None, **kwargs):
+                self.working_dirs.append(session.working_directory)
+                if session.mode == "plan":
+
+                    async def click():
+                        await asyncio.sleep(0.05)
+                        req = mock_connector.plan_review_requests[-1]
+                        await coordinator.resolve_option(req["interaction_id"], "edit")
+
+                    t = asyncio.create_task(click())
+                    await can_use_tool("ExitPlanMode", {}, None)
+                    await t
+                return AgentResponse(content="Done", session_id="sid", cost=0.01)
+
+            async def cancel(self, session_id):
+                pass
+
+            async def shutdown(self):
+                pass
+
+        agent = DirTrackingAgent()
+        sm = SessionManager()
+        eng = Engine(
+            connector=mock_connector,
+            agent=agent,
+            config=config,
+            session_manager=sm,
+            policy_engine=policy_engine,
+            audit=audit_logger,
+            interaction_coordinator=coordinator,
+        )
+
+        await eng.handle_message("user1", "hello", "chat1")
+        await eng.handle_command("user1", "dir", "api", "chat1")
+        await eng.handle_command("user1", "plan", "", "chat1")
+        await eng.handle_message("user1", "make plan", "chat1")
+
+        session = sm.get("user1", "chat1")
+        d2_resolved = str(d2.resolve())
+        assert session.working_directory == d2_resolved
+        # "edit" doesn't trigger _exit_plan_mode; 2 calls: hello + plan
+        assert len(agent.working_dirs) == 2
+        assert agent.working_dirs[1] == d2_resolved
+
+    @pytest.mark.asyncio
+    async def test_dir_persists_through_fallback_review_edit(
+        self, audit_logger, policy_engine, mock_connector, tmp_path, monkeypatch
+    ):
+        """Fallback plan review → 'edit': dir survives _exit_plan_mode."""
+        monkeypatch.setattr(
+            Engine, "_discover_plan_file", staticmethod(lambda wd=None: None)
+        )
+        d1 = tmp_path / "project"
+        d2 = tmp_path / "api"
+        d1.mkdir()
+        d2.mkdir()
+        config = TetherConfig(
+            approved_directories=[d1, d2],
+            audit_log_path=tmp_path / "audit.jsonl",
+        )
+        coordinator = InteractionCoordinator(mock_connector, config)
+
+        class FallbackAgent(BaseAgent):
+            def __init__(self):
+                self.working_dirs: list[str] = []
+                self.prompts: list[str] = []
+
+            async def execute(self, prompt, session, *, can_use_tool=None, **kwargs):
+                self.working_dirs.append(session.working_directory)
+                self.prompts.append(prompt)
+                if session.mode == "plan":
+                    plan_path = str(d2 / ".claude" / "plans" / "plan.md")
+                    await can_use_tool(
+                        "Write",
+                        {"file_path": plan_path, "content": "# The Plan\nStep 1"},
+                        None,
+                    )
+                return AgentResponse(content="Done", session_id="sid", cost=0.01)
+
+            async def cancel(self, session_id):
+                pass
+
+            async def shutdown(self):
+                pass
+
+        agent = FallbackAgent()
+        sm = SessionManager()
+        eng = Engine(
+            connector=mock_connector,
+            agent=agent,
+            config=config,
+            session_manager=sm,
+            policy_engine=policy_engine,
+            audit=audit_logger,
+            interaction_coordinator=coordinator,
+        )
+
+        await eng.handle_message("user1", "hello", "chat1")
+        await eng.handle_command("user1", "dir", "api", "chat1")
+        await eng.handle_command("user1", "plan", "", "chat1")
+
+        # Bump message_count so fallback guard (> 1) passes after update_from_result
+        session = sm.get("user1", "chat1")
+        session.message_count = 1
+
+        async def click_review():
+            await asyncio.sleep(0.05)
+            req = mock_connector.plan_review_requests[-1]
+            await coordinator.resolve_option(req["interaction_id"], "edit")
+
+        task = asyncio.create_task(click_review())
+        await eng.handle_message("user1", "refine plan", "chat1")
+        await task
+
+        session = sm.get("user1", "chat1")
+        d2_resolved = str(d2.resolve())
+        assert session.working_directory == d2_resolved
+        # 3 calls: hello, plan (fallback triggers), implement
+        assert len(agent.working_dirs) == 3
+        assert all(d == d2_resolved for d in agent.working_dirs[1:])
+        assert agent.prompts[2].startswith("Implement")
+
+    @pytest.mark.asyncio
+    async def test_dir_persists_through_fallback_review_default(
+        self, audit_logger, policy_engine, mock_connector, tmp_path, monkeypatch
+    ):
+        """Fallback plan review → 'default': dir survives, mode becomes 'default'."""
+        monkeypatch.setattr(
+            Engine, "_discover_plan_file", staticmethod(lambda wd=None: None)
+        )
+        d1 = tmp_path / "project"
+        d2 = tmp_path / "api"
+        d1.mkdir()
+        d2.mkdir()
+        config = TetherConfig(
+            approved_directories=[d1, d2],
+            audit_log_path=tmp_path / "audit.jsonl",
+        )
+        coordinator = InteractionCoordinator(mock_connector, config)
+
+        class FallbackAgent(BaseAgent):
+            def __init__(self):
+                self.working_dirs: list[str] = []
+                self.prompts: list[str] = []
+
+            async def execute(self, prompt, session, *, can_use_tool=None, **kwargs):
+                self.working_dirs.append(session.working_directory)
+                self.prompts.append(prompt)
+                if session.mode == "plan":
+                    plan_path = str(d2 / ".claude" / "plans" / "plan.md")
+                    await can_use_tool(
+                        "Write",
+                        {"file_path": plan_path, "content": "# The Plan\nStep 1"},
+                        None,
+                    )
+                return AgentResponse(content="Done", session_id="sid", cost=0.01)
+
+            async def cancel(self, session_id):
+                pass
+
+            async def shutdown(self):
+                pass
+
+        agent = FallbackAgent()
+        sm = SessionManager()
+        eng = Engine(
+            connector=mock_connector,
+            agent=agent,
+            config=config,
+            session_manager=sm,
+            policy_engine=policy_engine,
+            audit=audit_logger,
+            interaction_coordinator=coordinator,
+        )
+
+        await eng.handle_message("user1", "hello", "chat1")
+        await eng.handle_command("user1", "dir", "api", "chat1")
+        await eng.handle_command("user1", "plan", "", "chat1")
+
+        session = sm.get("user1", "chat1")
+        session.message_count = 1
+
+        async def click_review():
+            await asyncio.sleep(0.05)
+            req = mock_connector.plan_review_requests[-1]
+            await coordinator.resolve_option(req["interaction_id"], "default")
+
+        task = asyncio.create_task(click_review())
+        await eng.handle_message("user1", "refine plan", "chat1")
+        await task
+
+        session = sm.get("user1", "chat1")
+        d2_resolved = str(d2.resolve())
+        assert session.working_directory == d2_resolved
+        assert session.mode == "default"
+        assert len(agent.working_dirs) == 3
+        assert all(d == d2_resolved for d in agent.working_dirs[1:])
+
+    @pytest.mark.asyncio
+    async def test_dir_persists_through_multiple_plan_cycles(
+        self, audit_logger, policy_engine, mock_connector, tmp_path, monkeypatch
+    ):
+        """Two full plan→implement cycles preserve directory throughout."""
+        monkeypatch.setattr(
+            Engine, "_discover_plan_file", staticmethod(lambda wd=None: None)
+        )
+        d1 = tmp_path / "project"
+        d2 = tmp_path / "api"
+        d1.mkdir()
+        d2.mkdir()
+        config = TetherConfig(
+            approved_directories=[d1, d2],
+            audit_log_path=tmp_path / "audit.jsonl",
+        )
+        coordinator = InteractionCoordinator(mock_connector, config)
+
+        class CycleAgent(BaseAgent):
+            def __init__(self):
+                self.working_dirs: list[str] = []
+                self.prompts: list[str] = []
+
+            async def execute(self, prompt, session, *, can_use_tool=None, **kwargs):
+                self.working_dirs.append(session.working_directory)
+                self.prompts.append(prompt)
+                if session.mode == "plan":
+
+                    async def click():
+                        await asyncio.sleep(0.05)
+                        req = mock_connector.plan_review_requests[-1]
+                        await coordinator.resolve_option(
+                            req["interaction_id"], "clean_edit"
+                        )
+
+                    t = asyncio.create_task(click())
+                    await can_use_tool("ExitPlanMode", {}, None)
+                    await t
+                return AgentResponse(content="Done", session_id="sid", cost=0.01)
+
+            async def cancel(self, session_id):
+                pass
+
+            async def shutdown(self):
+                pass
+
+        agent = CycleAgent()
+        sm = SessionManager()
+        eng = Engine(
+            connector=mock_connector,
+            agent=agent,
+            config=config,
+            session_manager=sm,
+            policy_engine=policy_engine,
+            audit=audit_logger,
+            interaction_coordinator=coordinator,
+        )
+
+        await eng.handle_message("user1", "hello", "chat1")
+        await eng.handle_command("user1", "dir", "api", "chat1")
+
+        # Cycle 1
+        await eng.handle_command("user1", "plan", "", "chat1")
+        await eng.handle_message("user1", "plan A", "chat1")
+
+        # Cycle 2
+        await eng.handle_command("user1", "plan", "", "chat1")
+        await eng.handle_message("user1", "plan B", "chat1")
+
+        session = sm.get("user1", "chat1")
+        d2_resolved = str(d2.resolve())
+        assert session.working_directory == d2_resolved
+        # 5 calls: hello, plan-A, implement-A, plan-B, implement-B
+        assert len(agent.working_dirs) == 5
+        assert all(d == d2_resolved for d in agent.working_dirs[1:])
+
+    @pytest.mark.asyncio
+    async def test_dir_persists_through_plan_mode_sqlite(
+        self, audit_logger, policy_engine, mock_connector, tmp_path, monkeypatch
+    ):
+        """ExitPlanMode → 'clean_edit' with SQLite: dir persists in store."""
+        from tether.storage.sqlite import SqliteSessionStore
+
+        monkeypatch.setattr(
+            Engine, "_discover_plan_file", staticmethod(lambda wd=None: None)
+        )
+        d1 = tmp_path / "project"
+        d2 = tmp_path / "api"
+        d1.mkdir()
+        d2.mkdir()
+        config = TetherConfig(
+            approved_directories=[d1, d2],
+            audit_log_path=tmp_path / "audit.jsonl",
+        )
+        store = SqliteSessionStore(tmp_path / "sessions.db")
+        await store.setup()
+        try:
+            coordinator = InteractionCoordinator(mock_connector, config)
+
+            class DirTrackingAgent(BaseAgent):
+                def __init__(self):
+                    self.working_dirs: list[str] = []
+
+                async def execute(
+                    self, prompt, session, *, can_use_tool=None, **kwargs
+                ):
+                    self.working_dirs.append(session.working_directory)
+                    if session.mode == "plan":
+
+                        async def click():
+                            await asyncio.sleep(0.05)
+                            req = mock_connector.plan_review_requests[-1]
+                            await coordinator.resolve_option(
+                                req["interaction_id"], "clean_edit"
+                            )
+
+                        t = asyncio.create_task(click())
+                        await can_use_tool("ExitPlanMode", {}, None)
+                        await t
+                    return AgentResponse(content="Done", session_id="sid", cost=0.01)
+
+                async def cancel(self, session_id):
+                    pass
+
+                async def shutdown(self):
+                    pass
+
+            agent = DirTrackingAgent()
+            sm = SessionManager(store=store)
+            eng = Engine(
+                connector=mock_connector,
+                agent=agent,
+                config=config,
+                session_manager=sm,
+                policy_engine=policy_engine,
+                audit=audit_logger,
+                interaction_coordinator=coordinator,
+                store=store,
+            )
+
+            await eng.handle_message("user1", "hello", "chat1")
+            await eng.handle_command("user1", "dir", "api", "chat1")
+            await eng.handle_command("user1", "plan", "", "chat1")
+            await eng.handle_message("user1", "make plan", "chat1")
+
+            d2_resolved = str(d2.resolve())
+            assert all(d == d2_resolved for d in agent.working_dirs[1:])
+
+            loaded = await store.load("user1", "chat1")
+            assert loaded is not None
+            assert loaded.working_directory == d2_resolved
+        finally:
+            await store.teardown()
+
+
+class TestTurnLimitNotification:
+    """Verify user notification when the agent hits the max_turns limit."""
+
+    @pytest.mark.asyncio
+    async def test_turn_limit_notification_sent(
+        self, config, audit_logger, policy_engine, mock_connector
+    ):
+        class LimitAgent(BaseAgent):
+            async def execute(self, prompt, session, **kwargs):
+                return AgentResponse(
+                    content="partial work",
+                    session_id="sid",
+                    cost=0.01,
+                    num_turns=config.max_turns,
+                )
+
+            async def cancel(self, session_id):
+                pass
+
+            async def shutdown(self):
+                pass
+
+        eng = Engine(
+            connector=mock_connector,
+            agent=LimitAgent(),
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+        )
+
+        await eng.handle_message("user1", "do stuff", "chat1")
+
+        turn_msgs = [
+            m for m in mock_connector.sent_messages if "turn limit" in m["text"].lower()
+        ]
+        assert len(turn_msgs) == 1
+        assert str(config.max_turns) in turn_msgs[0]["text"]
+
+    @pytest.mark.asyncio
+    async def test_turn_limit_no_notification_when_under_limit(
+        self, config, audit_logger, policy_engine, mock_connector
+    ):
+        class UnderLimitAgent(BaseAgent):
+            async def execute(self, prompt, session, **kwargs):
+                return AgentResponse(
+                    content="done",
+                    session_id="sid",
+                    cost=0.01,
+                    num_turns=config.max_turns - 2,
+                )
+
+            async def cancel(self, session_id):
+                pass
+
+            async def shutdown(self):
+                pass
+
+        eng = Engine(
+            connector=mock_connector,
+            agent=UnderLimitAgent(),
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+        )
+
+        await eng.handle_message("user1", "do stuff", "chat1")
+
+        turn_msgs = [
+            m for m in mock_connector.sent_messages if "turn limit" in m["text"].lower()
+        ]
+        assert len(turn_msgs) == 0
+
+    @pytest.mark.asyncio
+    async def test_turn_limit_no_notification_without_connector(
+        self, config, audit_logger, policy_engine
+    ):
+        class LimitAgent(BaseAgent):
+            async def execute(self, prompt, session, **kwargs):
+                return AgentResponse(
+                    content="partial",
+                    session_id="sid",
+                    cost=0.01,
+                    num_turns=config.max_turns,
+                )
+
+            async def cancel(self, session_id):
+                pass
+
+            async def shutdown(self):
+                pass
+
+        eng = Engine(
+            connector=None,
+            agent=LimitAgent(),
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+        )
+
+        result = await eng.handle_message("user1", "do stuff", "chat1")
+        assert result == "partial"
+
+    @pytest.mark.asyncio
+    async def test_turn_limit_then_clear_resets_for_fresh_execution(
+        self, config, audit_logger, policy_engine, mock_connector
+    ):
+        call_count = 0
+
+        class TrackingAgent(BaseAgent):
+            async def execute(self, prompt, session, **kwargs):
+                nonlocal call_count
+                call_count += 1
+                return AgentResponse(
+                    content=f"run-{call_count}",
+                    session_id=f"sid-{call_count}",
+                    cost=0.01,
+                    num_turns=config.max_turns if call_count == 1 else 1,
+                )
+
+            async def cancel(self, session_id):
+                pass
+
+            async def shutdown(self):
+                pass
+
+        sm = SessionManager()
+        eng = Engine(
+            connector=mock_connector,
+            agent=TrackingAgent(),
+            config=config,
+            session_manager=sm,
+            policy_engine=policy_engine,
+            audit=audit_logger,
+        )
+
+        await eng.handle_message("user1", "big task", "chat1")
+        turn_msgs = [
+            m for m in mock_connector.sent_messages if "turn limit" in m["text"].lower()
+        ]
+        assert len(turn_msgs) == 1
+
+        session = sm.get("user1", "chat1")
+        assert session.claude_session_id == "sid-1"
+
+        await eng.handle_command("user1", "clear", "", "chat1")
+        session = sm.get("user1", "chat1")
+        assert session.claude_session_id is None
+
+        await eng.handle_message("user1", "continue", "chat1")
+        session = sm.get("user1", "chat1")
+        assert session.claude_session_id == "sid-2"
+
+
+class TestMessageQueuing:
+    """Verify per-chat message queuing during agent execution."""
+
+    @staticmethod
+    def _make_slow_agent(gate: asyncio.Event):
+        """Agent that blocks until gate is set, capturing all prompts."""
+
+        class SlowFakeAgent(BaseAgent):
+            def __init__(self):
+                self.prompts: list[str] = []
+
+            async def execute(self, prompt, session, **kwargs):
+                self.prompts.append(prompt)
+                await gate.wait()
+                return AgentResponse(
+                    content=f"Done: {prompt}",
+                    session_id="slow-sid",
+                    cost=0.01,
+                )
+
+            async def cancel(self, session_id):
+                pass
+
+            async def shutdown(self):
+                pass
+
+        return SlowFakeAgent()
+
+    @pytest.mark.asyncio
+    async def test_message_queued_during_execution(
+        self, config, audit_logger, mock_connector
+    ):
+        gate = asyncio.Event()
+        agent = self._make_slow_agent(gate)
+
+        eng = Engine(
+            connector=mock_connector,
+            agent=agent,
+            config=config,
+            session_manager=SessionManager(),
+            audit=audit_logger,
+        )
+
+        task = asyncio.create_task(eng.handle_message("u1", "first", "c1"))
+        await asyncio.sleep(0)  # let first enter _execute_turn
+
+        result2 = await eng.handle_message("u1", "second", "c1")
+        assert result2 == ""
+
+        gate.set()
+        result1 = await task
+
+        assert "Done:" in result1
+        assert "first" in agent.prompts
+        assert "second" in agent.prompts
+
+    @pytest.mark.asyncio
+    async def test_queued_message_acknowledgment(
+        self, config, audit_logger, mock_connector
+    ):
+        gate = asyncio.Event()
+        agent = self._make_slow_agent(gate)
+
+        eng = Engine(
+            connector=mock_connector,
+            agent=agent,
+            config=config,
+            session_manager=SessionManager(),
+            audit=audit_logger,
+        )
+
+        task = asyncio.create_task(eng.handle_message("u1", "first", "c1"))
+        await asyncio.sleep(0)
+
+        await eng.handle_message("u1", "second", "c1")
+
+        ack_msgs = [
+            m
+            for m in mock_connector.sent_messages
+            if "will process after current task" in m.get("text", "")
+        ]
+        assert len(ack_msgs) == 1
+
+        gate.set()
+        await task
+
+    @pytest.mark.asyncio
+    async def test_queued_messages_combined(self, config, audit_logger, mock_connector):
+        gate = asyncio.Event()
+        agent = self._make_slow_agent(gate)
+
+        eng = Engine(
+            connector=mock_connector,
+            agent=agent,
+            config=config,
+            session_manager=SessionManager(),
+            audit=audit_logger,
+        )
+
+        task = asyncio.create_task(eng.handle_message("u1", "first", "c1"))
+        await asyncio.sleep(0)
+
+        await eng.handle_message("u1", "msg A", "c1")
+        await eng.handle_message("u1", "msg B", "c1")
+        await eng.handle_message("u1", "msg C", "c1")
+
+        gate.set()
+        await task
+
+        assert len(agent.prompts) == 2
+        combined = agent.prompts[1]
+        assert "msg A" in combined
+        assert "msg B" in combined
+        assert "msg C" in combined
+        assert "\n\n" in combined
+
+    @pytest.mark.asyncio
+    async def test_queued_messages_logged_individually(
+        self, config, audit_logger, mock_connector, tmp_path
+    ):
+        from tether.storage.sqlite import SqliteSessionStore
+
+        store = SqliteSessionStore(tmp_path / "test.db")
+        await store.setup()
+
+        gate = asyncio.Event()
+        agent = self._make_slow_agent(gate)
+
+        eng = Engine(
+            connector=mock_connector,
+            agent=agent,
+            config=config,
+            session_manager=SessionManager(),
+            audit=audit_logger,
+            store=store,
+        )
+
+        task = asyncio.create_task(eng.handle_message("u1", "first", "c1"))
+        await asyncio.sleep(0)
+
+        await eng.handle_message("u1", "queued-A", "c1")
+        await eng.handle_message("u1", "queued-B", "c1")
+
+        gate.set()
+        await task
+
+        messages = await store.get_messages("u1", "c1")
+        user_msgs = [m for m in messages if m["role"] == "user"]
+        user_texts = [m["content"] for m in user_msgs]
+        assert "queued-A" in user_texts
+        assert "queued-B" in user_texts
+
+        await store.teardown()
+
+    @pytest.mark.asyncio
+    async def test_approval_bypasses_queue(
+        self, config, audit_logger, mock_connector, policy_engine, tmp_dir
+    ):
+        from tether.core.safety.approvals import PendingApproval
+
+        gate = asyncio.Event()
+        agent = self._make_slow_agent(gate)
+
+        coordinator = ApprovalCoordinator(mock_connector, config)
+        eng = Engine(
+            connector=mock_connector,
+            agent=agent,
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+            approval_coordinator=coordinator,
+        )
+
+        task = asyncio.create_task(eng.handle_message("u1", "first", "c1"))
+        await asyncio.sleep(0)
+
+        pending = PendingApproval(
+            approval_id="test-aid",
+            chat_id="c1",
+            tool_name="Write",
+            tool_input={},
+        )
+        coordinator.pending["test-aid"] = pending
+
+        result = await eng.handle_message("u1", "reject reason", "c1")
+        assert result == ""
+        assert "c1" not in eng._pending_messages or not eng._pending_messages["c1"]
+
+        coordinator.pending.pop("test-aid", None)
+        gate.set()
+        await task
+
+    @pytest.mark.asyncio
+    async def test_interaction_bypasses_queue(
+        self, config, audit_logger, mock_connector, event_bus
+    ):
+        gate = asyncio.Event()
+        agent = self._make_slow_agent(gate)
+
+        ic = InteractionCoordinator(mock_connector, config, event_bus)
+        eng = Engine(
+            connector=mock_connector,
+            agent=agent,
+            config=config,
+            session_manager=SessionManager(),
+            audit=audit_logger,
+            interaction_coordinator=ic,
+            event_bus=event_bus,
+        )
+
+        task = asyncio.create_task(eng.handle_message("u1", "first", "c1"))
+        await asyncio.sleep(0)
+
+        from tether.core.interactions import PendingInteraction
+
+        pending = PendingInteraction(
+            interaction_id="test-iid", chat_id="c1", kind="question"
+        )
+        ic.pending["test-iid"] = pending
+        ic._chat_index["c1"] = "test-iid"
+
+        result = await eng.handle_message("u1", "option A", "c1")
+        assert result == ""
+
+        ic.pending.pop("test-iid", None)
+        ic._chat_index.pop("c1", None)
+        gate.set()
+        await task
+
+    @pytest.mark.asyncio
+    async def test_agent_error_clears_queue(self, config, audit_logger, mock_connector):
+        failing_agent = FakeAgent(fail=True)
+        eng = Engine(
+            connector=mock_connector,
+            agent=failing_agent,
+            config=config,
+            session_manager=SessionManager(),
+            audit=audit_logger,
+        )
+
+        eng._pending_messages["c1"] = [("u1", "queued msg")]
+
+        result = await eng.handle_message("u1", "trigger", "c1")
+        assert "Error:" in result
+        assert "c1" not in eng._pending_messages
+
+    @pytest.mark.asyncio
+    async def test_clear_command_clears_queue(
+        self, config, audit_logger, mock_connector
+    ):
+        eng = Engine(
+            connector=mock_connector,
+            agent=FakeAgent(),
+            config=config,
+            session_manager=SessionManager(),
+            audit=audit_logger,
+        )
+
+        eng._pending_messages["c1"] = [("u1", "leftover")]
+
+        await eng.handle_command("u1", "clear", "", "c1")
+        assert "c1" not in eng._pending_messages
+
+    @pytest.mark.asyncio
+    async def test_message_queued_event_emitted(
+        self, config, audit_logger, mock_connector
+    ):
+        from tether.core.events import MESSAGE_QUEUED
+
+        events = []
+
+        async def capture(event):
+            events.append(event)
+
+        bus = EventBus()
+        bus.subscribe(MESSAGE_QUEUED, capture)
+
+        gate = asyncio.Event()
+        agent = self._make_slow_agent(gate)
+
+        eng = Engine(
+            connector=mock_connector,
+            agent=agent,
+            config=config,
+            session_manager=SessionManager(),
+            audit=audit_logger,
+            event_bus=bus,
+        )
+
+        task = asyncio.create_task(eng.handle_message("u1", "first", "c1"))
+        await asyncio.sleep(0)
+
+        await eng.handle_message("u1", "second", "c1")
+
+        assert len(events) == 1
+        assert events[0].data["text"] == "second"
+        assert events[0].data["chat_id"] == "c1"
+
+        gate.set()
+        await task
+
+    @pytest.mark.asyncio
+    async def test_queue_isolated_between_chats(
+        self, config, audit_logger, mock_connector
+    ):
+        gate = asyncio.Event()
+        agent = self._make_slow_agent(gate)
+
+        eng = Engine(
+            connector=mock_connector,
+            agent=agent,
+            config=config,
+            session_manager=SessionManager(),
+            audit=audit_logger,
+        )
+
+        task_a = asyncio.create_task(eng.handle_message("u1", "chat-A", "cA"))
+        await asyncio.sleep(0)
+
+        task_b = asyncio.create_task(eng.handle_message("u2", "chat-B", "cB"))
+        await asyncio.sleep(0)
+
+        assert "cA" in eng._executing_chats
+        assert "cB" in eng._executing_chats
+
+        gate.set()
+        await task_a
+        await task_b
+
+        assert len(agent.prompts) == 2
+        assert "chat-A" in agent.prompts
+        assert "chat-B" in agent.prompts
+
+
+class TestPlanModeRegression:
+    """Verify /plan clears session context and blocks non-plan edits."""
+
+    @pytest.mark.asyncio
+    async def test_plan_command_clears_claude_session_id(
+        self, config, audit_logger, policy_engine, mock_connector
+    ):
+        agent = FakeAgent()
+        sm = SessionManager()
+        eng = Engine(
+            connector=mock_connector,
+            agent=agent,
+            config=config,
+            session_manager=sm,
+            policy_engine=policy_engine,
+            audit=audit_logger,
+        )
+
+        # Build up a session with a claude_session_id
+        await eng.handle_message("user1", "hello", "chat1")
+        session = sm.get("user1", "chat1")
+        assert session.claude_session_id == "test-session-123"
+
+        # Switch to plan mode
+        await eng.handle_command("user1", "plan", "", "chat1")
+        session = sm.get("user1", "chat1")
+        assert session.claude_session_id is None
+        assert session.mode == "plan"
+
+    @pytest.mark.asyncio
+    async def test_plan_command_persists_session(
+        self, tmp_path, audit_logger, policy_engine, mock_connector
+    ):
+        from tether.storage.sqlite import SqliteSessionStore
+
+        config = TetherConfig(
+            approved_directories=[tmp_path],
+            audit_log_path=tmp_path / "audit.jsonl",
+        )
+        store = SqliteSessionStore(tmp_path / "sessions.db")
+        await store.setup()
+        try:
+            agent = FakeAgent()
+            sm = SessionManager(store=store)
+            eng = Engine(
+                connector=mock_connector,
+                agent=agent,
+                config=config,
+                session_manager=sm,
+                policy_engine=policy_engine,
+                audit=audit_logger,
+                store=store,
+            )
+
+            await eng.handle_message("user1", "hello", "chat1")
+            await eng.handle_command("user1", "plan", "", "chat1")
+
+            loaded = await store.load("user1", "chat1")
+            assert loaded is not None
+            assert loaded.claude_session_id is None
+        finally:
+            await store.teardown()
+
+    @pytest.mark.asyncio
+    async def test_write_to_source_file_denied_in_plan_mode(
+        self, config, audit_logger, policy_engine
+    ):
+        agent = FakeAgent()
+        eng = Engine(
+            connector=None,
+            agent=agent,
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+        )
+
+        await eng.handle_message("user1", "hello", "chat1")
+        session = eng.session_manager.get("user1", "chat1")
+        session.mode = "plan"
+
+        hook = agent.last_can_use_tool
+        result = await hook(
+            "Write", {"file_path": "/tmp/project/src/main.py", "content": "x"}, None
+        )
+        assert result["behavior"] == "deny"
+        assert "plan mode" in result["message"].lower()
+
+    @pytest.mark.asyncio
+    async def test_edit_to_source_file_denied_in_plan_mode(
+        self, config, audit_logger, policy_engine
+    ):
+        agent = FakeAgent()
+        eng = Engine(
+            connector=None,
+            agent=agent,
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+        )
+
+        await eng.handle_message("user1", "hello", "chat1")
+        session = eng.session_manager.get("user1", "chat1")
+        session.mode = "plan"
+
+        hook = agent.last_can_use_tool
+        result = await hook(
+            "Edit",
+            {
+                "file_path": "/tmp/project/src/main.py",
+                "old_string": "a",
+                "new_string": "b",
+            },
+            None,
+        )
+        assert result["behavior"] == "deny"
+
+    @pytest.mark.asyncio
+    async def test_write_to_plan_file_allowed_in_plan_mode(
+        self, config, audit_logger, policy_engine
+    ):
+        agent = FakeAgent()
+        eng = Engine(
+            connector=None,
+            agent=agent,
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+        )
+
+        await eng.handle_message("user1", "hello", "chat1")
+        session = eng.session_manager.get("user1", "chat1")
+        session.mode = "plan"
+
+        hook = agent.last_can_use_tool
+        # .claude/plans/ path should be allowed
+        result = await hook(
+            "Write",
+            {"file_path": "/home/user/.claude/plans/plan.md", "content": "the plan"},
+            None,
+        )
+        # Should NOT be denied — goes through to gatekeeper
+        assert result != {"behavior": "deny"}
+
+    @pytest.mark.asyncio
+    async def test_dot_plan_file_allowed_in_plan_mode(
+        self, config, audit_logger, policy_engine
+    ):
+        agent = FakeAgent()
+        eng = Engine(
+            connector=None,
+            agent=agent,
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+        )
+
+        await eng.handle_message("user1", "hello", "chat1")
+        session = eng.session_manager.get("user1", "chat1")
+        session.mode = "plan"
+
+        hook = agent.last_can_use_tool
+        result = await hook(
+            "Write",
+            {"file_path": "/tmp/project/feature.plan", "content": "plan"},
+            None,
+        )
+        assert result != {"behavior": "deny"}
+
+    @pytest.mark.asyncio
+    async def test_write_allowed_outside_plan_mode(
+        self, config, audit_logger, policy_engine, tmp_dir
+    ):
+        agent = FakeAgent()
+        eng = Engine(
+            connector=None,
+            agent=agent,
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+        )
+
+        await eng.handle_message("user1", "hello", "chat1")
+        session = eng.session_manager.get("user1", "chat1")
+        assert session.mode == "default"
+
+        hook = agent.last_can_use_tool
+        result = await hook(
+            "Write",
+            {"file_path": str(tmp_dir / "src" / "main.py"), "content": "x"},
+            None,
+        )
+        # Should NOT be the plan-mode deny — goes through to gatekeeper instead
+        assert not (isinstance(result, dict) and result.get("behavior") == "deny")
+
+
+class TestGitCommandWithoutHandler:
+    """Verify /git returns friendly message when no git handler is configured."""
+
+    @pytest.mark.asyncio
+    async def test_git_command_without_handler_returns_not_available(
+        self, config, audit_logger, policy_engine, mock_connector
+    ):
+        agent = FakeAgent()
+        eng = Engine(
+            connector=mock_connector,
+            agent=agent,
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+        )
+
+        result = await eng.handle_command("user1", "git", "status", "chat1")
+        assert result == "Git commands not available."
+
+    @pytest.mark.asyncio
+    async def test_git_command_without_handler_no_args(
+        self, config, audit_logger, policy_engine, mock_connector
+    ):
+        agent = FakeAgent()
+        eng = Engine(
+            connector=mock_connector,
+            agent=agent,
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+        )
+
+        result = await eng.handle_command("user1", "git", "", "chat1")
+        assert result == "Git commands not available."
+
+
+class TestActiveDirNameFallback:
+    """Verify _active_dir_name falls back to basename when no match."""
+
+    @pytest.mark.asyncio
+    async def test_active_dir_name_returns_known_name(
+        self, audit_logger, policy_engine, mock_connector, tmp_path
+    ):
+        d1 = tmp_path / "myproject"
+        d1.mkdir()
+        config = TetherConfig(
+            approved_directories=[d1],
+            audit_log_path=tmp_path / "audit.jsonl",
+        )
+        eng = Engine(
+            connector=mock_connector,
+            agent=FakeAgent(),
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+        )
+
+        await eng.handle_message("user1", "hello", "chat1")
+        session = eng.session_manager.get("user1", "chat1")
+
+        name = eng._active_dir_name(session)
+        assert name == "myproject"
+
+    @pytest.mark.asyncio
+    async def test_active_dir_name_unknown_dir_shows_basename(
+        self, audit_logger, policy_engine, mock_connector, tmp_path
+    ):
+        d1 = tmp_path / "myproject"
+        d1.mkdir()
+        config = TetherConfig(
+            approved_directories=[d1],
+            audit_log_path=tmp_path / "audit.jsonl",
+        )
+        eng = Engine(
+            connector=mock_connector,
+            agent=FakeAgent(),
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+        )
+
+        await eng.handle_message("user1", "hello", "chat1")
+        session = eng.session_manager.get("user1", "chat1")
+        # Point session to a directory not in the config
+        session.working_directory = str(tmp_path / "unknown_project")
+
+        name = eng._active_dir_name(session)
+        assert name == "unknown_project"
+
+
+class TestCombineQueuedMessages:
+    """Verify _combine_queued_messages static method behavior."""
+
+    def test_single_message_returns_text_directly(self):
+        result = Engine._combine_queued_messages([("user1", "hello world")])
+        assert result == "hello world"
+
+    def test_multiple_messages_joined_with_double_newline(self):
+        messages = [
+            ("user1", "first message"),
+            ("user2", "second message"),
+            ("user1", "third message"),
+        ]
+        result = Engine._combine_queued_messages(messages)
+        assert result == "first message\n\nsecond message\n\nthird message"
+
+    def test_two_messages_joined(self):
+        messages = [("u1", "alpha"), ("u1", "beta")]
+        result = Engine._combine_queued_messages(messages)
+        assert result == "alpha\n\nbeta"
+
+
+class TestResolvePlanContentFallbacks:
+    """Verify _resolve_plan_content priority: disk → cached write → fallback."""
+
+    def test_disk_file_preferred(self, config, audit_logger, tmp_path):
+        from tether.core.engine import _ToolCallbackState
+
+        eng = Engine(
+            connector=None,
+            agent=FakeAgent(),
+            config=config,
+            session_manager=SessionManager(),
+            audit=audit_logger,
+        )
+
+        plan_file = tmp_path / "plan.md"
+        plan_file.write_text("# Disk Plan Content")
+
+        state = _ToolCallbackState()
+        state.plan_file_path = str(plan_file)
+        state.plan_file_content = "# Cached Content (should not be used)"
+
+        result = eng._resolve_plan_content(state, "fallback text")
+        assert result == "# Disk Plan Content"
+
+    def test_cached_write_fallback_when_no_disk_file(self, config, audit_logger):
+        from tether.core.engine import _ToolCallbackState
+
+        eng = Engine(
+            connector=None,
+            agent=FakeAgent(),
+            config=config,
+            session_manager=SessionManager(),
+            audit=audit_logger,
+        )
+
+        state = _ToolCallbackState()
+        state.plan_file_path = "/nonexistent/path/plan.md"
+        state.plan_file_content = "# Cached Plan"
+
+        result = eng._resolve_plan_content(state, "fallback text")
+        assert result == "# Cached Plan"
+
+    def test_response_fallback_when_neither_exists(self, config, audit_logger):
+        from unittest.mock import patch
+
+        from tether.core.engine import _ToolCallbackState
+
+        eng = Engine(
+            connector=None,
+            agent=FakeAgent(),
+            config=config,
+            session_manager=SessionManager(),
+            audit=audit_logger,
+        )
+
+        state = _ToolCallbackState()
+        # No plan_file_path, no cached content
+
+        with patch.object(eng, "_discover_plan_file", return_value=None):
+            result = eng._resolve_plan_content(state, "the agent response content")
+        assert result == "the agent response content"
+
+    def test_disk_error_falls_back_to_cached_write(
+        self, config, audit_logger, tmp_path
+    ):
+        from tether.core.engine import _ToolCallbackState
+
+        eng = Engine(
+            connector=None,
+            agent=FakeAgent(),
+            config=config,
+            session_manager=SessionManager(),
+            audit=audit_logger,
+        )
+
+        # Create a plan_file_path that exists as a directory (will cause read error)
+        bad_path = tmp_path / "plan_as_dir.md"
+        bad_path.mkdir()
+
+        state = _ToolCallbackState()
+        state.plan_file_path = str(bad_path)
+        state.plan_file_content = "# Cached Fallback"
+
+        result = eng._resolve_plan_content(state, "response fallback")
+        assert result == "# Cached Fallback"
+
+    def test_disk_error_no_cache_falls_back_to_response(
+        self, config, audit_logger, tmp_path
+    ):
+        from tether.core.engine import _ToolCallbackState
+
+        eng = Engine(
+            connector=None,
+            agent=FakeAgent(),
+            config=config,
+            session_manager=SessionManager(),
+            audit=audit_logger,
+        )
+
+        bad_path = tmp_path / "plan_as_dir.md"
+        bad_path.mkdir()
+
+        state = _ToolCallbackState()
+        state.plan_file_path = str(bad_path)
+        # No cached content
+
+        result = eng._resolve_plan_content(state, "last resort fallback")
+        assert result == "last resort fallback"
+
+
+class TestDefaultButtonSessionMode:
+    """Verify _exit_plan_mode sets session.mode correctly for different target_modes."""
+
+    @pytest.mark.asyncio
+    async def test_fallback_default_sets_session_mode_to_default(
+        self, config, policy_engine, audit_logger, mock_connector
+    ):
+        """When fallback review fires and user clicks 'default', session.mode = 'default'."""
+        coordinator = InteractionCoordinator(mock_connector, config)
+
+        class PlanSkipAgent(BaseAgent):
+            async def execute(self, prompt, session, *, can_use_tool=None, **kwargs):
+                if can_use_tool and not prompt.startswith("Implement"):
+                    plan_path = f"{session.working_directory}/.claude/plans/plan.md"
+                    await can_use_tool(
+                        "Write",
+                        {"file_path": plan_path, "content": "# Plan\n1. Do thing"},
+                        None,
+                    )
+                return AgentResponse(
+                    content="# Plan\n1. Do thing",
+                    session_id="sid",
+                    cost=0.01,
+                )
+
+            async def cancel(self, session_id):
+                pass
+
+            async def shutdown(self):
+                pass
+
+        eng = Engine(
+            connector=mock_connector,
+            agent=PlanSkipAgent(),
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+            interaction_coordinator=coordinator,
+        )
+
+        session = await eng.session_manager.get_or_create(
+            "user1", "chat1", str(config.approved_directories[0])
+        )
+        session.mode = "plan"
+        session.message_count = 2
+
+        async def click_default():
+            await asyncio.sleep(0.05)
+            req = mock_connector.plan_review_requests[0]
+            await coordinator.resolve_option(req["interaction_id"], "default")
+
+        task = asyncio.create_task(click_default())
+        await eng.handle_message("user1", "Plan it", "chat1")
+        await task
+
+        assert session.mode == "default"
+
+    @pytest.mark.asyncio
+    async def test_clean_edit_sets_session_mode_to_auto(
+        self, config, policy_engine, audit_logger, mock_connector
+    ):
+        """When user clicks 'clean_edit', _exit_plan_mode sets session.mode = 'auto'."""
+        coordinator = InteractionCoordinator(mock_connector, config)
+
+        class PlanAgent(BaseAgent):
+            def __init__(self):
+                self.last_can_use_tool = None
+
+            async def execute(self, prompt, session, *, can_use_tool=None, **kwargs):
+                self.last_can_use_tool = can_use_tool
+                if not prompt.startswith("Implement"):
+
+                    async def click_clean():
+                        await asyncio.sleep(0.05)
+                        req = mock_connector.plan_review_requests[0]
+                        await coordinator.resolve_option(
+                            req["interaction_id"], "clean_edit"
+                        )
+
+                    task = asyncio.create_task(click_clean())
+                    await can_use_tool("ExitPlanMode", {}, None)
+                    await task
+                return AgentResponse(content="Done", session_id="sid", cost=0.01)
+
+            async def cancel(self, session_id):
+                pass
+
+            async def shutdown(self):
+                pass
+
+        eng = Engine(
+            connector=mock_connector,
+            agent=PlanAgent(),
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+            interaction_coordinator=coordinator,
+        )
+
+        await eng.handle_message("user1", "Plan it", "chat1")
+        session = eng.session_manager.get("user1", "chat1")
+        assert session.mode == "auto"
+
+
+class TestTurnLimitWarningContent:
+    """Verify turn limit warning includes actionable guidance."""
+
+    @pytest.mark.asyncio
+    async def test_warning_includes_continue_option(
+        self, config, audit_logger, policy_engine, mock_connector
+    ):
+        class LimitAgent(BaseAgent):
+            async def execute(self, prompt, session, **kwargs):
+                return AgentResponse(
+                    content="partial",
+                    session_id="sid",
+                    cost=0.01,
+                    num_turns=config.max_turns,
+                )
+
+            async def cancel(self, session_id):
+                pass
+
+            async def shutdown(self):
+                pass
+
+        eng = Engine(
+            connector=mock_connector,
+            agent=LimitAgent(),
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+        )
+
+        await eng.handle_message("user1", "do stuff", "chat1")
+
+        turn_msgs = [
+            m for m in mock_connector.sent_messages if "turn limit" in m["text"].lower()
+        ]
+        assert len(turn_msgs) == 1
+        text = turn_msgs[0]["text"]
+        assert "Send a message to continue" in text
+        assert "/clear" in text
+        assert "TETHER_MAX_TURNS" in text
+
+    @pytest.mark.asyncio
+    async def test_warning_exceeds_max_turns(
+        self, config, audit_logger, policy_engine, mock_connector
+    ):
+        """Warning also fires when num_turns exceeds max_turns (not just equals)."""
+
+        class OverLimitAgent(BaseAgent):
+            async def execute(self, prompt, session, **kwargs):
+                return AgentResponse(
+                    content="exceeded",
+                    session_id="sid",
+                    cost=0.01,
+                    num_turns=config.max_turns + 3,
+                )
+
+            async def cancel(self, session_id):
+                pass
+
+            async def shutdown(self):
+                pass
+
+        eng = Engine(
+            connector=mock_connector,
+            agent=OverLimitAgent(),
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+        )
+
+        await eng.handle_message("user1", "do stuff", "chat1")
+
+        turn_msgs = [
+            m for m in mock_connector.sent_messages if "turn limit" in m["text"].lower()
+        ]
+        assert len(turn_msgs) == 1

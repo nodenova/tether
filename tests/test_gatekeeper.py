@@ -602,15 +602,30 @@ class TestApprovalKeyExtraction:
 
     def test_bash_with_subcommand(self):
         assert (
-            _approval_key("Bash", {"command": "uv run pytest tests/"}) == "Bash::uv run"
+            _approval_key("Bash", {"command": "uv run pytest tests/"})
+            == "Bash::uv run pytest"
         )
         assert (
             _approval_key("Bash", {"command": "docker compose up"})
-            == "Bash::docker compose"
+            == "Bash::docker compose up"
         )
         assert (
-            _approval_key("Bash", {"command": "npm install foo"}) == "Bash::npm install"
+            _approval_key("Bash", {"command": "npm install foo"})
+            == "Bash::npm install foo"
         )
+
+    def test_bash_three_word_key(self):
+        assert (
+            _approval_key("Bash", {"command": "git push origin main"})
+            == "Bash::git push origin"
+        )
+        assert (
+            _approval_key("Bash", {"command": "uv run python script.py"})
+            == "Bash::uv run python"
+        )
+
+    def test_bash_third_word_is_flag_stops_at_two(self):
+        assert _approval_key("Bash", {"command": "uv run -m tether"}) == "Bash::uv run"
 
     def test_bash_with_flag_second_token(self):
         assert _approval_key("Bash", {"command": "git -C /path status"}) == "Bash::git"
@@ -639,7 +654,10 @@ class TestApprovalKeyExtraction:
         assert _approval_key("Bash", {"command": "ls"}) == "Bash::ls"
 
     def test_bash_whitespace_stripped(self):
-        assert _approval_key("Bash", {"command": "  uv run pytest  "}) == "Bash::uv run"
+        assert (
+            _approval_key("Bash", {"command": "  uv run pytest  "})
+            == "Bash::uv run pytest"
+        )
 
     def test_bash_skips_single_env_var(self):
         assert _approval_key("Bash", {"command": "FOO=bar ls"}) == "Bash::ls"
@@ -653,12 +671,18 @@ class TestApprovalKeyExtraction:
                     "uv run pytest tests/"
                 },
             )
-            == "Bash::uv run"
+            == "Bash::uv run pytest"
         )
 
     def test_bash_skips_env_vars_with_subcommand(self):
         assert (
             _approval_key("Bash", {"command": "A=1 B=2 make test"}) == "Bash::make test"
+        )
+
+    def test_bash_skips_env_vars_three_words(self):
+        assert (
+            _approval_key("Bash", {"command": "A=1 B=2 make test all"})
+            == "Bash::make test all"
         )
 
     def test_bash_only_env_vars_no_command(self):
@@ -669,8 +693,8 @@ class TestApprovalKeyExtraction:
 
     def test_bash_invalid_identifier_not_skipped(self):
         assert (
-            _approval_key("Bash", {"command": "foo/bar=baz cmd"})
-            == "Bash::foo/bar=baz cmd"
+            _approval_key("Bash", {"command": "foo/bar=baz cmd arg"})
+            == "Bash::foo/bar=baz cmd arg"
         )
 
     def test_bash_env_var_with_flag_after(self):
@@ -906,3 +930,105 @@ class TestGatekeeperRejectionReason:
         mock_audit.log_approval.assert_called_once()
         call_kwargs = mock_audit.log_approval.call_args
         assert call_kwargs[1]["rejection_reason"] is None
+
+
+class TestCdStrippingApprovalKeys:
+    def test_cd_prefix_stripped_from_key(self):
+        assert (
+            _approval_key("Bash", {"command": "cd /project && uv run pytest"})
+            == "Bash::uv run pytest"
+        )
+
+    def test_chained_cd_stripped(self):
+        assert (
+            _approval_key("Bash", {"command": "cd /a && cd /b && git status"})
+            == "Bash::git status"
+        )
+
+    def test_dangerous_cd_not_stripped(self):
+        key = _approval_key("Bash", {"command": "cd$(rm -rf /) && ls"})
+        assert key.startswith("Bash::cd")
+
+    def test_cd_semicolon_stripped(self):
+        assert (
+            _approval_key("Bash", {"command": "cd /project ; make build"})
+            == "Bash::make build"
+        )
+
+    def test_bare_cd_no_chain(self):
+        assert _approval_key("Bash", {"command": "cd /project"}) == "Bash::cd"
+
+
+class TestHierarchicalAutoApprove:
+    @pytest.fixture
+    def gk(self, sandbox, mock_audit, event_bus, policy_engine, approval_coordinator):
+        return ToolGatekeeper(
+            sandbox=sandbox,
+            audit=mock_audit,
+            event_bus=event_bus,
+            policy_engine=policy_engine,
+            approval_coordinator=approval_coordinator,
+        )
+
+    @pytest.mark.asyncio
+    async def test_broader_key_covers_narrower(self, gk, mock_connector, mock_audit):
+        gk.enable_tool_auto_approve("c1", "Bash::uv run")
+
+        result = await gk.check("Bash", {"command": "uv run pytest tests/"}, "s1", "c1")
+        assert result.behavior == "allow"
+        assert len(mock_connector.approval_requests) == 0
+
+    @pytest.mark.asyncio
+    async def test_narrower_key_does_not_cover_broader(
+        self, gk, mock_connector, approval_coordinator
+    ):
+        import asyncio
+
+        gk.enable_tool_auto_approve("c1", "Bash::uv run pytest")
+
+        async def approve():
+            await asyncio.sleep(0.05)
+            req = mock_connector.approval_requests[0]
+            await approval_coordinator.resolve_approval(req["approval_id"], True)
+
+        # "uv run python" should NOT be covered by "Bash::uv run pytest"
+        task = asyncio.create_task(approve())
+        result = await gk.check(
+            "Bash", {"command": "uv run python script.py"}, "s1", "c1"
+        )
+        await task
+        assert result.behavior == "allow"
+        assert len(mock_connector.approval_requests) == 1
+
+    @pytest.mark.asyncio
+    async def test_word_boundary_prevents_false_match(
+        self, gk, mock_connector, approval_coordinator
+    ):
+        import asyncio
+
+        gk.enable_tool_auto_approve("c1", "Bash::git")
+
+        async def approve():
+            await asyncio.sleep(0.05)
+            req = mock_connector.approval_requests[0]
+            await approval_coordinator.resolve_approval(req["approval_id"], True)
+
+        # "gitx status" should NOT be covered by "Bash::git"
+        task = asyncio.create_task(approve())
+        result = await gk.check("Bash", {"command": "gitx status"}, "s1", "c1")
+        await task
+        assert result.behavior == "allow"
+        assert len(mock_connector.approval_requests) == 1
+
+    @pytest.mark.asyncio
+    async def test_exact_match_still_works(self, gk, mock_connector, mock_audit):
+        gk.enable_tool_auto_approve("c1", "Bash::git push origin")
+
+        result = await gk.check("Bash", {"command": "git push origin main"}, "s1", "c1")
+        assert result.behavior == "allow"
+        assert len(mock_connector.approval_requests) == 0
+
+    def test_non_bash_no_hierarchical(self, gk):
+        gk.enable_tool_auto_approve("c1", "Write")
+        assert gk._matches_auto_approved("c1", "Write") is True
+        assert gk._matches_auto_approved("c1", "WriteExtra") is False

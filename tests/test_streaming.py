@@ -549,3 +549,180 @@ class TestEngineToolActivityWiring:
         assert result == "Hello"
         # No streaming — plain send used, no edits
         assert len(connector.edited_messages) == 0
+
+
+# --- _StreamingResponder overflow tests ---
+
+
+class TestStreamingResponderOverflow:
+    @pytest.mark.asyncio
+    async def test_overflow_creates_new_message(self):
+        connector = MockConnector(support_streaming=True)
+        responder = _StreamingResponder(connector, "chat1", throttle_seconds=0.0)
+
+        await responder.on_chunk("a" * 3000)
+        await responder.on_chunk("b" * 2000)
+
+        # First chunk: initial send (3000 chars)
+        # Second chunk: buffer=5000, overflows → edit msg1 with 4000 chars, send msg2
+        assert len(connector.sent_messages) == 2
+        assert len(connector.edited_messages) >= 1
+        # First edit commits 4000 chars (no cursor)
+        assert connector.edited_messages[0]["text"] == "a" * 3000 + "b" * 1000
+        # Second message starts with remaining 1000 "b"s + cursor
+        assert connector.sent_messages[1]["text"] == "b" * 1000 + "\u258d"
+
+    @pytest.mark.asyncio
+    async def test_multiple_overflows_chain_messages(self):
+        connector = MockConnector(support_streaming=True)
+        responder = _StreamingResponder(connector, "chat1", throttle_seconds=0.0)
+
+        await responder.on_chunk("a" * 100)
+        # Now add enough to overflow twice
+        await responder.on_chunk("b" * 8500)
+
+        # buffer = 8600 chars total
+        # Overflow 1: commit 0..4000, new msg for 4000..8600
+        # Overflow 2: commit 4000..8000, new msg for 8000..8600
+        assert len(connector.sent_messages) == 3  # initial + 2 overflows
+
+    @pytest.mark.asyncio
+    async def test_single_huge_chunk_creates_multiple_messages(self):
+        connector = MockConnector(support_streaming=True)
+        responder = _StreamingResponder(connector, "chat1", throttle_seconds=0.0)
+
+        await responder.on_chunk("x" * 100)
+        await responder.on_chunk("y" * 12000)
+
+        # buffer = 12100, overflows 3 times: 0..4000, 4000..8000, 8000..12000
+        # 4 total messages: initial + 3 overflows (last has 12000..12100)
+        assert len(connector.sent_messages) == 4
+
+    @pytest.mark.asyncio
+    async def test_finalize_after_overflow_only_handles_tail(self):
+        connector = MockConnector(support_streaming=True)
+        responder = _StreamingResponder(connector, "chat1", throttle_seconds=0.0)
+
+        await responder.on_chunk("a" * 3000)
+        await responder.on_chunk("b" * 2000)
+        # After overflow: offset=4000, msg2 has "b"*1000
+
+        full_text = "a" * 3000 + "b" * 2000
+        result = await responder.finalize(full_text)
+
+        assert result is True
+        # Final edit should be the tail (last 1000 chars)
+        final_edit = connector.edited_messages[-1]
+        assert final_edit["text"] == "b" * 1000
+
+    @pytest.mark.asyncio
+    async def test_finalize_after_overflow_with_tools_summary(self):
+        connector = MockConnector(support_streaming=True)
+        responder = _StreamingResponder(connector, "chat1", throttle_seconds=0.0)
+
+        await responder.on_chunk("a" * 3000)
+        await responder.on_chunk("b" * 2000)
+        await responder.on_activity(ToolActivity(tool_name="Read", description="/a"))
+
+        full_text = "a" * 3000 + "b" * 2000
+        result = await responder.finalize(full_text)
+
+        assert result is True
+        final_edit = connector.edited_messages[-1]
+        assert "\U0001f9f0" in final_edit["text"]
+        assert "Read" in final_edit["text"]
+        # Tail is 1000 "b"s + summary
+        assert final_edit["text"].startswith("b" * 1000)
+
+    @pytest.mark.asyncio
+    async def test_overflow_deactivates_on_none_msg_id(self):
+        connector = MockConnector(support_streaming=True)
+        responder = _StreamingResponder(connector, "chat1", throttle_seconds=0.0)
+
+        await responder.on_chunk("a" * 100)
+        # Overflow sends a new message; patch to return None
+        with patch.object(connector, "send_message_with_id", return_value=None):
+            await responder.on_chunk("b" * 4500)
+
+        # Overflow tried to send new message, got None → deactivated
+        assert responder._active is False
+
+    @pytest.mark.asyncio
+    async def test_exact_boundary_no_overflow(self):
+        connector = MockConnector(support_streaming=True)
+        responder = _StreamingResponder(connector, "chat1", throttle_seconds=0.0)
+        await responder.on_chunk("a" * 100)
+        await responder.on_chunk("b" * 3900)
+        assert len(connector.sent_messages) == 1
+        assert responder._display_offset == 0
+
+    @pytest.mark.asyncio
+    async def test_first_chunk_exceeds_max_defers_overflow(self):
+        connector = MockConnector(support_streaming=True)
+        responder = _StreamingResponder(connector, "chat1", throttle_seconds=0.0)
+        await responder.on_chunk("x" * 5000)
+        assert len(connector.sent_messages) == 1
+        assert responder._display_offset == 0
+        assert connector.sent_messages[0]["text"] == "x" * 4000 + "\u258d"
+        # Second chunk triggers overflow
+        await responder.on_chunk("y" * 100)
+        assert responder._display_offset == 4000
+        assert len(connector.sent_messages) == 2
+
+    @pytest.mark.asyncio
+    async def test_reset_clears_display_offset(self):
+        connector = MockConnector(support_streaming=True)
+        responder = _StreamingResponder(connector, "chat1", throttle_seconds=0.0)
+
+        await responder.on_chunk("a" * 3000)
+        await responder.on_chunk("b" * 2000)
+        assert responder._display_offset == 4000
+
+        responder.reset()
+
+        assert responder._display_offset == 0
+        assert responder._buffer == ""
+
+    @pytest.mark.asyncio
+    async def test_short_response_unchanged(self):
+        """Regression guard: short responses behave identically to before."""
+        connector = MockConnector(support_streaming=True)
+        responder = _StreamingResponder(connector, "chat1", throttle_seconds=0.0)
+
+        await responder.on_chunk("Hello")
+        await responder.on_chunk(" World")
+        result = await responder.finalize("Hello World")
+
+        assert result is True
+        assert responder._display_offset == 0
+        assert len(connector.sent_messages) == 1
+        final_edit = connector.edited_messages[-1]
+        assert final_edit["text"] == "Hello World"
+
+
+# --- Engine integration: overflow ---
+
+
+class TestEngineStreamingOverflow:
+    @pytest.mark.asyncio
+    async def test_long_response_creates_multiple_messages(self, config, audit_logger):
+        connector = MockConnector(support_streaming=True)
+        # Create chunks totaling >4000 chars
+        chunks = ["x" * 1000 for _ in range(6)]  # 6000 total
+        agent = FakeStreamingAgent(chunks)
+        eng = Engine(
+            connector=connector,
+            agent=agent,
+            config=config,
+            session_manager=SessionManager(),
+            audit=audit_logger,
+        )
+
+        result = await eng.handle_message("user1", "hi", "chat1")
+
+        assert result == "x" * 6000
+        # Should have created at least 2 streaming messages
+        streaming_msgs = [
+            m for m in connector.sent_messages if m.get("message_id") is not None
+        ]
+        assert len(streaming_msgs) >= 2

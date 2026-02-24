@@ -7,11 +7,17 @@
 [![Status: Alpha](https://img.shields.io/badge/status-alpha-orange.svg)](#status)
 [![License](https://img.shields.io/badge/license-TBD-lightgrey.svg)](#)
 
-Built by [NodeNova](https://github.com/nodenova)
-
 ---
 
 Tether lets you send natural-language coding instructions from Telegram on your phone to a Claude Code agent running on your dev machine. A three-layer safety pipeline — sandbox, policy rules, and human approval — keeps the AI from doing anything dangerous without your explicit sign-off.
+
+## What's New in 0.2.0
+
+- **Git from your phone** — run `/git status`, `/git commit`, `/git push` and more directly from Telegram with inline action buttons
+- **Smart git workflows** — auto-generated commit messages, fuzzy branch search, interactive file staging
+- **Full audit trail** — every git operation is logged with session context
+
+See [CHANGELOG.md](CHANGELOG.md) for full details.
 
 ## Features
 
@@ -303,4 +309,3 @@ uv run ruff check --fix .
 uv run ruff format .
 ```
 
-Built by [NodeNova](https://github.com/nodenova).

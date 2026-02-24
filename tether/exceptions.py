@@ -35,3 +35,7 @@ class PluginError(TetherError):
 
 class InteractionTimeoutError(TetherError):
     """User did not respond to an interaction prompt in time."""
+
+
+class ConnectorError(TetherError):
+    """Connector failed after exhausting retries."""

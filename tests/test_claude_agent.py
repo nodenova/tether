@@ -130,7 +130,7 @@ class TestClaudeCodeAgent:
         opts = agent._build_options(session, can_use_tool=None)
         assert opts.cwd == session.working_directory
         assert opts.max_turns == 5  # from config fixture
-        assert opts.permission_mode is None
+        assert opts.permission_mode == "default"
         assert opts.setting_sources == ["project"]
         assert opts.resume is None
 
@@ -153,7 +153,8 @@ class TestClaudeCodeAgent:
             mode="auto",
         )
         opts = agent._build_options(session, can_use_tool=None)
-        assert opts.system_prompt == "Be a pirate."
+        assert agent._AUTO_MODE_INSTRUCTION in opts.system_prompt
+        assert "Be a pirate." in opts.system_prompt
 
     def test_build_options_with_allowed_tools(self, tmp_path):
         config = TetherConfig(
@@ -258,10 +259,10 @@ class TestClaudeCodeAgent:
         opts = agent._build_options(session, can_use_tool=None)
         assert opts.resume is None
 
-    def test_no_system_prompt_when_unconfigured(self, agent, session):
+    def test_auto_mode_sets_instruction_when_no_config_prompt(self, agent, session):
         session.mode = "auto"
         opts = agent._build_options(session, can_use_tool=None)
-        assert not hasattr(opts, "system_prompt") or opts.system_prompt is None
+        assert opts.system_prompt == agent._AUTO_MODE_INSTRUCTION
 
     def test_plan_mode_prepends_instruction(self, agent, session):
         session.mode = "plan"
@@ -289,9 +290,58 @@ class TestClaudeCodeAgent:
     def test_auto_mode_no_plan_instruction(self, agent, session):
         session.mode = "auto"
         opts = agent._build_options(session, can_use_tool=None)
+        assert agent._AUTO_MODE_INSTRUCTION in opts.system_prompt
+        assert agent._PLAN_MODE_INSTRUCTION not in opts.system_prompt
+
+    def test_auto_mode_prepends_instruction(self, agent, session):
+        session.mode = "auto"
+        opts = agent._build_options(session, can_use_tool=None)
+        assert opts.system_prompt == agent._AUTO_MODE_INSTRUCTION
+
+    def test_auto_mode_with_existing_system_prompt(self, tmp_path):
+        config = TetherConfig(
+            approved_directories=[tmp_path],
+            system_prompt="Be a pirate.",
+        )
+        agent = ClaudeCodeAgent(config)
+        session = Session(
+            session_id="s1",
+            user_id="u1",
+            chat_id="c1",
+            working_directory=str(tmp_path),
+            mode="auto",
+        )
+        opts = agent._build_options(session, can_use_tool=None)
+        assert agent._AUTO_MODE_INSTRUCTION in opts.system_prompt
+        assert "Be a pirate." in opts.system_prompt
+        assert opts.system_prompt.startswith(agent._AUTO_MODE_INSTRUCTION)
+
+    def test_default_mode_no_auto_instruction(self, agent, session):
+        session.mode = "default"
+        opts = agent._build_options(session, can_use_tool=None)
         sp = getattr(opts, "system_prompt", None)
         if sp:
-            assert agent._PLAN_MODE_INSTRUCTION not in sp
+            assert agent._AUTO_MODE_INSTRUCTION not in sp
+
+    def test_build_options_auto_mode_sets_accept_edits_permission(self, agent, session):
+        session.mode = "auto"
+        opts = agent._build_options(session, can_use_tool=None)
+        assert opts.permission_mode == "acceptEdits"
+
+    def test_build_options_plan_mode_sets_plan_permission(self, agent, session):
+        session.mode = "plan"
+        opts = agent._build_options(session, can_use_tool=None)
+        assert opts.permission_mode == "plan"
+
+    def test_build_options_default_mode_sets_default_permission(self, agent, session):
+        session.mode = "default"
+        opts = agent._build_options(session, can_use_tool=None)
+        assert opts.permission_mode == "default"
+
+    def test_build_options_unknown_mode_falls_back_to_default(self, agent, session):
+        session.mode = "unknown"
+        opts = agent._build_options(session, can_use_tool=None)
+        assert opts.permission_mode == "default"
 
     def test_mode_instruction_prepends(self, agent, session):
         session.mode_instruction = "You are in test mode."
@@ -834,6 +884,51 @@ class TestSafeSDKClient:
             {"type": "heartbeat", "ts": 123},
             {"type": "unknown_future_type"},
         ]
+
+        client = _SafeSDKClient.__new__(_SafeSDKClient)
+        client._query = MagicMock()
+        client._query.receive_messages = MagicMock(
+            return_value=AsyncIterHelper(raw_messages)
+        )
+
+        messages = [msg async for msg in client.receive_messages()]
+        assert len(messages) == 0
+
+    @pytest.mark.asyncio
+    async def test_dict_without_type_key_skipped(self):
+        """A raw dict missing the 'type' key should be skipped gracefully."""
+        from tether.agents.claude_code import _SafeSDKClient
+
+        raw_messages = [
+            {"data": "no type key here"},
+            {
+                "type": "assistant",
+                "message": {
+                    "content": [{"type": "text", "text": "valid"}],
+                    "model": "claude-opus-4-6",
+                },
+            },
+        ]
+
+        client = _SafeSDKClient.__new__(_SafeSDKClient)
+        client._query = MagicMock()
+        client._query.receive_messages = MagicMock(
+            return_value=AsyncIterHelper(raw_messages)
+        )
+
+        messages = [msg async for msg in client.receive_messages()]
+        # Only the valid assistant message should come through
+        assert len(messages) == 1
+        from claude_agent_sdk import AssistantMessage
+
+        assert isinstance(messages[0], AssistantMessage)
+
+    @pytest.mark.asyncio
+    async def test_empty_dict_skipped(self):
+        """An empty dict should be skipped without crashing."""
+        from tether.agents.claude_code import _SafeSDKClient
+
+        raw_messages = [{}]
 
         client = _SafeSDKClient.__new__(_SafeSDKClient)
         client._query = MagicMock()

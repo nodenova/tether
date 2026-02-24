@@ -89,6 +89,11 @@ class SessionManager:
         key = self._key(user_id, chat_id)
         return self._sessions.get(key)
 
+    async def save(self, session: Session) -> None:
+        """Persist current session state to the store (if configured)."""
+        if self._store:
+            await self._store.save(session)
+
     async def update_from_result(
         self,
         session: Session,
@@ -110,6 +115,30 @@ class SessionManager:
             message_count=session.message_count,
             total_cost=session.total_cost,
             has_claude_session=session.claude_session_id is not None,
+        )
+
+    async def reset(self, user_id: str, chat_id: str) -> None:
+        """Clear conversation state but preserve working_directory."""
+        key = self._key(user_id, chat_id)
+        session = self._sessions.get(key)
+        if not session:
+            return
+        session.session_id = str(uuid.uuid4())
+        session.claude_session_id = None
+        session.message_count = 0
+        session.total_cost = 0.0
+        session.mode = "default"
+        session.created_at = datetime.now(UTC)
+        session.last_used = datetime.now(UTC)
+        session.is_active = True
+        if self._store:
+            await self._store.save(session)
+        logger.info(
+            "session_reset",
+            user_id=user_id,
+            chat_id=chat_id,
+            session_id=session.session_id,
+            working_directory=session.working_directory,
         )
 
     async def deactivate(self, user_id: str, chat_id: str) -> None:

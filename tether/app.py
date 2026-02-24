@@ -19,6 +19,8 @@ from tether.core.safety.audit import AuditLogger
 from tether.core.safety.policy import PolicyEngine
 from tether.core.safety.sandbox import SandboxEnforcer
 from tether.core.session import SessionManager
+from tether.git.handler import GitCommandHandler
+from tether.git.service import GitService
 from tether.middleware.auth import AuthMiddleware
 from tether.middleware.base import MiddlewareChain
 from tether.middleware.rate_limit import RateLimitMiddleware
@@ -150,6 +152,17 @@ def build_engine(
             RateLimitMiddleware(config.rate_limit_rpm, config.rate_limit_burst)
         )
 
+    # Git command handler
+    git_handler = None
+    if connector:
+        git_handler = GitCommandHandler(
+            service=GitService(),
+            connector=connector,
+            sandbox=sandbox,
+            audit=audit,
+            event_bus=event_bus,
+        )
+
     logger.info(
         "engine_built",
         has_auth=bool(config.allowed_user_ids),
@@ -172,4 +185,5 @@ def build_engine(
         plugin_registry=registry,
         middleware_chain=middleware_chain,
         store=store,
+        git_handler=git_handler,
     )

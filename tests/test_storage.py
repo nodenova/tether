@@ -436,6 +436,108 @@ class TestSessionManagerCleanupEdgeCases:
         assert session.total_cost == pytest.approx(999999.99)
 
 
+class TestSessionManagerReset:
+    @pytest.mark.asyncio
+    async def test_session_manager_reset_preserves_directory(self):
+        mgr = SessionManager()
+        session = await mgr.get_or_create("u1", "c1", "/tmp/project")
+        original_id = session.session_id
+        session.claude_session_id = "claude-abc"
+        session.message_count = 5
+        session.total_cost = 1.23
+        session.mode = "auto"
+
+        await mgr.reset("u1", "c1")
+
+        assert session.working_directory == "/tmp/project"
+        assert session.session_id != original_id
+        assert session.claude_session_id is None
+        assert session.message_count == 0
+        assert session.total_cost == 0.0
+        assert session.mode == "default"
+        assert session.is_active is True
+
+    @pytest.mark.asyncio
+    async def test_session_manager_reset_noop_when_no_session(self):
+        mgr = SessionManager()
+        await mgr.reset("nonexistent", "nope")  # Should not raise
+
+
+class TestSqliteConcurrentAccess:
+    """Verify SQLite handles concurrent operations without corruption."""
+
+    @pytest.mark.asyncio
+    async def test_concurrent_save_and_load_different_keys(self, tmp_path):
+        import asyncio
+
+        store = SqliteSessionStore(tmp_path / "concurrent.db")
+        await store.setup()
+        try:
+            s1 = _make_session(session_id="s1", user_id="u1", chat_id="c1")
+            s2 = _make_session(session_id="s2", user_id="u2", chat_id="c2")
+
+            # Save both concurrently
+            await asyncio.gather(store.save(s1), store.save(s2))
+
+            # Load both concurrently
+            loaded1, loaded2 = await asyncio.gather(
+                store.load("u1", "c1"), store.load("u2", "c2")
+            )
+
+            assert loaded1 is not None
+            assert loaded1.session_id == "s1"
+            assert loaded2 is not None
+            assert loaded2.session_id == "s2"
+        finally:
+            await store.teardown()
+
+    @pytest.mark.asyncio
+    async def test_concurrent_save_same_key_last_write_wins(self, tmp_path):
+        import asyncio
+
+        store = SqliteSessionStore(tmp_path / "concurrent2.db")
+        await store.setup()
+        try:
+            s1 = _make_session(total_cost=1.0)
+            s2 = _make_session(total_cost=2.0)
+
+            # Save both versions of the same key concurrently
+            await asyncio.gather(store.save(s1), store.save(s2))
+
+            loaded = await store.load("u1", "c1")
+            assert loaded is not None
+            # One of the two costs should have persisted
+            assert loaded.total_cost in (1.0, 2.0)
+        finally:
+            await store.teardown()
+
+    @pytest.mark.asyncio
+    async def test_concurrent_save_and_load_interleaved(self, tmp_path):
+        import asyncio
+
+        store = SqliteSessionStore(tmp_path / "concurrent3.db")
+        await store.setup()
+        try:
+            sessions = [
+                _make_session(session_id=f"s{i}", user_id=f"u{i}", chat_id=f"c{i}")
+                for i in range(10)
+            ]
+
+            # Save all concurrently
+            await asyncio.gather(*[store.save(s) for s in sessions])
+
+            # Load all concurrently
+            results = await asyncio.gather(
+                *[store.load(f"u{i}", f"c{i}") for i in range(10)]
+            )
+
+            for i, loaded in enumerate(results):
+                assert loaded is not None
+                assert loaded.session_id == f"s{i}"
+        finally:
+            await store.teardown()
+
+
 class TestSessionManagerEdgeCases:
     @pytest.mark.asyncio
     async def test_session_manager_deactivate_then_recreate(self):

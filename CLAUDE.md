@@ -109,4 +109,14 @@ Tether integrates with Playwright MCP for browser automation. The `.mcp.json` at
 - YAGNI: don't build for speculative future requirements
 - Rule of Three: don't abstract until third duplication
 - Test behavior, not implementation details
-- After building a feature, write a short concise summary under `CHANGELOG.md` if applicable
+
+## Changelog
+
+After completing each feature, bug fix, or notable change, add a concise entry to `CHANGELOG.md` under the **current (latest) version heading**. All new entries accumulate under that version until a new version is explicitly introduced (e.g., bumping from `0.2.1` to `0.2.2` or `0.3.0`).
+
+```markdown
+## [0.2.1] - 2026-02-23
+- **category**: Short description of what changed
+```
+
+Categories: `added`, `fixed`, `changed`, `removed`. Keep entries to one line each. Do not create a new version heading — append to the existing one.

@@ -31,6 +31,9 @@ class BaseConnector(ABC):
         self._command_handler: (
             Callable[[str, str, str, str], Coroutine[Any, Any, str]] | None
         ) = None
+        self._git_handler: (
+            Callable[[str, str, str, str], Coroutine[Any, Any, None]] | None
+        ) = None
 
     @abstractmethod
     async def start(self) -> None: ...
@@ -112,6 +115,13 @@ class BaseConnector(ABC):
     ) -> None:
         """Register handler(user_id, command, args, chat_id) for slash commands."""
         self._command_handler = handler
+
+    def set_git_handler(
+        self,
+        handler: Callable[[str, str, str, str], Coroutine[Any, Any, None]],
+    ) -> None:
+        """Register handler(user_id, chat_id, action, payload) for /git callbacks."""
+        self._git_handler = handler
 
     async def send_question(  # noqa: B027
         self,

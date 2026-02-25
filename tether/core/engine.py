@@ -31,7 +31,7 @@ from tether.middleware.base import MessageContext
 from tether.storage.sqlite import SqliteSessionStore
 
 if TYPE_CHECKING:
-    from tether.agents.base import BaseAgent, ToolActivity
+    from tether.agents.base import AgentResponse, BaseAgent, ToolActivity
     from tether.connectors.base import BaseConnector
     from tether.core.config import TetherConfig
     from tether.core.interactions import InteractionCoordinator
@@ -257,6 +257,7 @@ class Engine:
         self._git_handler = git_handler
         self._executing_chats: set[str] = set()
         self._pending_messages: dict[str, list[tuple[str, str]]] = {}
+        self._recent_failures: dict[str, list[float]] = {}
         self._pending_interrupts: dict[str, str] = {}  # chat_id -> interrupt_id
         self._interrupt_to_chat: dict[str, str] = {}  # interrupt_id -> chat_id
         self._interrupt_message_ids: dict[str, str] = {}  # chat_id -> msg_id
@@ -285,12 +286,23 @@ class Engine:
     async def _handle_git_callback(
         self, user_id: str, chat_id: str, action: str, payload: str
     ) -> None:
+        if not self._git_handler:
+            return
         session = await self.session_manager.get_or_create(
             user_id, chat_id, self._default_directory
         )
-        await self._git_handler.handle_callback(  # type: ignore[union-attr]
+        await self._git_handler.handle_callback(
             user_id, chat_id, action, payload, session
         )
+
+        pending = self._git_handler.pending_merge_event
+        if pending is not None:
+            _merge_chat_id, merge_event = pending
+            merge_event.data["gatekeeper"] = self._gatekeeper
+            await self.event_bus.emit(merge_event)
+            prompt = merge_event.data.get("prompt", "")
+            if prompt:
+                await self.handle_message(user_id, prompt, chat_id)
 
     async def _resolve_interrupt(self, interrupt_id: str, send_now: bool) -> bool:
         chat_id = self._interrupt_to_chat.pop(interrupt_id, None)
@@ -418,7 +430,12 @@ class Engine:
 
             return result
         except AgentError as e:
-            if chat_id not in self._interrupted_chats:
+            err_str = str(e).lower()
+            is_transient = any(
+                p in err_str
+                for p in ("temporarily unavailable", "interrupted", "timed out")
+            )
+            if chat_id not in self._interrupted_chats and not is_transient:
                 self._pending_messages.pop(chat_id, None)
             return f"Error: {e}"
         finally:
@@ -489,13 +506,32 @@ class Engine:
         self._tool_state = tool_state
 
         try:
-            response = await self.agent.execute(
-                prompt=text,
-                session=session,
-                can_use_tool=can_use_tool,
-                on_text_chunk=on_text_chunk,
-                on_tool_activity=on_tool_activity,
+            response = await self._execute_agent_with_timeout(
+                text, session, can_use_tool, on_text_chunk, on_tool_activity, chat_id
             )
+
+            if response.is_error and self._is_retryable_response(response):
+                self._recent_failures.setdefault(chat_id, []).append(time.monotonic())
+                backoff = self._failure_backoff(chat_id)
+                delay = max(4, backoff)
+                logger.warning(
+                    "engine_retry_transient",
+                    chat_id=chat_id,
+                    attempt=1,
+                    delay=delay,
+                )
+                await asyncio.sleep(delay)
+                if responder:
+                    responder.reset()
+                response = await self._execute_agent_with_timeout(
+                    text,
+                    session,
+                    can_use_tool,
+                    on_text_chunk,
+                    on_tool_activity,
+                    chat_id,
+                )
+
             await self.session_manager.update_from_result(
                 session,
                 claude_session_id=response.session_id,
@@ -660,6 +696,64 @@ class Engine:
             if self.connector:
                 await self.connector.send_message(chat_id, error_msg)
             raise
+
+    async def _execute_agent_with_timeout(
+        self,
+        text: str,
+        session: Session,
+        can_use_tool: Any,
+        on_text_chunk: Any,
+        on_tool_activity: Any,
+        chat_id: str,
+    ) -> AgentResponse:
+        try:
+            return await asyncio.wait_for(
+                self.agent.execute(
+                    prompt=text,
+                    session=session,
+                    can_use_tool=can_use_tool,
+                    on_text_chunk=on_text_chunk,
+                    on_tool_activity=on_tool_activity,
+                ),
+                timeout=self.config.agent_timeout_seconds,
+            )
+        except TimeoutError:
+            logger.error(
+                "agent_execution_timeout",
+                chat_id=chat_id,
+                timeout=self.config.agent_timeout_seconds,
+            )
+            await self.agent.cancel(session.session_id)
+            raise AgentError(
+                f"Agent timed out after {self.config.agent_timeout_seconds // 60} minutes. "
+                "Send your message again to continue."
+            ) from None
+
+    @staticmethod
+    def _is_retryable_response(response: AgentResponse) -> bool:
+        if not response.is_error:
+            return False
+        lowered = response.content.lower()
+        return any(
+            p in lowered
+            for p in (
+                "temporarily unavailable",
+                "api_error",
+                "overloaded",
+                "rate_limit",
+                "500",
+                "529",
+            )
+        )
+
+    def _failure_backoff(self, chat_id: str) -> float:
+        now = time.monotonic()
+        failures = self._recent_failures.get(chat_id, [])
+        recent = [t for t in failures if now - t < 300]
+        self._recent_failures[chat_id] = recent
+        if len(recent) >= 3:
+            return min(10 * len(recent), 60)
+        return 0
 
     async def _log_message(
         self,

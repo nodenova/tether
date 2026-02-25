@@ -46,6 +46,25 @@ def _truncate(text: str, max_len: int = 60) -> str:
 
 _RETRYABLE_PATTERNS = ("api_error", "overloaded", "rate_limit", "529", "500")
 
+_ERROR_MESSAGES: dict[str, str] = {
+    "exit code -2": "The AI agent was interrupted. Your message will be retried automatically.",
+    "exit code -1": "The AI agent encountered an unexpected error. Please try again.",
+    "exit code 1": "The AI agent process exited unexpectedly. Please try again.",
+}
+
+
+def _friendly_error(raw: str) -> str:
+    lowered = raw.lower()
+    for pattern, message in _ERROR_MESSAGES.items():
+        if pattern in lowered:
+            return message
+    if _is_retryable_error(lowered):
+        return (
+            "The AI service is temporarily unavailable. Please try again in a moment."
+        )
+    return f"Agent error: {raw[:200]}"
+
+
 # Maps Tether session modes to Claude Agent SDK PermissionMode values.
 # The main agent uses can_use_tool for its own permissions; this only
 # affects sub-agents spawned via Task, which don't inherit can_use_tool.
@@ -167,7 +186,7 @@ class ClaudeCodeAgent(BaseAgent):
             logger.error(
                 "agent_execute_failed", error=str(e), session=session.session_id
             )
-            raise AgentError(f"Agent execution failed: {e}") from e
+            raise AgentError(_friendly_error(str(e))) from e
 
     _PLAN_MODE_INSTRUCTION = (
         "You are in plan mode. Before implementing, create a detailed plan first. "
@@ -230,6 +249,12 @@ class ClaudeCodeAgent(BaseAgent):
         tether_servers = self._config.mcp_servers
         if local_servers or tether_servers:
             opts.mcp_servers = {**local_servers, **tether_servers}
+            logger.debug(
+                "agent_mcp_servers",
+                session_id=session.session_id,
+                server_names=list(opts.mcp_servers.keys()),
+                cwd=session.working_directory,
+            )
 
         return opts
 
@@ -325,7 +350,14 @@ class ClaudeCodeAgent(BaseAgent):
                                     tools_used=tools_used,
                                     is_error=True,
                                 )
-                                await asyncio.sleep(2)
+                                delay = min(2 * (2**_attempt), 16)
+                                logger.info(
+                                    "agent_retry_backoff",
+                                    attempt=_attempt + 1,
+                                    delay=delay,
+                                    session_id=session.session_id,
+                                )
+                                await asyncio.sleep(delay)
                                 break
                             logger.info(
                                 "agent_execute_completed",

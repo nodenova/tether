@@ -79,7 +79,7 @@ The system follows a three-layer safety pipeline: **Sandbox → Policy → Appro
 
 ## Browser Testing (Playwright MCP)
 
-Tether integrates with Playwright MCP for browser automation. The `.mcp.json` at project root configures Claude Code to spawn the MCP server (pinned `@playwright/mcp@0.0.41`, `--headless`). Tether's Python process does not touch Playwright — Claude Code's SDK manages the MCP server lifecycle.
+Tether integrates with Playwright MCP for browser automation. The `.mcp.json` at project root configures Claude Code to spawn the MCP server (pinned `@playwright/mcp@0.0.41`, headed mode by default). Tether's Python process does not touch Playwright — Claude Code's SDK manages the MCP server lifecycle.
 
 - **Prerequisites:** Node.js 18+, one-time `npx playwright install chromium`
 - **25 browser tools** (7 readonly, 18 mutation) flow through the existing safety pipeline — policy rules are defined in all three YAML presets (`default.yaml`, `strict.yaml`, `permissive.yaml`)

@@ -14,11 +14,11 @@ from tether.git.service import GitService
 
 if TYPE_CHECKING:
     from tether.connectors.base import BaseConnector
-    from tether.core.events import EventBus
+    from tether.core.events import Event, EventBus
     from tether.core.safety.audit import AuditLogger
     from tether.core.safety.sandbox import SandboxEnforcer
     from tether.core.session import Session
-    from tether.git.models import FileChange
+    from tether.git.models import FileChange, MergeResult
 
 logger = structlog.get_logger()
 
@@ -53,6 +53,7 @@ class GitCommandHandler:
         self._audit = audit
         self._event_bus = event_bus
         self._pending: dict[str, _PendingInput] = {}
+        self._pending_merge_event: tuple[str, Event] | None = None
 
     async def handle_command(
         self,
@@ -100,6 +101,12 @@ class GitCommandHandler:
                 if sub_args:
                     return await self._commit(cwd, sub_args, session)
                 return await self._commit_prompt(cwd, chat_id, session)
+            case "merge":
+                if sub_args == "--abort":
+                    return await self._merge_abort(cwd, session)
+                if not sub_args:
+                    return "Usage: /git merge <branch>"
+                return await self._merge(cwd, sub_args, chat_id, session)
             case "push":
                 return await self._push_confirm(cwd, chat_id)
             case "pull":
@@ -173,6 +180,17 @@ class GitCommandHandler:
                     await self._connector.send_message(
                         chat_id, "\u274c No pending commit to apply suggestion to."
                     )
+            case "merge_resolve":
+                await self._merge_resolve_callback(chat_id, payload, session)
+            case "merge_abort":
+                result = await self._service.merge_abort(cwd)
+                self._log_audit(session, "merge_abort", "")
+                await self._connector.send_message(
+                    chat_id,
+                    formatter.format_merge_abort()
+                    if result.success
+                    else formatter.format_result(result),
+                )
             case "search":
                 text = await self._search_branches(cwd, payload, chat_id)
                 await self._connector.send_message(chat_id, text)
@@ -417,6 +435,76 @@ class GitCommandHandler:
         result = await self._service.pull(cwd)
         self._log_audit(session, "pull", "")
         return formatter.format_result(result)
+
+    async def _merge(
+        self, cwd: Path, branch: str, chat_id: str, session: Session
+    ) -> str:
+        result: MergeResult = await self._service.merge(cwd, branch)
+
+        if result.success:
+            self._log_audit(session, "merge", branch)
+            return formatter.format_merge_result(result)
+
+        if result.had_conflicts:
+            self._log_audit(session, "merge_conflicts", branch)
+            text = formatter.format_merge_result(result)
+            text += "\n\nHow would you like to proceed?"
+            buttons = [
+                [
+                    InlineButton(
+                        text="\U0001f916 Auto-resolve",
+                        callback_data=f"{GIT_CALLBACK_PREFIX}merge_resolve:{branch}",
+                    ),
+                    InlineButton(
+                        text="\u274c Abort merge",
+                        callback_data=f"{GIT_CALLBACK_PREFIX}merge_abort",
+                    ),
+                ]
+            ]
+            await self._connector.send_message(chat_id, text, buttons=buttons)
+            return ""
+
+        self._log_audit(session, "merge_failed", branch)
+        return formatter.format_merge_result(result)
+
+    async def _merge_abort(self, cwd: Path, session: Session) -> str:
+        result = await self._service.merge_abort(cwd)
+        self._log_audit(session, "merge_abort", "")
+        if result.success:
+            return formatter.format_merge_abort()
+        return formatter.format_result(result)
+
+    async def _merge_resolve_callback(
+        self, chat_id: str, source_branch: str, session: Session
+    ) -> None:
+        """Emit COMMAND_MERGE event — the engine picks up the prompt."""
+        cwd = Path(session.working_directory)
+        conflicted = await self._service.conflict_files(cwd)
+        status = await self._service.status(cwd)
+
+        from tether.core.events import COMMAND_MERGE, Event
+
+        event = Event(
+            name=COMMAND_MERGE,
+            data={
+                "session": session,
+                "chat_id": chat_id,
+                "source_branch": source_branch,
+                "target_branch": status.branch,
+                "conflicted_files": conflicted,
+                "gatekeeper": None,  # filled by engine
+                "prompt": "",
+            },
+        )
+        # Store event for engine to pick up
+        self._pending_merge_event = (chat_id, event)
+
+    @property
+    def pending_merge_event(self) -> tuple[str, Event] | None:
+        """Return and clear any pending merge resolve event."""
+        ev = self._pending_merge_event
+        self._pending_merge_event = None
+        return ev
 
     # ── Helpers ───────────────────────────────────────────────────────
 

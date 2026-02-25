@@ -71,8 +71,8 @@ class TestConfig(BaseModel):
     framework: str | None = None
     focus: str | None = None
     include_e2e: bool = True
-    include_unit: bool = True
-    include_backend: bool = True
+    include_unit: bool = False
+    include_backend: bool = False
 
 
 def _is_flag(token: str) -> bool:
@@ -132,6 +132,12 @@ def parse_test_args(args: str) -> TestConfig:
         elif tok == "--no-backend":
             kwargs["include_backend"] = False
             i += 1
+        elif tok == "--unit":
+            kwargs["include_unit"] = True
+            i += 1
+        elif tok == "--backend":
+            kwargs["include_backend"] = True
+            i += 1
         else:
             focus_parts.append(tok)
             i += 1
@@ -160,7 +166,12 @@ def build_test_instruction(config: TestConfig) -> str:
         "You are in TEST MODE. Your mission is to comprehensively verify that the "
         "application works correctly through a systematic multi-phase workflow. "
         "Work autonomously — fix issues as you find them, re-run to verify, and "
-        "only ask the human when genuinely stuck."
+        "only ask the human when genuinely stuck.\n\n"
+        "You have browser MCP tools available via Playwright MCP (browser_navigate, "
+        "browser_click, browser_type, browser_snapshot, browser_console_messages, "
+        "browser_network_requests, browser_take_screenshot, and more). These tools "
+        "are pre-configured and ready to use. Use them directly for all browser "
+        "interactions — do not fall back to curl or code analysis as a substitute."
     )
 
     # User hints
@@ -201,10 +212,12 @@ def build_test_instruction(config: TestConfig) -> str:
     if config.include_e2e:
         sections.append(
             "PHASE 3 — SMOKE TEST:\n"
-            "- Navigate to the app URL with browser tools\n"
-            "- Verify the page loads without errors\n"
-            "- Check browser console for JavaScript errors\n"
-            "- Take a snapshot to confirm initial state"
+            "- Navigate to the app URL with browser_navigate\n"
+            "- Take browser_snapshot to capture the initial accessibility tree\n"
+            "- Check browser_console_messages for JavaScript errors\n"
+            "- Check browser_network_requests for failed requests (4xx/5xx)\n"
+            "- Take browser_take_screenshot as the visual baseline\n"
+            "- If the page fails to load, stop here and report the blocker"
         )
 
     # Phase 4: Unit & Integration (unit only)
@@ -215,7 +228,9 @@ def build_test_instruction(config: TestConfig) -> str:
             "- Analyze any failures — read the failing test, understand expected vs actual\n"
             "- Fix obvious test bugs (wrong assertions, outdated snapshots, missing mocks)\n"
             "- Re-run fixed tests to verify they pass\n"
-            "- If no tests exist, write tests for critical functions"
+            "- If no tests exist, write tests for critical functions\n"
+            "- Do NOT run npx playwright test or any e2e test suites here — "
+            "browser-based E2E testing is handled in Phase 6 via MCP tools"
         )
 
     # Phase 5: Backend (backend only)
@@ -228,15 +243,41 @@ def build_test_instruction(config: TestConfig) -> str:
             "- Verify database operations if applicable"
         )
 
-    # Phase 6: E2E Browser (e2e only)
+    # Phase 6: Agentic E2E (e2e only)
     if config.include_e2e:
         sections.append(
-            "PHASE 6 — E2E BROWSER TESTING:\n"
-            "- Test key user flows by interacting with the UI via browser tools\n"
-            "- Use browser_snapshot to verify page state (prefer over screenshots)\n"
-            "- Test forms, navigation, authentication flows, and error states\n"
-            "- Write Playwright test files for critical flows if none exist\n"
-            "- Run Playwright tests with npx playwright test"
+            "PHASE 6 — AGENTIC E2E TESTING:\n"
+            "You ARE the test executor. Do not write .spec.ts files or run "
+            "npx playwright test. Execute every test case live through browser "
+            "MCP tools.\n\n"
+            "6a TEST PLAN:\n"
+            "- Analyze the app structure from Phase 1 discovery\n"
+            "- List all testable user flows ordered by criticality "
+            "(auth > CRUD > navigation > edge cases)\n"
+            "- For each flow define: steps, expected outcome, starting URL\n\n"
+            "6b EXECUTION LOOP (repeat for each test case):\n"
+            "1. SETUP — browser_navigate to starting URL, establish required state\n"
+            "2. ACTIONS — execute steps via browser tools "
+            "(browser_click, browser_type, browser_navigate, browser_select_option, "
+            "browser_press_key, etc.)\n"
+            "3. ASSERT — after each action:\n"
+            "   - browser_snapshot to verify accessibility tree matches expected state\n"
+            "   - browser_console_messages for JS errors\n"
+            "   - browser_network_requests for failed API calls (4xx/5xx)\n"
+            "   - browser_take_screenshot only for visual layout checks\n"
+            "4. VERDICT — mark PASS, FAIL, or SKIP with evidence\n"
+            "5. RESET — browser_navigate to clean state before next test\n\n"
+            "6c EVIDENCE COLLECTION:\n"
+            "- For failures: browser_snapshot + browser_take_screenshot at point "
+            "of failure\n"
+            "- For passes: final browser_snapshot as proof\n"
+            "- Collect all console errors and failed network requests across "
+            "the run\n\n"
+            "6d OPTIONAL PERSISTENT TESTS (SECONDARY):\n"
+            "- Only if the project already has playwright.config.ts and an e2e/ "
+            "directory, OR the user explicitly requested persistent tests\n"
+            "- Use browser_generate_playwright_test to save flows as .spec.ts\n"
+            "- This is SECONDARY to live agentic execution above"
         )
 
     # Phase 7: Error Analysis (always)
@@ -277,7 +318,19 @@ def build_test_instruction(config: TestConfig) -> str:
         "- If a specific focus was provided, prioritize that area\n"
         "- Always use browser_snapshot over screenshots for page verification\n"
         "- Fix issues as you find them — don't just report, heal\n"
-        "- If you write new test files, place them alongside existing tests"
+        "- If you write new test files, place them alongside existing tests\n"
+        "- In Phase 6, you ARE the test executor — do not default to writing "
+        ".spec.ts files\n"
+        "- NEVER run npx playwright test — Phase 6 agentic testing replaces "
+        "it entirely\n"
+        "- Take browser_snapshot before AND after key browser actions to track "
+        "state transitions\n"
+        "- Keep a running tally of PASS/FAIL/SKIP — include it in the Phase 9 "
+        "report\n"
+        "- If a test case fails, retry the flow once before marking FAIL "
+        "(transient timing issues are common)\n"
+        "- If a browser tool call fails, report the specific error — NEVER silently "
+        "fall back to non-browser testing or claim tools are unavailable"
     )
 
     return "\n\n".join(sections)

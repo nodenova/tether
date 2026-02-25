@@ -2,6 +2,7 @@
 
 import asyncio
 import time
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -5536,3 +5537,220 @@ class TestTurnLimitWarningContent:
             m for m in mock_connector.sent_messages if "turn limit" in m["text"].lower()
         ]
         assert len(turn_msgs) == 1
+
+
+class TestEngineResilience:
+    """Tests for engine-level retry, message preservation, timeout, and backoff."""
+
+    @pytest.mark.asyncio
+    async def test_engine_retries_transient_error(
+        self, config, audit_logger, policy_engine
+    ):
+        call_count = 0
+
+        class RetryAgent(BaseAgent):
+            async def execute(self, prompt, session, **kwargs):
+                nonlocal call_count
+                call_count += 1
+                if call_count == 1:
+                    return AgentResponse(
+                        content="temporarily unavailable",
+                        session_id="sid",
+                        cost=0.0,
+                        is_error=True,
+                    )
+                return AgentResponse(
+                    content="success",
+                    session_id="sid",
+                    cost=0.01,
+                )
+
+            async def cancel(self, session_id):
+                pass
+
+            async def shutdown(self):
+                pass
+
+        eng = Engine(
+            connector=None,
+            agent=RetryAgent(),
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+        )
+
+        with patch("asyncio.sleep", new_callable=AsyncMock):
+            result = await eng.handle_message("u1", "hello", "c1")
+
+        assert "success" in result
+        assert call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_engine_no_retry_permanent_error(
+        self, config, audit_logger, policy_engine
+    ):
+        call_count = 0
+
+        class PermanentErrorAgent(BaseAgent):
+            async def execute(self, prompt, session, **kwargs):
+                nonlocal call_count
+                call_count += 1
+                return AgentResponse(
+                    content="authentication_error: invalid key",
+                    session_id="sid",
+                    cost=0.0,
+                    is_error=True,
+                )
+
+            async def cancel(self, session_id):
+                pass
+
+            async def shutdown(self):
+                pass
+
+        eng = Engine(
+            connector=None,
+            agent=PermanentErrorAgent(),
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+        )
+
+        result = await eng.handle_message("u1", "hello", "c1")
+        assert "authentication_error" in result
+        assert call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_pending_messages_preserved_on_transient_error(
+        self, config, audit_logger, policy_engine
+    ):
+        class TransientFailAgent(BaseAgent):
+            async def execute(self, prompt, session, **kwargs):
+                raise AgentError(
+                    "The AI service is temporarily unavailable. Please try again in a moment."
+                )
+
+            async def cancel(self, session_id):
+                pass
+
+            async def shutdown(self):
+                pass
+
+        eng = Engine(
+            connector=None,
+            agent=TransientFailAgent(),
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+        )
+
+        eng._pending_messages["c1"] = [("u1", "queued msg")]
+
+        result = await eng.handle_message("u1", "trigger", "c1")
+        assert "Error:" in result
+        assert eng._pending_messages.get("c1") == [("u1", "queued msg")]
+
+    @pytest.mark.asyncio
+    async def test_pending_messages_dropped_on_permanent_error(
+        self, config, audit_logger, policy_engine
+    ):
+        class PermanentFailAgent(BaseAgent):
+            async def execute(self, prompt, session, **kwargs):
+                raise AgentError("Agent error: something broke permanently")
+
+            async def cancel(self, session_id):
+                pass
+
+            async def shutdown(self):
+                pass
+
+        eng = Engine(
+            connector=None,
+            agent=PermanentFailAgent(),
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+        )
+
+        eng._pending_messages["c1"] = [("u1", "queued msg")]
+
+        result = await eng.handle_message("u1", "trigger", "c1")
+        assert "Error:" in result
+        assert "c1" not in eng._pending_messages
+
+    @pytest.mark.asyncio
+    async def test_agent_timeout_cancels_and_raises(
+        self, config, audit_logger, policy_engine
+    ):
+        cancel_called = False
+
+        class HangingAgent(BaseAgent):
+            async def execute(self, prompt, session, **kwargs):
+                await asyncio.sleep(9999)
+
+            async def cancel(self, session_id):
+                nonlocal cancel_called
+                cancel_called = True
+
+            async def shutdown(self):
+                pass
+
+        config_short = TetherConfig(
+            approved_directories=config.approved_directories,
+            max_turns=5,
+            agent_timeout_seconds=1,
+            audit_log_path=config.audit_log_path,
+        )
+
+        eng = Engine(
+            connector=None,
+            agent=HangingAgent(),
+            config=config_short,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+        )
+
+        result = await eng.handle_message("u1", "hello", "c1")
+        assert "timed out" in result.lower()
+        assert cancel_called
+
+    @pytest.mark.asyncio
+    async def test_sustained_degradation_backoff(
+        self, config, audit_logger, policy_engine
+    ):
+        eng = Engine(
+            connector=None,
+            agent=FakeAgent(),
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+        )
+
+        assert eng._failure_backoff("c1") == 0
+
+        now = time.monotonic()
+        eng._recent_failures["c1"] = [now - 10, now - 5, now - 1]
+        backoff = eng._failure_backoff("c1")
+        assert backoff == 30  # 10 * 3
+
+        eng._recent_failures["c1"] = [now] * 7
+        backoff = eng._failure_backoff("c1")
+        assert backoff == 60  # capped at 60
+
+    def test_is_retryable_response_true(self):
+        resp = AgentResponse(content="temporarily unavailable", is_error=True)
+        assert Engine._is_retryable_response(resp) is True
+
+    def test_is_retryable_response_false_not_error(self):
+        resp = AgentResponse(content="temporarily unavailable", is_error=False)
+        assert Engine._is_retryable_response(resp) is False
+
+    def test_is_retryable_response_false_permanent(self):
+        resp = AgentResponse(content="authentication_error: invalid key", is_error=True)
+        assert Engine._is_retryable_response(resp) is False

@@ -26,6 +26,9 @@ MESSAGE_QUEUED = "message.queued"
 COMMAND_TEST = "command.test"
 TEST_STARTED = "test.started"
 TEST_COMPLETED = "test.completed"
+COMMAND_MERGE = "command.merge"
+MERGE_STARTED = "merge.started"
+MERGE_COMPLETED = "merge.completed"
 EXECUTION_INTERRUPTED = "execution.interrupted"
 
 

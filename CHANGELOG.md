@@ -1,6 +1,13 @@
 # Changelog
 
-## [0.3.0] - 2026-02-24
+## [0.3.0] - 2026-02-25
+- **fixed**: Playwright MCP not available when agent works in target repos without their own `.mcp.json` — tether's own `.mcp.json` now loaded as default MCP servers at startup
+- **added**: Agent resilience — exponential backoff in agent retries (2s→4s→8s), engine-level auto-retry for transient API errors, 30-minute execution timeout, sustained degradation backoff across turns
+- **added**: User-friendly error messages — raw exit codes and API errors mapped to human-readable text instead of exposing internals
+- **fixed**: Pending messages no longer dropped on transient errors — queue preserved so next user message also processes queued ones
+- **added**: `TETHER_AGENT_TIMEOUT_SECONDS` config parameter (default 1800) to prevent runaway agent sessions
+- **added**: `/git merge <branch>` command with AI-assisted conflict resolution — detects conflicts, presents auto-resolve/abort buttons, and enters merge mode where the agent resolves conflicts across 4 phases (analysis, resolution, verify, complete)
+- **added**: `MergeResolverPlugin` follows TestRunnerPlugin pattern — subscribes to `COMMAND_MERGE` event, sets session mode/instruction, auto-approves Edit/Write/Read and git read commands
 - **added**: Message interrupt during agent execution — inline buttons let the user interrupt or wait instead of silent queuing
 - **fixed**: Question message with stale buttons now deleted from Telegram when user replies with text
 - **added**: Enhanced `/test` command with structured args (`--url`, `--framework`, `--server`, `--dir`, `--no-e2e`, `--no-unit`, `--no-backend`)
@@ -9,6 +16,7 @@
 - **added**: Policy overlay documentation in `docs/policies.md` — covers loading order, creating custom overlays, security considerations
 - **added**: Auto-delete transient messages — interrupt prompts, "Task interrupted", "Task completed", and fallback ack messages are scheduled for deletion after a short delay
 - **changed**: `dev-tools.yaml` now auto-loaded alongside `default.yaml` by default
+- **fixed**: Agent claiming browser MCP tools aren't available during `/test` — preamble now explicitly declares tool availability, rules forbid silent fallback, and MCP server names are logged at agent startup for debugging
 
 ## [0.2.1] - 2026-02-23
 - **added**: Network resilience for Telegram connector — exponential-backoff retries on `NetworkError`/`TimedOut` for startup and send operations

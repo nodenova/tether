@@ -40,6 +40,7 @@ class TetherConfig(BaseSettings):
 
     # Agent settings
     max_turns: int = 25
+    agent_timeout_seconds: int = 1800  # 30 minutes
     system_prompt: str | None = None
     allowed_tools: list[str] = []
     disallowed_tools: list[str] = []

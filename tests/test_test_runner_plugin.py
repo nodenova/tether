@@ -60,8 +60,8 @@ class TestTestConfig:
         assert c.framework is None
         assert c.focus is None
         assert c.include_e2e is True
-        assert c.include_unit is True
-        assert c.include_backend is True
+        assert c.include_unit is False
+        assert c.include_backend is False
 
     def test_frozen(self):
         from pydantic import ValidationError
@@ -118,14 +118,38 @@ class TestParseTestArgs:
         c = parse_test_args("-f react")
         assert c.framework == "react"
 
-    def test_no_e2e_flag(self):
+    def test_no_e2e_flag_alone_resets(self):
+        # --no-e2e with unit/backend already off → all disabled → reset
         c = parse_test_args("--no-e2e")
+        assert c.include_e2e is True
+        assert c.include_unit is True
+        assert c.include_backend is True
+
+    def test_no_e2e_with_unit(self):
+        c = parse_test_args("--no-e2e --unit")
         assert c.include_e2e is False
         assert c.include_unit is True
+        assert c.include_backend is False
 
     def test_no_unit_flag(self):
         c = parse_test_args("--no-unit")
         assert c.include_unit is False
+        assert c.include_e2e is True
+
+    def test_unit_flag(self):
+        c = parse_test_args("--unit")
+        assert c.include_unit is True
+        assert c.include_backend is False
+
+    def test_backend_flag(self):
+        c = parse_test_args("--backend")
+        assert c.include_backend is True
+        assert c.include_unit is False
+
+    def test_unit_and_backend_flags(self):
+        c = parse_test_args("--unit --backend")
+        assert c.include_unit is True
+        assert c.include_backend is True
         assert c.include_e2e is True
 
     def test_no_backend_flag(self):
@@ -135,6 +159,9 @@ class TestParseTestArgs:
     def test_focus_text(self):
         c = parse_test_args("verify checkout flow")
         assert c.focus == "verify checkout flow"
+        assert c.include_e2e is True
+        assert c.include_unit is False  # default
+        assert c.include_backend is False  # default
 
     def test_mixed_flags_and_focus(self):
         c = parse_test_args(
@@ -143,6 +170,9 @@ class TestParseTestArgs:
         assert c.app_url == "http://localhost:3000"
         assert c.framework == "next"
         assert c.focus == "verify checkout"
+        assert c.include_e2e is True
+        assert c.include_unit is False  # default
+        assert c.include_backend is False  # default
 
     def test_all_flags(self):
         c = parse_test_args(
@@ -150,14 +180,15 @@ class TestParseTestArgs:
             "--server 'npm run dev' "
             "--dir tests/ "
             "--framework next "
-            "--no-backend "
+            "--unit "
+            "--backend "
             "check login"
         )
         assert c.app_url == "http://localhost:3000"
         assert c.dev_server_command == "npm run dev"
         assert c.test_directory == "tests/"
         assert c.framework == "next"
-        assert c.include_backend is False
+        assert c.include_backend is True
         assert c.include_e2e is True
         assert c.include_unit is True
         assert c.focus == "check login"
@@ -165,42 +196,62 @@ class TestParseTestArgs:
     def test_malformed_quotes_fallback(self):
         c = parse_test_args("verify 'unclosed quote")
         assert c.focus == "verify 'unclosed quote"
+        assert c.include_e2e is True
+        assert c.include_unit is False
+        assert c.include_backend is False
 
 
 # --- build_test_instruction ---
 
 
 class TestBuildTestInstruction:
-    def test_default_has_all_phases(self):
+    def test_default_has_e2e_phases_only(self):
         instruction = build_test_instruction(TestConfig())
         assert "PHASE 1" in instruction
         assert "PHASE 2" in instruction
         assert "PHASE 3" in instruction
-        assert "PHASE 4" in instruction
-        assert "PHASE 5" in instruction
+        assert "PHASE 4" not in instruction  # unit off by default
+        assert "PHASE 5" not in instruction  # backend off by default
         assert "PHASE 6" in instruction
         assert "PHASE 7" in instruction
         assert "PHASE 8" in instruction
         assert "PHASE 9" in instruction
+
+    def test_all_phases_when_opted_in(self):
+        instruction = build_test_instruction(
+            TestConfig(include_unit=True, include_backend=True)
+        )
+        for phase in (
+            "PHASE 1",
+            "PHASE 2",
+            "PHASE 3",
+            "PHASE 4",
+            "PHASE 5",
+            "PHASE 6",
+            "PHASE 7",
+            "PHASE 8",
+            "PHASE 9",
+        ):
+            assert phase in instruction
 
     def test_no_e2e_skips_server_smoke_browser(self):
         instruction = build_test_instruction(TestConfig(include_e2e=False))
         assert "PHASE 1" in instruction  # discovery always present
         assert "SERVER STARTUP" not in instruction
         assert "SMOKE TEST" not in instruction
-        assert "E2E BROWSER" not in instruction
-        assert "UNIT" in instruction
-        assert "BACKEND" in instruction
-
-    def test_no_unit_skips_unit_phase(self):
-        instruction = build_test_instruction(TestConfig(include_unit=False))
+        assert "AGENTIC E2E" not in instruction
+        # unit/backend also absent by default
         assert "UNIT & INTEGRATION" not in instruction
+        assert "BACKEND VERIFICATION" not in instruction
+
+    def test_unit_opt_in_includes_phase(self):
+        instruction = build_test_instruction(TestConfig(include_unit=True))
+        assert "UNIT & INTEGRATION" in instruction
         assert "SERVER STARTUP" in instruction
 
-    def test_no_backend_skips_backend_phase(self):
-        instruction = build_test_instruction(TestConfig(include_backend=False))
-        assert "BACKEND VERIFICATION" not in instruction
-        assert "UNIT" in instruction
+    def test_backend_opt_in_includes_phase(self):
+        instruction = build_test_instruction(TestConfig(include_backend=True))
+        assert "BACKEND VERIFICATION" in instruction
 
     def test_url_in_hints(self):
         instruction = build_test_instruction(
@@ -458,7 +509,7 @@ class TestTestRunnerPlugin:
             data={
                 "session": session,
                 "chat_id": "chat1",
-                "args": "--no-e2e --framework django",
+                "args": "--no-e2e --unit --framework django",
                 "gatekeeper": gatekeeper,
                 "prompt": "",
             },
@@ -468,7 +519,9 @@ class TestTestRunnerPlugin:
         # E2E phases should be absent
         assert "SERVER STARTUP" not in session.mode_instruction
         assert "SMOKE TEST" not in session.mode_instruction
-        assert "E2E BROWSER" not in session.mode_instruction
+        assert "AGENTIC E2E" not in session.mode_instruction
+        # Unit phase should be present (opted in)
+        assert "UNIT & INTEGRATION" in session.mode_instruction
         # Framework hint should be present
         assert "Framework: django" in session.mode_instruction
 
@@ -491,10 +544,18 @@ class TestParseTestArgsEdgeCases:
 
     def test_all_phases_disabled_resets(self):
         """Disabling all test phases resets them all to enabled with a warning."""
-        c = parse_test_args("--no-e2e --no-unit --no-backend")
+        c = parse_test_args("--no-e2e")
+        # unit/backend already False by default, --no-e2e makes all three off → reset
         assert c.include_e2e is True
         assert c.include_unit is True
         assert c.include_backend is True
+
+    def test_no_e2e_with_unit_does_not_reset(self):
+        """--no-e2e with --unit keeps phases as specified."""
+        c = parse_test_args("--no-e2e --unit")
+        assert c.include_e2e is False
+        assert c.include_unit is True
+        assert c.include_backend is False
 
     def test_bare_flag_at_end(self):
         """--url at end of string with no value should not crash."""
@@ -502,6 +563,8 @@ class TestParseTestArgsEdgeCases:
         # --url has no next token, so it becomes part of focus
         assert c.app_url is None
         assert "--url" in (c.focus or "")
+        assert c.include_unit is False  # default
+        assert c.include_backend is False  # default
 
     def test_duplicate_flags_last_wins(self):
         """When the same flag is given twice, the last value wins."""
@@ -510,15 +573,54 @@ class TestParseTestArgsEdgeCases:
 
     def test_server_flag_value_looks_like_flag(self):
         """--server followed by another flag should not consume it."""
-        c = parse_test_args("--server --no-e2e")
+        c = parse_test_args("--server --no-e2e --unit")
         assert c.dev_server_command is None
         assert c.include_e2e is False
+        assert c.include_unit is True
 
     def test_dir_flag_value_looks_like_flag(self):
         """--dir followed by another flag should not consume it."""
         c = parse_test_args("--dir --framework react")
         assert c.test_directory is None
         assert c.framework == "react"
+
+
+class TestFocusDefaultBehavior:
+    """Focus text keeps defaults — unit/backend already off."""
+
+    def test_focus_keeps_defaults(self):
+        c = parse_test_args("checkout flow")
+        assert c.include_e2e is True
+        assert c.include_unit is False  # default
+        assert c.include_backend is False  # default
+
+    def test_focus_with_url_keeps_defaults(self):
+        c = parse_test_args("--url http://localhost:3000 checkout")
+        assert c.include_e2e is True
+        assert c.include_unit is False  # default
+        assert c.include_backend is False  # default
+        assert c.app_url == "http://localhost:3000"
+        assert c.focus == "checkout"
+
+    def test_focus_with_unit_opt_in(self):
+        c = parse_test_args("--unit checkout")
+        assert c.include_unit is True
+        assert c.include_backend is False
+        assert c.include_e2e is True
+        assert c.focus == "checkout"
+
+    def test_no_focus_keeps_defaults(self):
+        c = parse_test_args("")
+        assert c.include_e2e is True
+        assert c.include_unit is False  # default
+        assert c.include_backend is False  # default
+
+    def test_malformed_quotes_keeps_defaults(self):
+        c = parse_test_args("verify 'broken quote")
+        assert c.focus == "verify 'broken quote"
+        assert c.include_e2e is True
+        assert c.include_unit is False  # default
+        assert c.include_backend is False  # default
 
 
 class TestAutoApproveTotalCount:
@@ -608,7 +710,7 @@ class TestTestStartedEventData:
             data={
                 "session": session,
                 "chat_id": "chat1",
-                "args": "--url http://localhost:3000 --framework next --no-backend check login",
+                "args": "--url http://localhost:3000 --framework next --unit check login",
                 "gatekeeper": gatekeeper,
                 "prompt": "",
             },
@@ -619,9 +721,81 @@ class TestTestStartedEventData:
         cfg = received[0].data["config"]
         assert cfg["app_url"] == "http://localhost:3000"
         assert cfg["framework"] == "next"
-        assert cfg["include_backend"] is False
+        assert cfg["include_backend"] is False  # default
         assert cfg["include_e2e"] is True
-        assert cfg["include_unit"] is True
+        assert cfg["include_unit"] is True  # opted in
         assert cfg["focus"] == "check login"
         assert cfg["dev_server_command"] is None
         assert cfg["test_directory"] is None
+
+
+class TestAgenticE2EInstructions:
+    """Verify Phase 6 agentic E2E instruction content."""
+
+    def test_sub_phases_present(self):
+        instruction = build_test_instruction(TestConfig())
+        assert "6a TEST PLAN" in instruction
+        assert "6b EXECUTION LOOP" in instruction
+        assert "6c EVIDENCE COLLECTION" in instruction
+        assert "6d OPTIONAL PERSISTENT TESTS" in instruction
+
+    def test_executor_directive(self):
+        instruction = build_test_instruction(TestConfig())
+        assert "You ARE the test executor" in instruction
+
+    def test_browser_tools_mentioned(self):
+        instruction = build_test_instruction(TestConfig())
+        for tool in (
+            "browser_snapshot",
+            "browser_navigate",
+            "browser_click",
+            "browser_type",
+            "browser_console_messages",
+            "browser_network_requests",
+            "browser_take_screenshot",
+        ):
+            assert tool in instruction
+
+    def test_verdict_states(self):
+        instruction = build_test_instruction(TestConfig())
+        assert "PASS" in instruction
+        assert "FAIL" in instruction
+        assert "SKIP" in instruction
+
+    def test_optional_persistent_tests_secondary(self):
+        instruction = build_test_instruction(TestConfig())
+        assert "OPTIONAL PERSISTENT TESTS" in instruction
+        assert "SECONDARY" in instruction
+
+    def test_no_e2e_skips_all_sub_phases(self):
+        instruction = build_test_instruction(TestConfig(include_e2e=False))
+        assert "6a TEST PLAN" not in instruction
+        assert "6b EXECUTION LOOP" not in instruction
+        assert "6c EVIDENCE COLLECTION" not in instruction
+        assert "6d OPTIONAL PERSISTENT TESTS" not in instruction
+        assert "You ARE the test executor" not in instruction
+
+    def test_rules_include_agentic_guidance(self):
+        instruction = build_test_instruction(TestConfig())
+        assert "you ARE the test executor" in instruction
+        assert "browser_snapshot before AND after" in instruction
+        assert "PASS/FAIL/SKIP" in instruction
+        assert "retry the flow once" in instruction
+
+    def test_rules_forbid_npx_playwright_test(self):
+        instruction = build_test_instruction(TestConfig())
+        assert "NEVER run npx playwright test" in instruction
+
+    def test_phase4_excludes_playwright_cli(self):
+        instruction = build_test_instruction(TestConfig(include_unit=True))
+        assert "Do NOT run npx playwright test" in instruction
+        assert "browser-based E2E testing is handled in Phase 6" in instruction
+
+    def test_preamble_declares_browser_tools(self):
+        instruction = build_test_instruction(TestConfig())
+        assert "browser MCP tools available" in instruction
+        assert "pre-configured and ready to use" in instruction
+
+    def test_rules_forbid_silent_fallback(self):
+        instruction = build_test_instruction(TestConfig())
+        assert "NEVER silently fall back" in instruction

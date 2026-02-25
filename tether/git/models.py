@@ -56,3 +56,15 @@ class GitResult(BaseModel):
     success: bool
     message: str
     details: str = ""
+
+
+class MergeResult(BaseModel):
+    """Result from a git merge — distinguishes clean merge from conflicts."""
+
+    model_config = ConfigDict(frozen=True)
+
+    success: bool
+    had_conflicts: bool = False
+    conflicted_files: list[str] = []
+    message: str
+    details: str = ""

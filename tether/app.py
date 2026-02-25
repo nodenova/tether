@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import logging.handlers
 from pathlib import Path
@@ -26,6 +27,7 @@ from tether.middleware.base import MiddlewareChain
 from tether.middleware.rate_limit import RateLimitMiddleware
 from tether.plugins.builtin.audit_plugin import AuditPlugin
 from tether.plugins.builtin.browser_tools import BrowserToolsPlugin
+from tether.plugins.builtin.merge_resolver import MergeResolverPlugin
 from tether.plugins.builtin.test_runner import TestRunnerPlugin
 from tether.plugins.registry import PluginRegistry
 from tether.storage.memory import MemorySessionStore
@@ -86,6 +88,21 @@ def _configure_logging(config: TetherConfig) -> None:
     )
 
 
+def _load_default_mcp_servers(config: TetherConfig, project_root: Path) -> None:
+    """Merge tether's own .mcp.json into config so the agent always has browser tools."""
+    mcp_path = project_root / ".mcp.json"
+    if not mcp_path.is_file():
+        return
+    try:
+        data = json.loads(mcp_path.read_text())
+        file_servers = data.get("mcpServers", {})
+        if file_servers:
+            # Existing config entries (env overrides) win over file defaults
+            config.mcp_servers = {**file_servers, **config.mcp_servers}
+    except Exception:
+        logger.warning("default_mcp_json_read_failed", path=str(mcp_path))
+
+
 def build_engine(
     config: TetherConfig | None = None,
     connector: BaseConnector | None = None,
@@ -95,6 +112,9 @@ def build_engine(
         config = TetherConfig()  # type: ignore[call-arg]  # pydantic-settings loads from env
 
     _configure_logging(config)
+
+    tether_root = Path(__file__).resolve().parent.parent
+    _load_default_mcp_servers(config, tether_root)
 
     logger.info(
         "engine_building",
@@ -144,6 +164,7 @@ def build_engine(
     registry.register(AuditPlugin(audit))
     registry.register(BrowserToolsPlugin())
     registry.register(TestRunnerPlugin())
+    registry.register(MergeResolverPlugin())
     for plugin in plugins or []:
         registry.register(plugin)
 

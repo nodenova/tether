@@ -13,6 +13,7 @@ from tether.git.models import (
     GitLogEntry,
     GitResult,
     GitStatus,
+    MergeResult,
 )
 
 logger = structlog.get_logger()
@@ -343,6 +344,60 @@ class GitService:
         if code == 0:
             return GitResult(success=True, message="Pull successful", details=output)
         return GitResult(success=False, message="Pull failed", details=output)
+
+    async def merge(
+        self, cwd: Path, branch: str, *, no_commit: bool = False
+    ) -> MergeResult:
+        """Merge a branch into the current branch."""
+        if not _BRANCH_NAME_RE.match(branch):
+            return MergeResult(success=False, message=f"Invalid branch name: {branch}")
+
+        args = ["merge", branch]
+        if no_commit:
+            args.append("--no-commit")
+        code, stdout, stderr = await self._run(*args, cwd=cwd, timeout=60)
+        output = stdout.strip() + "\n" + stderr.strip()
+
+        if code == 0:
+            return MergeResult(
+                success=True, message=f"Merged '{branch}' into current branch"
+            )
+
+        if "CONFLICT" in output or "conflict" in output.lower():
+            conflicted = await self.conflict_files(cwd)
+            return MergeResult(
+                success=False,
+                had_conflicts=True,
+                conflicted_files=conflicted,
+                message="Merge conflicts detected",
+                details=output.strip(),
+            )
+
+        return MergeResult(
+            success=False,
+            message=f"Merge failed for '{branch}'",
+            details=stderr.strip() or stdout.strip(),
+        )
+
+    async def merge_abort(self, cwd: Path) -> GitResult:
+        """Abort an in-progress merge."""
+        code, stdout, stderr = await self._run("merge", "--abort", cwd=cwd)
+        if code == 0:
+            return GitResult(success=True, message="Merge aborted")
+        return GitResult(
+            success=False,
+            message="Failed to abort merge",
+            details=stderr.strip() or stdout.strip(),
+        )
+
+    async def conflict_files(self, cwd: Path) -> list[str]:
+        """List files with unresolved merge conflicts."""
+        code, stdout, _ = await self._run(
+            "diff", "--name-only", "--diff-filter=U", cwd=cwd
+        )
+        if code != 0:
+            return []
+        return [line.strip() for line in stdout.splitlines() if line.strip()]
 
     async def _run(
         self, *args: str, cwd: Path, timeout: int = _DEFAULT_TIMEOUT

@@ -75,8 +75,8 @@ With hints to guide the agent:
 /test --url http://localhost:5173
 /test --server "npm run dev" --url http://localhost:3000
 /test --framework next.js
-/test --no-unit authentication flow
-/test --no-e2e --no-backend
+/test --unit --backend                  # opt in to unit and backend phases
+/test --unit authentication flow        # unit tests + focused e2e
 ```
 
 #### /test Command Reference
@@ -87,12 +87,16 @@ With hints to guide the agent:
 | --server | -s | Dev server startup command | `--server "npm run dev"` |
 | --dir | -d | Test directory hint | `--dir tests/e2e` |
 | --framework | -f | Framework hint | `--framework react` |
+| --unit | | Opt in to unit/integration test phase (off by default) | |
+| --backend | | Opt in to backend API verification (off by default) | |
 | --no-e2e | | Skip browser testing phases | |
-| --no-unit | | Skip unit/integration test phase | |
-| --no-backend | | Skip backend API verification | |
+| --no-unit | | Explicitly disable unit phase (redundant unless combined with --unit) | |
+| --no-backend | | Explicitly disable backend phase (redundant unless combined with --backend) | |
 | (free text) | | Focus area for the agent | `login page validation` |
 
-Flags combine: `/test --url http://localhost:3000 --no-backend checkout flow`
+Flags combine: `/test --url http://localhost:3000 --unit checkout flow`
+
+By default, /test runs agentic E2E only (Phases 1-3, 6-9). Unit and backend phases are opt-in via `--unit` and `--backend`.
 
 ### The 9-Phase Workflow
 
@@ -100,15 +104,29 @@ Flags combine: `/test --url http://localhost:3000 --no-backend checkout flow`
 |---|---|---|
 | 1 | Discovery | Reads package.json, pyproject.toml, Cargo.toml, go.mod. Identifies frameworks, dev server commands, recent changes (git diff). |
 | 2 | Server Startup | Starts the dev server (detected or via --server). Waits for readiness with curl/lsof. Fixes startup errors. |
-| 3 | Smoke Test | Navigates to app URL. Verifies page loads. Checks console for JS errors. Takes accessibility snapshot. |
-| 4 | Unit and Integration | Runs existing suites (pytest, jest, vitest, go test, cargo test). Analyzes and fixes failures. |
-| 5 | Backend Verification | Hits API endpoints with curl. Checks responses, logs, error handling. |
-| 6 | E2E Browser Testing | Interacts with live UI via browser tools. Tests forms, navigation, auth, error states. Writes test files if none exist. |
+| 3 | Smoke Test | Navigates to app URL with browser_navigate. Takes browser_snapshot. Checks browser_console_messages for JS errors. Checks browser_network_requests for failed requests (4xx/5xx). Takes browser_take_screenshot as visual baseline. |
+| 4 | Unit and Integration | Opt-in (`--unit`). Runs existing suites (pytest, jest, vitest, go test, cargo test). Analyzes and fixes failures. |
+| 5 | Backend Verification | Opt-in (`--backend`). Hits API endpoints with curl. Checks responses, logs, error handling. |
+| 6 | Agentic E2E Testing | Agent executes test cases live via browser MCP tools (plan → execute → assert → verdict). Persistent .spec.ts generation is optional and secondary. |
 | 7 | Error Analysis | Compiles all errors. Categorizes as CRITICAL / HIGH / MEDIUM / LOW. |
 | 8 | Healing | Fixes bugs from previous phases. Re-runs affected tests. |
 | 9 | Report | Summary: pass/fail counts, errors, fixes applied, remaining issues, health assessment. |
 
-Phases 2, 3, 6 skip with --no-e2e. Phase 4 skips with --no-unit. Phase 5 skips with --no-backend.
+Phases 2, 3, 6 skip with --no-e2e. Phase 4 requires --unit to enable. Phase 5 requires --backend to enable.
+
+### How Agentic E2E Works
+
+Phase 6 uses a fully agentic approach — the agent itself is the test executor. Instead of writing `.spec.ts` files and spawning `npx playwright test`, the agent:
+
+1. **Plans** test cases by analyzing the app structure discovered in Phase 1, ordering flows by criticality (auth > CRUD > navigation > edge cases)
+2. **Executes** each test case live through browser MCP tools — browser_navigate, browser_click, browser_type, browser_select_option, etc.
+3. **Asserts** state after each action by reading the accessibility tree (browser_snapshot), checking for JS errors (browser_console_messages), and verifying network requests (browser_network_requests)
+4. **Verdicts** each test as PASS, FAIL, or SKIP with collected evidence (snapshots, screenshots, console errors)
+5. **Resets** browser state between test cases to avoid cross-contamination
+
+This is faster and more token-efficient than the file-based approach because there is no process spawning, CLI output parsing, or test-file debugging loop. The agent already has direct browser access — it uses it.
+
+Persistent `.spec.ts` generation (via browser_generate_playwright_test) is available as an optional secondary step when the project already has a Playwright Test setup (playwright.config.ts + e2e/ directory) or the user explicitly requests it.
 
 ### What Gets Auto-Approved in Test Mode
 
@@ -282,14 +300,15 @@ npx playwright show-report     # view HTML report
 
 ### How It Connects to /test
 
-When /test enters Phase 6 (E2E Browser Testing), the agent:
+Phase 6 (Agentic E2E Testing) executes all test cases live through browser MCP tools — this is the primary testing approach regardless of whether Tier 2 is set up.
 
-1. Detects playwright.config.ts during Phase 1 (Discovery)
-2. Runs existing tests with `npx playwright test`
-3. Analyzes failures and fixes broken tests
-4. Writes new test files for untested flows in e2e/
+When Tier 2 is present (playwright.config.ts + e2e/ directory detected in Phase 1), the agent additionally:
 
-Without Tier 2, the agent still tests via browser tools -- it just does not persist tests as .spec.ts files (unless created ad-hoc during Phase 6).
+1. Runs existing `.spec.ts` tests with `npx playwright test` during Phase 4
+2. After live agentic execution in Phase 6, optionally saves tested flows as `.spec.ts` files via browser_generate_playwright_test (sub-phase 6d)
+3. Analyzes and fixes broken persistent tests in Phase 8
+
+Without Tier 2, the agent tests everything via live browser interaction — no `.spec.ts` files are generated unless explicitly requested.
 
 ---
 
@@ -384,7 +403,7 @@ The agent checks with lsof. Force a specific port:
 OS file pickers, system notifications, and browser extensions need headed mode. Switch .mcp.json to --headed temporarily.
 
 **Context window exhaustion** --
-Focus: `/test login page`. Skip phases: `--no-unit --no-backend`. The agent uses browser_snapshot over screenshots to conserve tokens.
+Focus: `/test login page`. Unit and backend are off by default — no flags needed. The agent uses browser_snapshot over screenshots to conserve tokens.
 
 **Tests pass locally but fail via Tether** --
 Playwright MCP runs a separate headless Chromium. Viewport, fonts, and extensions may differ. Use browser_resize to match expected dimensions.

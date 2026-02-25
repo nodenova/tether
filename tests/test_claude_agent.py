@@ -8,6 +8,7 @@ from tether.agents.base import AgentResponse, ToolActivity
 from tether.agents.claude_code import (
     ClaudeCodeAgent,
     _describe_tool,
+    _friendly_error,
     _is_retryable_error,
     _truncate,
 )
@@ -433,6 +434,30 @@ class TestClaudeCodeAgent:
         )
         opts = agent._build_options(session, can_use_tool=None)
         assert not opts.mcp_servers
+
+    def test_build_options_logs_mcp_server_names(self, tmp_path, capsys):
+        import json
+
+        mcp_file = tmp_path / ".mcp.json"
+        mcp_file.write_text(
+            json.dumps({"mcpServers": {"playwright": {"command": "npx"}}})
+        )
+        config = TetherConfig(
+            approved_directories=[tmp_path],
+            mcp_servers={"custom-tool": {"command": "node"}},
+        )
+        agent = ClaudeCodeAgent(config)
+        session = Session(
+            session_id="s1",
+            user_id="u1",
+            chat_id="c1",
+            working_directory=str(tmp_path),
+        )
+        agent._build_options(session, can_use_tool=None)
+        captured = capsys.readouterr()
+        assert "agent_mcp_servers" in captured.out
+        assert "playwright" in captured.out
+        assert "custom-tool" in captured.out
 
     @pytest.mark.asyncio
     async def test_shutdown_suppresses_disconnect_errors(self, agent):
@@ -1279,3 +1304,71 @@ class TestRetryableApiErrors:
             "The AI service is temporarily unavailable. Please try again in a moment."
         )
         assert resp.is_error is True
+
+
+class TestExponentialBackoff:
+    @pytest.mark.asyncio
+    async def test_exponential_backoff_delays(self, agent, session):
+        """Retry sleep durations increase: 2, 4, 8."""
+        error_result = _make_result_message(
+            result="api_error: overloaded",
+            is_error=True,
+            num_turns=1,
+        )
+
+        class FakeCtx:
+            async def __aenter__(self):
+                client = MagicMock()
+                client.query = AsyncMock(return_value=None)
+                client.receive_response = MagicMock(
+                    return_value=AsyncIterHelper([error_result])
+                )
+                return client
+
+            async def __aexit__(self, *args):
+                return False
+
+        sleep_delays = []
+
+        async def capture_sleep(delay):
+            sleep_delays.append(delay)
+
+        with (
+            patch("tether.agents.claude_code._SafeSDKClient", return_value=FakeCtx()),
+            patch("asyncio.sleep", side_effect=capture_sleep),
+        ):
+            await agent._run_with_resume(
+                "hello", session, agent._build_options(session, None)
+            )
+
+        assert sleep_delays == [2, 4, 8]
+
+
+class TestFriendlyErrors:
+    def test_exit_code_minus_2(self):
+        assert "interrupted" in _friendly_error("Process exit code -2").lower()
+
+    def test_exit_code_minus_1(self):
+        assert "unexpected error" in _friendly_error("exit code -1 failure").lower()
+
+    def test_exit_code_1(self):
+        assert "exited unexpectedly" in _friendly_error("exit code 1").lower()
+
+    def test_retryable_api_error(self):
+        msg = _friendly_error("API Error: 529 overloaded")
+        assert "temporarily unavailable" in msg.lower()
+
+    def test_unknown_error_truncated(self):
+        raw = "x" * 300
+        msg = _friendly_error(raw)
+        assert msg.startswith("Agent error: ")
+        assert len(msg) <= 215  # "Agent error: " + 200 chars
+
+    @pytest.mark.asyncio
+    async def test_execute_raises_friendly_on_exception(self, agent, session):
+        with patch.object(
+            agent, "_run_with_resume", new_callable=AsyncMock
+        ) as mock_run:
+            mock_run.side_effect = RuntimeError("exit code -2 killed")
+            with pytest.raises(AgentError, match="interrupted"):
+                await agent.execute("hello", session)

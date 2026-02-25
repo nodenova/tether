@@ -1,6 +1,6 @@
 """Pure functions to format git data for Telegram display."""
 
-from tether.git.models import GitBranch, GitLogEntry, GitResult, GitStatus
+from tether.git.models import GitBranch, GitLogEntry, GitResult, GitStatus, MergeResult
 
 _STATUS_EMOJI = {
     "modified": "M",
@@ -134,6 +134,29 @@ def format_result(result: GitResult, emoji: str = "") -> str:
     return text
 
 
+def format_merge_result(result: MergeResult) -> str:
+    """Format a MergeResult for display."""
+    if result.success:
+        return f"\u2705 {result.message}"
+
+    if result.had_conflicts:
+        lines = [f"\u26a0\ufe0f {result.message}"]
+        for f in result.conflicted_files:
+            lines.append(f"  \u2022 {f}")
+        return "\n".join(lines)
+
+    return (
+        f"\u274c {result.message}\n{result.details}"
+        if result.details
+        else f"\u274c {result.message}"
+    )
+
+
+def format_merge_abort() -> str:
+    """Format merge abort confirmation."""
+    return "\u2705 Merge aborted successfully."
+
+
 def format_help() -> str:
     """Return help text listing all /git subcommands."""
     return (
@@ -151,6 +174,8 @@ def format_help() -> str:
         "/git add <path> — Stage file\n"
         "/git commit <msg> — Commit with message\n"
         "/git commit — Commit (auto-suggests message)\n"
+        "/git merge <branch> — Merge branch (auto-resolves conflicts)\n"
+        "/git merge --abort — Abort in-progress merge\n"
         "/git push — Push to remote\n"
         "/git pull — Pull from remote\n"
         "/git help — This message"

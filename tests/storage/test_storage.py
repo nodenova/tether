@@ -4,8 +4,20 @@ import pytest
 
 from tether.core.session import Session, SessionManager
 from tether.exceptions import StorageError
+from tether.storage.base import MessageStore, SessionStore
 from tether.storage.memory import MemorySessionStore
 from tether.storage.sqlite import SqliteSessionStore
+
+
+class TestProtocolConformance:
+    def test_memory_store_satisfies_session_store_protocol(self):
+        assert isinstance(MemorySessionStore(), SessionStore)
+
+    def test_sqlite_store_satisfies_session_store_protocol(self, tmp_path):
+        assert isinstance(SqliteSessionStore(tmp_path / "t.db"), SessionStore)
+
+    def test_sqlite_store_satisfies_message_store_protocol(self, tmp_path):
+        assert isinstance(SqliteSessionStore(tmp_path / "t.db"), MessageStore)
 
 
 def _make_session(**kwargs) -> Session:

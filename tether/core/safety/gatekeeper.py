@@ -24,7 +24,7 @@ logger = structlog.get_logger()
 _MCP_PREFIX_RE = re.compile(r"^mcp__[a-zA-Z0-9_]+__")
 
 
-def _normalize_tool_name(tool_name: str) -> str:
+def normalize_tool_name(tool_name: str) -> str:
     """Strip ``mcp__<server>__`` prefix so policy/auto-approve keys match.
 
     The SDK passes MCP tool names as ``mcp__playwright__browser_navigate``
@@ -47,7 +47,7 @@ def _approval_key(tool_name: str, tool_input: dict[str, Any]) -> str:
     For others: just the tool name ('Write', 'Edit', etc.)
     MCP prefixes (``mcp__<server>__``) are stripped before key generation.
     """
-    normalized = _normalize_tool_name(tool_name)
+    normalized = normalize_tool_name(tool_name)
     if normalized != "Bash":
         return normalized
     command = strip_cd_prefix(tool_input.get("command", "").strip())
@@ -128,7 +128,7 @@ class ToolGatekeeper:
     ) -> PermissionResultAllow | PermissionResultDeny:
         # Normalize MCP tool names (mcp__playwright__browser_navigate → browser_navigate)
         # for policy/sandbox/approval matching. Keep original for events/audit.
-        normalized = _normalize_tool_name(tool_name)
+        normalized = normalize_tool_name(tool_name)
 
         await self._event_bus.emit(
             Event(

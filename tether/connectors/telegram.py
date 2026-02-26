@@ -6,7 +6,7 @@ import asyncio
 from collections.abc import Callable, Coroutine
 from datetime import timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import structlog
 from telegram import (
@@ -444,8 +444,16 @@ class TelegramConnector(BaseConnector):
         try:
             path = Path(file_path)
             with path.open("rb") as f:
+
+                async def _send() -> Message:
+                    f.seek(0)
+                    return cast(
+                        Message,
+                        await bot.send_document(chat_id=int(chat_id), document=f),
+                    )
+
                 await _retry_on_network_error(
-                    lambda: bot.send_document(chat_id=int(chat_id), document=f),
+                    _send,
                     max_retries=_SEND_MAX_RETRIES,
                     base_delay=_SEND_BASE_DELAY,
                     max_delay=_SEND_MAX_DELAY,
@@ -635,9 +643,10 @@ class TelegramConnector(BaseConnector):
             await self._handle_interaction_callback(query, data)
             return
 
-        if not data.startswith(_APPROVAL_PREFIX):
-            return
+        if data.startswith(_APPROVAL_PREFIX):
+            await self._handle_approval_callback(query, data)
 
+    async def _handle_approval_callback(self, query: CallbackQuery, data: str) -> None:
         suffix = data[len(_APPROVAL_PREFIX) :]
         if ":" not in suffix:
             return

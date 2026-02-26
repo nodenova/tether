@@ -15,7 +15,12 @@ from tether.plugins.builtin.browser_tools import (
 
 @pytest.fixture
 def engine():
-    policy_path = Path(__file__).parent.parent / "tether" / "policies" / "default.yaml"
+    policy_path = (
+        Path(__file__).parent.parent.parent.parent
+        / "tether"
+        / "policies"
+        / "default.yaml"
+    )
     return PolicyEngine([policy_path])
 
 
@@ -501,7 +506,9 @@ class TestDevToolsOverlay:
 
     @pytest.fixture
     def dev_overlay_engine(self):
-        policies_dir = Path(__file__).parent.parent / "tether" / "policies"
+        policies_dir = (
+            Path(__file__).parent.parent.parent.parent / "tether" / "policies"
+        )
         return PolicyEngine(
             [policies_dir / "default.yaml", policies_dir / "dev-tools.yaml"]
         )
@@ -620,7 +627,9 @@ class TestDevToolsRegexBoundaries:
 
     @pytest.fixture
     def dev_overlay_engine(self):
-        policies_dir = Path(__file__).parent.parent / "tether" / "policies"
+        policies_dir = (
+            Path(__file__).parent.parent.parent.parent / "tether" / "policies"
+        )
         return PolicyEngine(
             [policies_dir / "default.yaml", policies_dir / "dev-tools.yaml"]
         )

@@ -9,7 +9,6 @@ import structlog
 
 from tether.core.session import Session
 from tether.exceptions import StorageError
-from tether.storage.base import SessionStore
 
 logger = structlog.get_logger()
 
@@ -49,7 +48,7 @@ ON messages (user_id, chat_id, created_at)
 """
 
 
-class SqliteSessionStore(SessionStore):
+class SqliteSessionStore:
     def __init__(self, db_path: Path | str) -> None:
         self._db_path = str(db_path)
         self._db: aiosqlite.Connection | None = None

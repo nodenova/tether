@@ -47,6 +47,10 @@ def load_project_test_config(working_dir: str) -> ProjectTestConfig | None:
                 )
                 return config
             except Exception:
-                logger.warning("project_test_config_invalid", path=str(path))
+                logger.warning(
+                    "project_test_config_invalid",
+                    path=str(path),
+                    exc_info=True,
+                )
                 return None
     return None

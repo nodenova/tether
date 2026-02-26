@@ -36,7 +36,7 @@ from tether.storage.sqlite import SqliteSessionStore
 if TYPE_CHECKING:
     from tether.connectors.base import BaseConnector
     from tether.plugins.base import TetherPlugin
-    from tether.storage.base import SessionStore
+    from tether.storage.base import MessageStore, SessionStore
 
 logger = structlog.get_logger()
 
@@ -157,7 +157,7 @@ def build_engine(
         session_store = MemorySessionStore()
 
     # Per-project message store — switches with /dir
-    message_store: SqliteSessionStore | None = None
+    message_store: MessageStore | None = None
     if config.storage_backend == "sqlite":
         message_store = SqliteSessionStore(resolved_storage)
 

@@ -23,13 +23,14 @@ from tether.core.events import (
     Event,
     EventBus,
 )
+from tether.core.interactions import PlanReviewDecision
 from tether.core.safety.audit import AuditLogger
 from tether.core.safety.gatekeeper import ToolGatekeeper
 from tether.core.safety.policy import PolicyEngine
 from tether.core.safety.sandbox import SandboxEnforcer
 from tether.exceptions import AgentError
 from tether.middleware.base import MessageContext
-from tether.storage.sqlite import SqliteSessionStore
+from tether.storage.base import MessageStore
 
 if TYPE_CHECKING:
     from tether.agents.base import AgentResponse, BaseAgent, ToolActivity
@@ -236,7 +237,7 @@ class Engine:
         plugin_registry: PluginRegistry | None = None,
         middleware_chain: MiddlewareChain | None = None,
         store: SessionStore | None = None,
-        message_store: SqliteSessionStore | None = None,
+        message_store: MessageStore | None = None,
         git_handler: GitCommandHandler | None = None,
         audit_path_pinned: bool = True,
         storage_path_pinned: bool = True,
@@ -260,11 +261,12 @@ class Engine:
         self.plugin_registry = plugin_registry
         self.middleware_chain = middleware_chain
         self._store = store
-        self._message_store: SqliteSessionStore | None = (
+        self._message_store: MessageStore | None = (
             message_store
             if message_store is not None
-            else (store if isinstance(store, SqliteSessionStore) else None)
+            else (store if isinstance(store, MessageStore) else None)
         )
+        self._shared_store = message_store is None and isinstance(store, MessageStore)
 
         self._audit_path_pinned = audit_path_pinned
         self._storage_path_pinned = storage_path_pinned
@@ -322,7 +324,7 @@ class Engine:
             user_id, chat_id, action, payload, session
         )
 
-        pending = self._git_handler.pending_merge_event
+        pending = self._git_handler.pop_pending_merge_event()
         if pending is not None:
             _merge_chat_id, merge_event = pending
             merge_event.data["gatekeeper"] = self._gatekeeper
@@ -353,7 +355,7 @@ class Engine:
     async def startup(self) -> None:
         if self._store:
             await self._store.setup()
-        if self._message_store and self._message_store is not self._store:
+        if self._message_store and not self._shared_store:
             await self._message_store.setup()
         if self.plugin_registry:
             from tether.plugins.base import PluginContext
@@ -367,7 +369,7 @@ class Engine:
         await self.event_bus.emit(Event(name=ENGINE_STOPPED))
         if self.plugin_registry:
             await self.plugin_registry.stop_all()
-        if self._message_store and self._message_store is not self._store:
+        if self._message_store and not self._shared_store:
             await self._message_store.teardown()
         if self._store:
             await self._store.teardown()
@@ -541,7 +543,6 @@ class Engine:
             on_tool_activity = responder.on_activity
 
         can_use_tool, tool_state = self._build_can_use_tool(session, chat_id, responder)
-        self._tool_state = tool_state
 
         try:
             response = await self._execute_agent_with_timeout(
@@ -686,8 +687,6 @@ class Engine:
                     content_length=len(fallback_content),
                     chat_id=chat_id,
                 )
-                from tether.core.interactions import PlanReviewDecision
-
                 review = await self.interaction_coordinator.handle_plan_review(
                     chat_id,
                     {},
@@ -887,11 +886,10 @@ class Engine:
                 to_mode="plan",
             )
             if args.strip():
-                if self.connector:
-                    await self.connector.send_message(
-                        chat_id,
-                        "Switched to plan mode. I'll create a plan before implementing.",
-                    )
+                await self._send_transient(
+                    chat_id,
+                    "Switched to plan mode. I'll create a plan before implementing.",
+                )
                 await self.handle_message(user_id, args.strip(), chat_id)
                 return ""
             return "Switched to plan mode. I'll create a plan before implementing."
@@ -927,11 +925,10 @@ class Engine:
                 to_mode="auto",
             )
             if args.strip():
-                if self.connector:
-                    await self.connector.send_message(
-                        chat_id,
-                        "Accept edits on. I'll implement directly and auto-approve file edits.",
-                    )
+                await self._send_transient(
+                    chat_id,
+                    "Accept edits on. I'll implement directly and auto-approve file edits.",
+                )
                 await self.handle_message(user_id, args.strip(), chat_id)
                 return ""
             return (
@@ -1067,6 +1064,18 @@ class Engine:
         )
         return f"Switched to {target} ({target_path})"
 
+    async def _send_transient(self, chat_id: str, text: str) -> None:
+        """Send a status message that auto-deletes after a short delay."""
+        if not self.connector:
+            return
+        ack_id = await self.connector.send_message_with_id(chat_id, text)
+        if ack_id:
+            self.connector.schedule_message_cleanup(
+                chat_id, ack_id, delay=_TRANSIENT_MESSAGE_DELAY
+            )
+        else:
+            await self.connector.send_message(chat_id, text)
+
     async def _handle_smart_commit(
         self, session: Session, chat_id: str, user_id: str
     ) -> str:
@@ -1086,10 +1095,7 @@ class Engine:
             "5. Report the commit hash and message used\n\n"
             f"Working directory: {session.working_directory}"
         )
-        if self.connector:
-            await self.connector.send_message(
-                chat_id, "\U0001f50d Analyzing staged changes..."
-            )
+        await self._send_transient(chat_id, "\U0001f50d Analyzing staged changes...")
         await self.handle_message(user_id, prompt, chat_id)
         return ""
 
@@ -1177,18 +1183,10 @@ class Engine:
         if target_mode == "edit":
             self._gatekeeper.enable_tool_auto_approve(chat_id, "Write")
             self._gatekeeper.enable_tool_auto_approve(chat_id, "Edit")
-        if clear_context and self.connector:
-            ack_id = await self.connector.send_message_with_id(
+        if clear_context:
+            await self._send_transient(
                 chat_id, "Context cleared. Starting implementation..."
             )
-            if ack_id:
-                self.connector.schedule_message_cleanup(
-                    chat_id, ack_id, delay=_TRANSIENT_MESSAGE_DELAY
-                )
-            else:
-                await self.connector.send_message(
-                    chat_id, "Context cleared. Starting implementation..."
-                )
         return await self._execute_turn(
             user_id,
             self._build_implementation_prompt(plan_content),
@@ -1266,8 +1264,6 @@ class Engine:
                     has_cached_content=state.plan_file_content is not None,
                     has_streaming_buffer=bool(responder and responder.buffer.strip()),
                 )
-                from tether.core.interactions import PlanReviewDecision
-
                 result = await self.interaction_coordinator.handle_plan_review(
                     chat_id, tool_input, plan_content=plan_content
                 )

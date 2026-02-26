@@ -152,7 +152,7 @@ def parse_test_args(args: str) -> TestConfig:
     if focus_parts:
         kwargs["focus"] = " ".join(focus_parts)
 
-    config = TestConfig(**kwargs)  # type: ignore[arg-type]
+    config = TestConfig.model_validate(kwargs)
     if (
         not config.include_e2e
         and not config.include_unit
@@ -438,10 +438,6 @@ def _build_test_prompt(config: TestConfig) -> str:
         parts.append(f"The project uses {config.framework}.")
 
     return " ".join(parts)
-
-
-# Backward compat: default instruction for imports
-TEST_MODE_INSTRUCTION = build_test_instruction(TestConfig())
 
 
 class TestRunnerPlugin(TetherPlugin):

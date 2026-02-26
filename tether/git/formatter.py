@@ -1,6 +1,15 @@
 """Pure functions to format git data for Telegram display."""
 
-from tether.git.models import GitBranch, GitLogEntry, GitResult, GitStatus, MergeResult
+from collections import Counter
+
+from tether.git.models import (
+    FileChange,
+    GitBranch,
+    GitLogEntry,
+    GitResult,
+    GitStatus,
+    MergeResult,
+)
 
 _STATUS_EMOJI = {
     "modified": "M",
@@ -180,3 +189,33 @@ def format_help() -> str:
         "/git pull — Pull from remote\n"
         "/git help — This message"
     )
+
+
+_STATUS_VERB = {
+    "modified": "update",
+    "added": "add",
+    "deleted": "delete",
+    "renamed": "rename",
+}
+
+
+def build_auto_message(staged: list[FileChange]) -> str:
+    """Generate a short commit message from staged file changes."""
+    if not staged:
+        return "update files"
+
+    if len(staged) == 1:
+        verb = _STATUS_VERB.get(staged[0].status, "update")
+        return f"{verb} {staged[0].path}"
+
+    statuses = [c.status for c in staged]
+    unique = set(statuses)
+    n = len(staged)
+
+    if len(unique) == 1:
+        verb = _STATUS_VERB.get(statuses[0], "update")
+        return f"{verb} {n} files"
+
+    counts = Counter(statuses)
+    parts = ", ".join(f"{count} {status}" for status, count in counts.most_common())
+    return f"update {n} files ({parts})"

@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 import structlog
 
 from tether.core.events import TOOL_ALLOWED, TOOL_DENIED, TOOL_GATED
-from tether.core.safety.gatekeeper import _normalize_tool_name
+from tether.core.safety.gatekeeper import normalize_tool_name
 from tether.plugins.base import PluginMeta, TetherPlugin
 
 if TYPE_CHECKING:
@@ -59,7 +59,7 @@ ALL_BROWSER_TOOLS: frozenset[str] = BROWSER_READONLY_TOOLS | BROWSER_MUTATION_TO
 
 def is_browser_tool(tool_name: str) -> bool:
     """Check if a tool is a browser tool, normalizing MCP prefixes."""
-    return _normalize_tool_name(tool_name) in ALL_BROWSER_TOOLS
+    return normalize_tool_name(tool_name) in ALL_BROWSER_TOOLS
 
 
 class BrowserToolsPlugin(TetherPlugin):
@@ -89,7 +89,7 @@ class BrowserToolsPlugin(TetherPlugin):
         tool_name = event.data.get("tool_name", "")
         if not is_browser_tool(tool_name):
             return
-        normalized = _normalize_tool_name(tool_name)
+        normalized = normalize_tool_name(tool_name)
         logger.info(
             "browser_tool_gated",
             tool_name=tool_name,

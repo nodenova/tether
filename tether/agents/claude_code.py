@@ -17,6 +17,7 @@ from claude_agent_sdk import (
     ResultMessage,
     SystemMessage,
     TextBlock,
+    ThinkingBlock,
     ToolResultBlock,
     ToolUseBlock,
 )
@@ -27,7 +28,7 @@ from tether.agents.base import AgentResponse, BaseAgent, ToolActivity
 from tether.exceptions import AgentError
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable, Coroutine
+    from collections.abc import AsyncIterator, Callable, Coroutine, Sequence
 
     from claude_agent_sdk import Message
 
@@ -45,6 +46,11 @@ def _truncate(text: str, max_len: int = 60) -> str:
     return collapsed[: max_len - 1] + "\u2026"
 
 
+_MAX_RETRIES = 3
+_MAX_BACKOFF_SECONDS: float = 16
+_MAX_BUFFER_SIZE = 10 * 1024 * 1024  # 10 MB
+_ERROR_TRUNCATION_LENGTH = 200
+
 _RETRYABLE_PATTERNS = (
     "api_error",
     "overloaded",
@@ -61,6 +67,23 @@ _ERROR_MESSAGES: dict[str, str] = {
     "maximum buffer size": "The AI agent's response was too large. Resuming where it left off.",
 }
 
+_PLAN_MODE_INSTRUCTION = (
+    "You are in plan mode. Before implementing, create a detailed plan first. "
+    "Use EnterPlanMode to start planning, ask questions with AskUserQuestion "
+    "when you need clarification. IMPORTANT: Before calling ExitPlanMode, you "
+    "MUST write your complete plan to a file in .claude/plans/ using the Write "
+    "tool (e.g., .claude/plans/plan.md). Then call ExitPlanMode so the user can "
+    "review the plan. Always call ExitPlanMode before implementation begins — "
+    "even if a plan already exists from a previous turn."
+)
+
+_AUTO_MODE_INSTRUCTION = (
+    "You are in accept-edits mode. Implement changes directly — do not create "
+    "plans or call EnterPlanMode/ExitPlanMode. File writes and edits are "
+    "auto-approved. Treat follow-up messages as continuations of the current "
+    "implementation task."
+)
+
 
 def _friendly_error(raw: str) -> str:
     lowered = raw.lower()
@@ -71,7 +94,25 @@ def _friendly_error(raw: str) -> str:
         return (
             "The AI service is temporarily unavailable. Please try again in a moment."
         )
-    return f"Agent error: {raw[:200]}"
+    return f"Agent error: {raw[:_ERROR_TRUNCATION_LENGTH]}"
+
+
+def _backoff_delay(attempt: int) -> float:
+    delay: float = 2.0 * (2**attempt)
+    return min(delay, _MAX_BACKOFF_SECONDS)
+
+
+def _prepend_instruction(instruction: str, base: str) -> str:
+    return f"{instruction}\n\n{base}" if base else instruction
+
+
+async def _safe_callback(
+    callback: Callable[..., Any], *args: Any, log_event: str
+) -> None:
+    try:
+        await callback(*args)
+    except Exception:
+        logger.debug(log_event)
 
 
 # Maps Tether session modes to Claude Agent SDK PermissionMode values.
@@ -198,23 +239,6 @@ class ClaudeCodeAgent(BaseAgent):
             )
             raise AgentError(_friendly_error(str(e))) from e
 
-    _PLAN_MODE_INSTRUCTION = (
-        "You are in plan mode. Before implementing, create a detailed plan first. "
-        "Use EnterPlanMode to start planning, ask questions with AskUserQuestion "
-        "when you need clarification. IMPORTANT: Before calling ExitPlanMode, you "
-        "MUST write your complete plan to a file in .claude/plans/ using the Write "
-        "tool (e.g., .claude/plans/plan.md). Then call ExitPlanMode so the user can "
-        "review the plan. Always call ExitPlanMode before implementation begins — "
-        "even if a plan already exists from a previous turn."
-    )
-
-    _AUTO_MODE_INSTRUCTION = (
-        "You are in accept-edits mode. Implement changes directly — do not create "
-        "plans or call EnterPlanMode/ExitPlanMode. File writes and edits are "
-        "auto-approved. Treat follow-up messages as continuations of the current "
-        "implementation task."
-    )
-
     def _build_options(
         self,
         session: Session,
@@ -226,26 +250,16 @@ class ClaudeCodeAgent(BaseAgent):
             can_use_tool=can_use_tool,
             permission_mode=_SESSION_TO_PERMISSION_MODE.get(session.mode, "default"),
             setting_sources=["project"],
-            max_buffer_size=10 * 1024 * 1024,  # 10MB
+            max_buffer_size=_MAX_BUFFER_SIZE,
         )
         system_prompt = self._config.system_prompt or ""
         if session.mode == "plan":
-            system_prompt = (
-                self._PLAN_MODE_INSTRUCTION + "\n\n" + system_prompt
-                if system_prompt
-                else self._PLAN_MODE_INSTRUCTION
-            )
+            system_prompt = _prepend_instruction(_PLAN_MODE_INSTRUCTION, system_prompt)
         elif session.mode == "auto":
-            system_prompt = (
-                self._AUTO_MODE_INSTRUCTION + "\n\n" + system_prompt
-                if system_prompt
-                else self._AUTO_MODE_INSTRUCTION
-            )
+            system_prompt = _prepend_instruction(_AUTO_MODE_INSTRUCTION, system_prompt)
         elif session.mode_instruction:
-            system_prompt = (
-                session.mode_instruction + "\n\n" + system_prompt
-                if system_prompt
-                else session.mode_instruction
+            system_prompt = _prepend_instruction(
+                session.mode_instruction, system_prompt
             )
         if system_prompt:
             opts.system_prompt = system_prompt
@@ -277,9 +291,41 @@ class ClaudeCodeAgent(BaseAgent):
             data = json.loads(mcp_path.read_text())
             servers: dict[str, Any] = data.get("mcpServers", {})
             return servers
-        except Exception:
-            logger.warning("mcp_json_read_failed", path=str(mcp_path))
+        except (json.JSONDecodeError, OSError) as exc:
+            logger.warning("mcp_json_read_failed", path=str(mcp_path), error=str(exc))
             return {}
+
+    async def _process_content_blocks(
+        self,
+        blocks: Sequence[TextBlock | ThinkingBlock | ToolUseBlock | ToolResultBlock],
+        text_parts: list[str],
+        tools_used: list[str],
+        on_text_chunk: Callable[[str], Coroutine[Any, Any, None]] | None,
+        on_tool_activity: Callable[[ToolActivity | None], Coroutine[Any, Any, None]]
+        | None,
+    ) -> None:
+        for block in blocks:
+            if isinstance(block, TextBlock):
+                text_parts.append(block.text)
+                if on_text_chunk:
+                    await _safe_callback(
+                        on_text_chunk, block.text, log_event="on_text_chunk_error"
+                    )
+            elif isinstance(block, ToolUseBlock):
+                tools_used.append(block.name)
+                if on_tool_activity:
+                    activity = ToolActivity(
+                        tool_name=block.name,
+                        description=_describe_tool(block.name, block.input or {}),
+                    )
+                    await _safe_callback(
+                        on_tool_activity, activity, log_event="on_tool_activity_error"
+                    )
+            elif isinstance(block, ToolResultBlock):
+                if on_tool_activity:
+                    await _safe_callback(
+                        on_tool_activity, None, log_event="on_tool_activity_error"
+                    )
 
     async def _run_with_resume(
         self,
@@ -292,7 +338,7 @@ class ClaudeCodeAgent(BaseAgent):
         | None = None,
     ) -> AgentResponse:
         last_error: AgentResponse | None = None
-        for _attempt in range(3):
+        for _attempt in range(_MAX_RETRIES):
             start = time.monotonic()
             tools_used: list[str] = []
             text_parts: list[str] = []
@@ -304,33 +350,13 @@ class ClaudeCodeAgent(BaseAgent):
                     await client.query(prompt)
                     async for message in client.receive_response():
                         if isinstance(message, AssistantMessage):
-                            for block in message.content:
-                                if isinstance(block, TextBlock):
-                                    text_parts.append(block.text)
-                                    if on_text_chunk:
-                                        try:
-                                            await on_text_chunk(block.text)
-                                        except Exception:
-                                            logger.debug("on_text_chunk_error")
-                                elif isinstance(block, ToolUseBlock):
-                                    tools_used.append(block.name)
-                                    if on_tool_activity:
-                                        try:
-                                            activity = ToolActivity(
-                                                tool_name=block.name,
-                                                description=_describe_tool(
-                                                    block.name, block.input or {}
-                                                ),
-                                            )
-                                            await on_tool_activity(activity)
-                                        except Exception:
-                                            logger.debug("on_tool_activity_error")
-                                elif isinstance(block, ToolResultBlock):
-                                    if on_tool_activity:
-                                        try:
-                                            await on_tool_activity(None)
-                                        except Exception:
-                                            logger.debug("on_tool_activity_error")
+                            await self._process_content_blocks(
+                                message.content,
+                                text_parts,
+                                tools_used,
+                                on_text_chunk,
+                                on_tool_activity,
+                            )
 
                         elif isinstance(message, SystemMessage):
                             sid = message.data.get("session_id")
@@ -355,7 +381,7 @@ class ClaudeCodeAgent(BaseAgent):
                                 logger.warning(
                                     "retryable_api_error",
                                     session_id=session.session_id,
-                                    error_preview=content[:200],
+                                    error_preview=content[:_ERROR_TRUNCATION_LENGTH],
                                 )
                                 last_error = AgentResponse(
                                     content=content,
@@ -366,7 +392,7 @@ class ClaudeCodeAgent(BaseAgent):
                                     tools_used=tools_used,
                                     is_error=True,
                                 )
-                                delay = min(2 * (2**_attempt), 16)
+                                delay = _backoff_delay(_attempt)
                                 logger.info(
                                     "agent_retry_backoff",
                                     attempt=_attempt + 1,
@@ -399,7 +425,7 @@ class ClaudeCodeAgent(BaseAgent):
                         logger.warning(
                             "retryable_stream_error",
                             session_id=session.session_id,
-                            error_preview=str(exc)[:200],
+                            error_preview=str(exc)[:_ERROR_TRUNCATION_LENGTH],
                             attempt=_attempt + 1,
                         )
                         last_error = AgentResponse(
@@ -411,8 +437,7 @@ class ClaudeCodeAgent(BaseAgent):
                             tools_used=tools_used,
                             is_error=True,
                         )
-                        delay = min(2 * (2**_attempt), 16)
-                        await asyncio.sleep(delay)
+                        await asyncio.sleep(_backoff_delay(_attempt))
                         continue
                     raise
                 finally:

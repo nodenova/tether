@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 import structlog
 from claude_agent_sdk.types import PermissionResultAllow, PermissionResultDeny
@@ -25,7 +25,11 @@ class PlanReviewDecision(BaseModel):
 
     permission: PermissionResultAllow
     clear_context: bool
-    target_mode: str  # "edit" or "default"
+    target_mode: Literal["edit", "default"]
+
+
+PlanDecision = Literal["clean_edit", "edit", "default", "adjust"]
+_PLAN_DECISIONS: frozenset[str] = frozenset({"clean_edit", "edit", "default", "adjust"})
 
 
 class PendingInteraction(BaseModel):
@@ -33,10 +37,10 @@ class PendingInteraction(BaseModel):
 
     interaction_id: str
     chat_id: str
-    kind: str  # "question" or "plan_review"
+    kind: Literal["question", "plan_review"]
     event: asyncio.Event = Field(default_factory=asyncio.Event)
     answer: str | None = None
-    decision: str | None = None  # "clean_edit" | "edit" | "default" | "adjust"
+    decision: PlanDecision | None = None
     feedback: str | None = None
     awaiting_feedback: bool = False
 
@@ -171,7 +175,17 @@ class InteractionCoordinator:
         await self.connector.send_plan_review(chat_id, interaction_id, description)
 
         try:
-            await pending.event.wait()
+            await asyncio.wait_for(
+                pending.event.wait(),
+                timeout=self.config.approval_timeout_seconds,
+            )
+        except TimeoutError:
+            logger.warning(
+                "interaction_timeout",
+                interaction_id=interaction_id,
+                kind="plan_review",
+            )
+            return PermissionResultDeny(message="Plan review timed out")
         finally:
             self.pending.pop(interaction_id, None)
             if self._chat_index.get(chat_id) == interaction_id:
@@ -232,7 +246,14 @@ class InteractionCoordinator:
                     pending.chat_id, "What changes would you like?"
                 )
                 return True
-            pending.decision = answer
+            if answer not in _PLAN_DECISIONS:
+                logger.warning(
+                    "invalid_plan_decision",
+                    answer=answer,
+                    interaction_id=interaction_id,
+                )
+                return False
+            pending.decision = cast(PlanDecision, answer)
             pending.event.set()
             return True
 

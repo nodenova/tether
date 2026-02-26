@@ -18,11 +18,12 @@ if TYPE_CHECKING:
     from tether.core.safety.audit import AuditLogger
     from tether.core.safety.sandbox import SandboxEnforcer
     from tether.core.session import Session
-    from tether.git.models import FileChange, MergeResult
+    from tether.git.models import MergeResult
 
 logger = structlog.get_logger()
 
 GIT_CALLBACK_PREFIX = "git:"
+_ALREADY_SENT = ""
 
 _MAX_BRANCH_BUTTONS = 10
 _MAX_FILE_BUTTONS = 10
@@ -57,7 +58,7 @@ class GitCommandHandler:
 
     async def handle_command(
         self,
-        user_id: str,  # noqa: ARG002
+        user_id: str,
         args: str,
         chat_id: str,
         session: Session,
@@ -86,31 +87,31 @@ class GitCommandHandler:
             case "checkout":
                 if not sub_args:
                     return "Usage: /git checkout <branch-name>"
-                return await self._checkout(cwd, sub_args, chat_id, session)
+                return await self._checkout(cwd, sub_args, chat_id, session, user_id)
             case "diff":
                 return await self._diff(cwd, sub_args)
             case "log":
                 return await self._log(cwd)
             case "add":
                 if sub_args == ".":
-                    return await self._add_all(cwd, session)
+                    return await self._add_all(cwd, session, user_id)
                 if sub_args:
-                    return await self._add(cwd, sub_args.split(), session)
+                    return await self._add(cwd, sub_args.split(), session, user_id)
                 return await self._add_interactive(cwd, chat_id)
             case "commit":
                 if sub_args:
-                    return await self._commit(cwd, sub_args, session)
-                return await self._commit_prompt(cwd, chat_id, session)
+                    return await self._commit(cwd, sub_args, session, user_id)
+                return await self._commit_prompt(cwd, chat_id, session, user_id)
             case "merge":
                 if sub_args == "--abort":
-                    return await self._merge_abort(cwd, session)
+                    return await self._merge_abort(cwd, session, user_id)
                 if not sub_args:
                     return "Usage: /git merge <branch>"
-                return await self._merge(cwd, sub_args, chat_id, session)
+                return await self._merge(cwd, sub_args, chat_id, session, user_id)
             case "push":
                 return await self._push_confirm(cwd, chat_id)
             case "pull":
-                return await self._pull(cwd, session)
+                return await self._pull(cwd, session, user_id)
             case "help":
                 return formatter.format_help()
             case _:
@@ -120,7 +121,7 @@ class GitCommandHandler:
 
     async def handle_callback(
         self,
-        user_id: str,  # noqa: ARG002
+        user_id: str,
         chat_id: str,
         action: str,
         payload: str,
@@ -137,25 +138,25 @@ class GitCommandHandler:
         match action:
             case "checkout":
                 result = await self._service.checkout(cwd, payload)
-                self._log_audit(session, "checkout", payload)
+                self._log_audit(session, "checkout", payload, user_id)
                 await self._connector.send_message(
                     chat_id, formatter.format_result(result)
                 )
             case "add":
                 result = await self._service.add(cwd, [payload])
-                self._log_audit(session, "add", payload)
+                self._log_audit(session, "add", payload, user_id)
                 await self._connector.send_message(
                     chat_id, formatter.format_result(result)
                 )
             case "add_all":
                 result = await self._service.add_all(cwd)
-                self._log_audit(session, "add_all", "")
+                self._log_audit(session, "add_all", "", user_id)
                 await self._connector.send_message(
                     chat_id, formatter.format_result(result)
                 )
             case "push_confirm":
                 result = await self._service.push(cwd)
-                self._log_audit(session, "push", "")
+                self._log_audit(session, "push", "", user_id)
                 await self._connector.send_message(
                     chat_id, formatter.format_result(result, emoji="\U0001f680")
                 )
@@ -168,7 +169,7 @@ class GitCommandHandler:
                 text = await self._diff(cwd, "")
                 await self._connector.send_message(chat_id, text)
             case "commit_prompt":
-                text = await self._commit_prompt(cwd, chat_id, session)
+                text = await self._commit_prompt(cwd, chat_id, session, user_id)
                 if text:
                     await self._connector.send_message(chat_id, text)
             case "commit_auto":
@@ -184,7 +185,7 @@ class GitCommandHandler:
                 await self._merge_resolve_callback(chat_id, payload, session)
             case "merge_abort":
                 result = await self._service.merge_abort(cwd)
-                self._log_audit(session, "merge_abort", "")
+                self._log_audit(session, "merge_abort", "", user_id)
                 await self._connector.send_message(
                     chat_id,
                     formatter.format_merge_abort()
@@ -237,7 +238,7 @@ class GitCommandHandler:
         if row:
             buttons.append(row)
             await self._connector.send_message(chat_id, text, buttons=buttons)
-            return ""
+            return _ALREADY_SENT
         return text
 
     async def _branches(self, cwd: Path, chat_id: str) -> str:
@@ -257,7 +258,7 @@ class GitCommandHandler:
 
         if buttons:
             await self._connector.send_message(chat_id, text, buttons=buttons)
-            return ""
+            return _ALREADY_SENT
         return text
 
     async def _search_branches(self, cwd: Path, query: str, chat_id: str) -> str:
@@ -283,15 +284,15 @@ class GitCommandHandler:
 
         if buttons:
             await self._connector.send_message(chat_id, text, buttons=buttons)
-            return ""
+            return _ALREADY_SENT
         return text
 
     async def _checkout(
-        self, cwd: Path, branch: str, chat_id: str, session: Session
+        self, cwd: Path, branch: str, chat_id: str, session: Session, user_id: str
     ) -> str:
         result = await self._service.checkout(cwd, branch)
         if result.success:
-            self._log_audit(session, "checkout", branch)
+            self._log_audit(session, "checkout", branch, user_id)
             return formatter.format_result(result)
 
         # Fuzzy fallback — search for matching branches
@@ -315,7 +316,7 @@ class GitCommandHandler:
             )
 
         await self._connector.send_message(chat_id, text, buttons=buttons)
-        return ""
+        return _ALREADY_SENT
 
     async def _diff(self, cwd: Path, args: str) -> str:
         staged = args.strip() == "--staged"
@@ -327,14 +328,16 @@ class GitCommandHandler:
         entries = await self._service.log(cwd)
         return formatter.format_log(entries)
 
-    async def _add(self, cwd: Path, paths: list[str], session: Session) -> str:
+    async def _add(
+        self, cwd: Path, paths: list[str], session: Session, user_id: str
+    ) -> str:
         result = await self._service.add(cwd, paths)
-        self._log_audit(session, "add", " ".join(paths))
+        self._log_audit(session, "add", " ".join(paths), user_id)
         return formatter.format_result(result)
 
-    async def _add_all(self, cwd: Path, session: Session) -> str:
+    async def _add_all(self, cwd: Path, session: Session, user_id: str) -> str:
         result = await self._service.add_all(cwd)
-        self._log_audit(session, "add_all", "")
+        self._log_audit(session, "add_all", "", user_id)
         return formatter.format_result(result)
 
     async def _add_interactive(self, cwd: Path, chat_id: str) -> str:
@@ -363,22 +366,27 @@ class GitCommandHandler:
         )
 
         await self._connector.send_message(chat_id, text, buttons=buttons)
-        return ""
+        return _ALREADY_SENT
 
-    async def _commit(self, cwd: Path, message: str, session: Session) -> str:
+    async def _commit(
+        self, cwd: Path, message: str, session: Session, user_id: str
+    ) -> str:
         result = await self._service.commit(cwd, message)
-        self._log_audit(session, "commit", message)
+        self._log_audit(session, "commit", message, user_id)
         return formatter.format_result(result, emoji="\u2705" if result.success else "")
 
-    async def _commit_prompt(self, cwd: Path, chat_id: str, session: Session) -> str:
+    async def _commit_prompt(
+        self, cwd: Path, chat_id: str, session: Session, user_id: str
+    ) -> str:
         status = await self._service.status(cwd)
         if not status.staged:
             return "\u274c No staged changes to commit."
 
         staged_text = "\n".join(
-            f"  {_STATUS_EMOJI.get(c.status, '?')} {c.path}" for c in status.staged
+            f"  {formatter._STATUS_EMOJI.get(c.status, '?')} {c.path}"
+            for c in status.staged
         )
-        auto_msg = _build_auto_message(status.staged)
+        auto_msg = formatter.build_auto_message(status.staged)
         prompt_text = (
             f"\U0001f4dd Staged changes:\n{staged_text}\n\n"
             f"Suggested: {auto_msg}\n\n"
@@ -409,7 +417,7 @@ class GitCommandHandler:
             return "\u274c No commit message provided."
 
         result = await self._service.commit(cwd, message)
-        self._log_audit(session, "commit", message)
+        self._log_audit(session, "commit", message, user_id)
         return formatter.format_result(result, emoji="\u2705" if result.success else "")
 
     async def _push_confirm(self, cwd: Path, chat_id: str) -> str:
@@ -429,24 +437,24 @@ class GitCommandHandler:
             ]
         ]
         await self._connector.send_message(chat_id, text, buttons=buttons)
-        return ""
+        return _ALREADY_SENT
 
-    async def _pull(self, cwd: Path, session: Session) -> str:
+    async def _pull(self, cwd: Path, session: Session, user_id: str) -> str:
         result = await self._service.pull(cwd)
-        self._log_audit(session, "pull", "")
+        self._log_audit(session, "pull", "", user_id)
         return formatter.format_result(result)
 
     async def _merge(
-        self, cwd: Path, branch: str, chat_id: str, session: Session
+        self, cwd: Path, branch: str, chat_id: str, session: Session, user_id: str
     ) -> str:
         result: MergeResult = await self._service.merge(cwd, branch)
 
         if result.success:
-            self._log_audit(session, "merge", branch)
+            self._log_audit(session, "merge", branch, user_id)
             return formatter.format_merge_result(result)
 
         if result.had_conflicts:
-            self._log_audit(session, "merge_conflicts", branch)
+            self._log_audit(session, "merge_conflicts", branch, user_id)
             text = formatter.format_merge_result(result)
             text += "\n\nHow would you like to proceed?"
             buttons = [
@@ -462,14 +470,14 @@ class GitCommandHandler:
                 ]
             ]
             await self._connector.send_message(chat_id, text, buttons=buttons)
-            return ""
+            return _ALREADY_SENT
 
-        self._log_audit(session, "merge_failed", branch)
+        self._log_audit(session, "merge_failed", branch, user_id)
         return formatter.format_merge_result(result)
 
-    async def _merge_abort(self, cwd: Path, session: Session) -> str:
+    async def _merge_abort(self, cwd: Path, session: Session, user_id: str) -> str:
         result = await self._service.merge_abort(cwd)
-        self._log_audit(session, "merge_abort", "")
+        self._log_audit(session, "merge_abort", "", user_id)
         if result.success:
             return formatter.format_merge_abort()
         return formatter.format_result(result)
@@ -482,6 +490,7 @@ class GitCommandHandler:
         conflicted = await self._service.conflict_files(cwd)
         status = await self._service.status(cwd)
 
+        # Deferred: breaks circular import with core.events
         from tether.core.events import COMMAND_MERGE, Event
 
         event = Event(
@@ -499,8 +508,7 @@ class GitCommandHandler:
         # Store event for engine to pick up
         self._pending_merge_event = (chat_id, event)
 
-    @property
-    def pending_merge_event(self) -> tuple[str, Event] | None:
+    def pop_pending_merge_event(self) -> tuple[str, Event] | None:
         """Return and clear any pending merge resolve event."""
         ev = self._pending_merge_event
         self._pending_merge_event = None
@@ -508,54 +516,13 @@ class GitCommandHandler:
 
     # ── Helpers ───────────────────────────────────────────────────────
 
-    def _log_audit(self, session: Session, operation: str, detail: str) -> None:
-        self._audit._write(
-            {
-                "event": "git_operation",
-                "session_id": session.session_id,
-                "operation": operation,
-                "detail": detail,
-                "working_directory": session.working_directory,
-            }
+    def _log_audit(
+        self, session: Session, operation: str, detail: str, user_id: str | None = None
+    ) -> None:
+        self._audit.log_operation(
+            session_id=session.session_id,
+            operation=operation,
+            detail=detail,
+            working_directory=session.working_directory,
+            user_id=user_id,
         )
-
-
-_STATUS_EMOJI = {
-    "modified": "M",
-    "added": "A",
-    "deleted": "D",
-    "renamed": "R",
-    "copied": "C",
-    "conflicted": "U",
-}
-
-_STATUS_VERB = {
-    "modified": "update",
-    "added": "add",
-    "deleted": "delete",
-    "renamed": "rename",
-}
-
-
-def _build_auto_message(staged: list[FileChange]) -> str:
-    """Generate a short commit message from staged file changes."""
-    if not staged:
-        return "update files"
-
-    if len(staged) == 1:
-        verb = _STATUS_VERB.get(staged[0].status, "update")
-        return f"{verb} {staged[0].path}"
-
-    from collections import Counter
-
-    statuses = [c.status for c in staged]
-    unique = set(statuses)
-    n = len(staged)
-
-    if len(unique) == 1:
-        verb = _STATUS_VERB.get(statuses[0], "update")
-        return f"{verb} {n} files"
-
-    counts = Counter(statuses)
-    parts = ", ".join(f"{count} {status}" for status, count in counts.most_common())
-    return f"update {n} files ({parts})"

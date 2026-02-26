@@ -276,6 +276,33 @@ class TestSendFile:
 
         mock_app.bot.send_document.assert_not_awaited()
 
+    @pytest.mark.asyncio
+    async def test_retry_resets_file_position(self, connector, tmp_path):
+        """File position is reset to 0 before each retry attempt."""
+        mock_app = _make_mock_app()
+        connector._app = mock_app
+
+        test_file = tmp_path / "test.txt"
+        test_file.write_text("full content here")
+
+        positions_on_call: list[int] = []
+
+        async def _track_position(**kwargs):
+            doc = kwargs["document"]
+            positions_on_call.append(doc.tell())
+            if len(positions_on_call) == 1:
+                doc.read()  # advance position, simulating partial read
+                raise NetworkError("transient")
+            return MagicMock()
+
+        mock_app.bot.send_document = AsyncMock(side_effect=_track_position)
+
+        await connector.send_file("123", str(test_file))
+
+        assert len(positions_on_call) == 2
+        assert positions_on_call[0] == 0, "first call should start at position 0"
+        assert positions_on_call[1] == 0, "retry should reset position to 0"
+
 
 # --- Handler tests ---
 

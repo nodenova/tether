@@ -1,38 +1,21 @@
 # Changelog
 
 ## [0.3.0] - 2026-02-26
-- **changed**: Default `TETHER_STORAGE_BACKEND` from `"memory"` to `"sqlite"` so sessions survive restarts out of the box
-- **added**: `/plan` and `/edit` with inline message forwarding — `/plan create a login page` switches mode and starts agent in one step
-- **added**: `/dir` shows inline keyboard buttons for directory switching instead of plain text (tap to switch)
-- **added**: `/git commit` (no args) uses Claude agent to generate conventional commit messages from staged changes
-- **changed**: Per-project `.tether/` directories — audit log, SQLite DB, and file logs default to `{project}/.tether/` and switch on `/dir`
-- **fixed**: Persist `claude_session_id` on agent timeout so the next message can resume the SDK session
-- **added**: Write-ahead persistence for `/test` sessions — `.tether/test-session.md` updated BEFORE each phase so mid-phase crashes leave a trail for resumption
-- **fixed**: BadRequest errors (e.g., "Message is not modified") no longer retried 3x — propagated immediately instead of wasting API calls with 7s backoff
-- **fixed**: Duplicate activity message edits — same tool description no longer triggers identical `edit_message` calls
-- **fixed**: Planning-phase streaming messages ("Now I have full context...") cleaned up on plan approval instead of lingering
-- **added**: Documentation for `.tether-test.yaml`, context persistence, and self-healing sub-agents in `docs/testing-setup.md`
-- **added**: Project test config (`.tether-test.yaml`) — persist URL, credentials, framework, preconditions, and focus areas across test sessions
-- **added**: Context persistence — test mode instructs agent to maintain `.tether/test-session.md` as working memory across restarts
-- **added**: Auto-approve browser readonly tools in test mode (not just mutation tools)
-- **added**: `"test": "acceptEdits"` permission mode so sub-agents in test mode can write/edit files
-- **fixed**: Playwright MCP not available when agent works in target repos without their own `.mcp.json` — tether's own `.mcp.json` now loaded as default MCP servers at startup
-- **added**: Agent resilience — exponential backoff in agent retries (2s→4s→8s), engine-level auto-retry for transient API errors, 30-minute execution timeout, sustained degradation backoff across turns
-- **added**: User-friendly error messages — raw exit codes and API errors mapped to human-readable text instead of exposing internals
-- **fixed**: Pending messages no longer dropped on transient errors — queue preserved so next user message also processes queued ones
-- **added**: `TETHER_AGENT_TIMEOUT_SECONDS` config parameter (default 1800) to prevent runaway agent sessions
-- **added**: `/git merge <branch>` command with AI-assisted conflict resolution — detects conflicts, presents auto-resolve/abort buttons, and enters merge mode where the agent resolves conflicts across 4 phases (analysis, resolution, verify, complete)
-- **added**: `MergeResolverPlugin` follows TestRunnerPlugin pattern — subscribes to `COMMAND_MERGE` event, sets session mode/instruction, auto-approves Edit/Write/Read and git read commands
-- **added**: Message interrupt during agent execution — inline buttons let the user interrupt or wait instead of silent queuing
-- **fixed**: Question message with stale buttons now deleted from Telegram when user replies with text
-- **added**: Enhanced `/test` command with structured args (`--url`, `--framework`, `--server`, `--dir`, `--no-e2e`, `--no-unit`, `--no-backend`)
-- **added**: 9-phase agent-driven test workflow (discovery → server startup → smoke test → unit → backend → E2E → error analysis → healing → report)
-- **added**: `dev-tools.yaml` policy overlay — auto-allows common dev commands (package managers, linters, test runners) via `TETHER_POLICY_FILES`
-- **added**: Policy overlay documentation in `docs/policies.md` — covers loading order, creating custom overlays, security considerations
-- **added**: Auto-delete transient messages — interrupt prompts, "Task interrupted", "Task completed", and fallback ack messages are scheduled for deletion after a short delay
-- **changed**: `dev-tools.yaml` now auto-loaded alongside `default.yaml` by default
-- **fixed**: Agent claiming browser MCP tools aren't available during `/test` — preamble now explicitly declares tool availability, rules forbid silent fallback, and MCP server names are logged at agent startup for debugging
-- **fixed**: Telegram `callback_data` 64-byte enforcement — approval buttons, question buttons, and plan-review buttons now use byte-aware truncation via `_truncate_callback_data()` to prevent Telegram API rejections with long IDs or multi-byte labels
+
+### Added
+- `/git merge <branch>` — AI-assisted conflict resolution with auto-resolve/abort buttons and 4-phase merge workflow
+- `/test` command — 9-phase agent-driven test workflow with structured args (`--url`, `--framework`, `--dir`, `--no-e2e`, `--no-unit`, `--no-backend`), project config (`.tether/test.yaml`), write-ahead crash recovery, and context persistence across sessions
+- `/plan <text>` and `/edit <text>` — switch mode and start agent in one step
+- `/dir` inline keyboard buttons for one-tap directory switching
+- Message interrupt — inline buttons to interrupt or wait during agent execution instead of silent queuing
+- `dev-tools.yaml` policy overlay — auto-allows common dev commands (package managers, linters, test runners)
+- Auto-delete transient messages (interrupt prompts, ack messages, completion notices)
+
+### Fixed
+- Agent resilience — exponential backoff on retries, auto-retry for transient API errors, 30-minute execution timeout, human-readable error messages
+- Session continuity — `claude_session_id` persisted on agent timeout so next message resumes
+- Pending messages no longer dropped on transient errors
+- Playwright MCP tools now available when agent works in repos without their own `.mcp.json`
 
 ## [0.2.1] - 2026-02-23
 - **added**: Network resilience for Telegram connector — exponential-backoff retries on `NetworkError`/`TimedOut` for startup and send operations

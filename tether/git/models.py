@@ -1,15 +1,19 @@
 """Data models for git command results."""
 
+from typing import Literal
+
 from pydantic import BaseModel, ConfigDict
+
+FileStatus = Literal[
+    "modified", "added", "deleted", "renamed", "copied", "conflicted", "untracked"
+]
 
 
 class FileChange(BaseModel):
-    """A single file change in git status."""
-
     model_config = ConfigDict(frozen=True)
 
     path: str
-    status: str  # "modified", "added", "deleted", "renamed", "untracked", "conflicted"
+    status: FileStatus
 
 
 class GitStatus(BaseModel):
@@ -27,8 +31,6 @@ class GitStatus(BaseModel):
 
 
 class GitBranch(BaseModel):
-    """A git branch."""
-
     model_config = ConfigDict(frozen=True)
 
     name: str
@@ -37,8 +39,6 @@ class GitBranch(BaseModel):
 
 
 class GitLogEntry(BaseModel):
-    """A single commit in git log."""
-
     model_config = ConfigDict(frozen=True)
 
     hash: str

@@ -100,14 +100,6 @@ class TestFormatStatus:
         result = formatter.format_status(status)
         assert "U conflict.py" in result
 
-    def test_unknown_status_shows_question_mark(self):
-        status = GitStatus(
-            branch="main",
-            unstaged=[FileChange(path="x.py", status="unknown_status")],
-        )
-        result = formatter.format_status(status)
-        assert "? x.py" in result
-
 
 class TestFormatBranches:
     def test_empty_branch_list(self):
@@ -334,3 +326,31 @@ class TestFormatHelp:
     def test_has_header(self):
         result = formatter.format_help()
         assert "Git Commands:" in result
+
+
+class TestBuildAutoMessage:
+    def test_single_modified(self):
+        staged = [FileChange(path="src/app.py", status="modified")]
+        assert formatter.build_auto_message(staged) == "update src/app.py"
+
+    def test_single_added(self):
+        staged = [FileChange(path="new_file.py", status="added")]
+        assert formatter.build_auto_message(staged) == "add new_file.py"
+
+    def test_multiple_same_status(self):
+        staged = [
+            FileChange(path="a.py", status="modified"),
+            FileChange(path="b.py", status="modified"),
+        ]
+        assert formatter.build_auto_message(staged) == "update 2 files"
+
+    def test_multiple_mixed(self):
+        staged = [
+            FileChange(path="a.py", status="modified"),
+            FileChange(path="b.py", status="added"),
+        ]
+        result = formatter.build_auto_message(staged)
+        assert result.startswith("update 2 files (")
+
+    def test_empty(self):
+        assert formatter.build_auto_message([]) == "update files"

@@ -10,7 +10,7 @@ from tether.core.events import EventBus
 from tether.core.safety.gatekeeper import (
     ToolGatekeeper,
     _approval_key,
-    _normalize_tool_name,
+    normalize_tool_name,
 )
 from tether.core.safety.policy import (
     PolicyDecision,
@@ -1047,20 +1047,20 @@ class TestMCPToolNameNormalization:
 
     def test_normalize_strips_mcp_prefix(self):
         assert (
-            _normalize_tool_name("mcp__playwright__browser_navigate")
+            normalize_tool_name("mcp__playwright__browser_navigate")
             == "browser_navigate"
         )
 
     def test_normalize_strips_arbitrary_server(self):
-        assert _normalize_tool_name("mcp__my_server__some_tool") == "some_tool"
+        assert normalize_tool_name("mcp__my_server__some_tool") == "some_tool"
 
     def test_normalize_noop_for_standard_tools(self):
-        assert _normalize_tool_name("Write") == "Write"
-        assert _normalize_tool_name("Bash") == "Bash"
-        assert _normalize_tool_name("browser_navigate") == "browser_navigate"
+        assert normalize_tool_name("Write") == "Write"
+        assert normalize_tool_name("Bash") == "Bash"
+        assert normalize_tool_name("browser_navigate") == "browser_navigate"
 
     def test_normalize_empty_string(self):
-        assert _normalize_tool_name("") == ""
+        assert normalize_tool_name("") == ""
 
     @pytest.mark.asyncio
     async def test_mcp_tool_matches_policy_after_normalization(
@@ -1071,7 +1071,9 @@ class TestMCPToolNameNormalization:
 
         from tether.core.safety.policy import PolicyEngine
 
-        policies_dir = Path(__file__).parent.parent / "tether" / "policies"
+        policies_dir = (
+            Path(__file__).parent.parent.parent.parent / "tether" / "policies"
+        )
         policy_paths = [policies_dir / "default.yaml"]
         pe = PolicyEngine(policy_paths)
 

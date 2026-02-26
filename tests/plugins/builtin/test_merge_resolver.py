@@ -286,7 +286,7 @@ class TestHandlerMergeCallbacks:
         await handler.handle_callback(
             "user1", "chat1", "merge_resolve", "feat", session
         )
-        pending = handler.pending_merge_event
+        pending = handler.pop_pending_merge_event()
         assert pending is not None
         chat_id, event = pending
         assert chat_id == "chat1"

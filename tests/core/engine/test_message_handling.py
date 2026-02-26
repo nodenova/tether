@@ -1,0 +1,511 @@
+"""Engine tests — core message handling, errors, logging, context."""
+
+import asyncio
+import time
+from unittest.mock import AsyncMock, patch
+
+import pytest
+
+from tests.core.engine.conftest import FakeAgent
+from tether.agents.base import AgentResponse, BaseAgent
+from tether.core.config import TetherConfig
+from tether.core.engine import Engine
+from tether.core.session import SessionManager
+from tether.exceptions import AgentError
+from tether.middleware.base import MessageContext
+
+
+class TestEngineMessageHandling:
+    @pytest.mark.asyncio
+    async def test_handle_message_returns_response(self, engine):
+        result = await engine.handle_message("user1", "hello", "chat1")
+        assert "Echo: hello" in result
+
+    @pytest.mark.asyncio
+    async def test_handle_message_creates_session(self, engine):
+        await engine.handle_message("user1", "hello", "chat1")
+        session = engine.session_manager.get("user1", "chat1")
+        assert session is not None
+        assert session.message_count == 1
+
+    @pytest.mark.asyncio
+    async def test_handle_message_updates_session_cost(self, engine):
+        await engine.handle_message("user1", "hello", "chat1")
+        session = engine.session_manager.get("user1", "chat1")
+        assert session.total_cost == 0.01
+
+
+class TestEngineErrorHandling:
+    @pytest.mark.asyncio
+    async def test_agent_error_returns_error_message(self, config, audit_logger):
+        failing_agent = FakeAgent(fail=True)
+        eng = Engine(
+            connector=None,
+            agent=failing_agent,
+            config=config,
+            session_manager=SessionManager(),
+            audit=audit_logger,
+        )
+        result = await eng.handle_message("user1", "hello", "chat1")
+        assert "Error:" in result
+        assert "Agent crashed" in result
+
+    @pytest.mark.asyncio
+    async def test_agent_error_sent_to_connector(
+        self, config, audit_logger, mock_connector
+    ):
+        failing_agent = FakeAgent(fail=True)
+        eng = Engine(
+            connector=mock_connector,
+            agent=failing_agent,
+            config=config,
+            session_manager=SessionManager(),
+            audit=audit_logger,
+        )
+        await eng.handle_message("user1", "hello", "chat1")
+        assert len(mock_connector.sent_messages) == 1
+        assert "Error:" in mock_connector.sent_messages[0]["text"]
+
+
+class TestEngineMessageCtx:
+    @pytest.mark.asyncio
+    async def test_handle_message_ctx_delegates(self, engine):
+        ctx = MessageContext(user_id="user1", chat_id="chat1", text="hello ctx")
+        result = await engine.handle_message_ctx(ctx)
+        assert "Echo: hello ctx" in result
+
+
+class TestEngineMessageLogging:
+    @pytest.mark.asyncio
+    async def test_messages_logged_when_sqlite_store(
+        self, config, fake_agent, audit_logger, tmp_path
+    ):
+        from tether.storage.sqlite import SqliteSessionStore
+
+        store = SqliteSessionStore(tmp_path / "msg.db")
+        await store.setup()
+        try:
+            eng = Engine(
+                connector=None,
+                agent=fake_agent,
+                config=config,
+                session_manager=SessionManager(),
+                audit=audit_logger,
+                store=store,
+            )
+            await eng.handle_message("user1", "hello", "chat1")
+            msgs = await store.get_messages("user1", "chat1")
+            assert len(msgs) == 2
+            assert msgs[0]["role"] == "user"
+            assert msgs[0]["content"] == "hello"
+            assert msgs[1]["role"] == "assistant"
+            assert "Echo: hello" in msgs[1]["content"]
+            assert msgs[1]["cost"] == pytest.approx(0.01)
+            assert msgs[1]["duration_ms"] is not None
+            assert msgs[1]["session_id"] == "test-session-123"
+        finally:
+            await store.teardown()
+
+    @pytest.mark.asyncio
+    async def test_message_log_failure_does_not_break_handling(
+        self, config, fake_agent, audit_logger, tmp_path
+    ):
+        from unittest.mock import AsyncMock
+
+        from tether.exceptions import StorageError
+        from tether.storage.sqlite import SqliteSessionStore
+
+        store = SqliteSessionStore(tmp_path / "msg.db")
+        await store.setup()
+        store.save_message = AsyncMock(side_effect=StorageError("disk full"))
+        try:
+            eng = Engine(
+                connector=None,
+                agent=fake_agent,
+                config=config,
+                session_manager=SessionManager(),
+                audit=audit_logger,
+                store=store,
+            )
+            result = await eng.handle_message("user1", "hello", "chat1")
+            assert "Echo: hello" in result
+        finally:
+            await store.teardown()
+
+    @pytest.mark.asyncio
+    async def test_agent_error_only_logs_user_message(
+        self, config, audit_logger, tmp_path
+    ):
+        from tether.storage.sqlite import SqliteSessionStore
+
+        store = SqliteSessionStore(tmp_path / "msg.db")
+        await store.setup()
+        try:
+            eng = Engine(
+                connector=None,
+                agent=FakeAgent(fail=True),
+                config=config,
+                session_manager=SessionManager(),
+                audit=audit_logger,
+                store=store,
+            )
+            await eng.handle_message("user1", "hello", "chat1")
+            msgs = await store.get_messages("user1", "chat1")
+            assert len(msgs) == 1
+            assert msgs[0]["role"] == "user"
+        finally:
+            await store.teardown()
+
+
+class TestBuildImplementationPrompt:
+    def test_long_content_includes_plan(self, engine):
+        plan = "A detailed plan with many steps and specifics to implement carefully"
+        result = engine._build_implementation_prompt(plan)
+        assert result.startswith("Implement the following plan:")
+        assert "A detailed plan" in result
+
+    def test_short_content_uses_generic(self, engine):
+        result = engine._build_implementation_prompt("Short")
+        assert result == "Implement the plan."
+
+    def test_empty_content_uses_generic(self, engine):
+        result = engine._build_implementation_prompt("   ")
+        assert result == "Implement the plan."
+
+
+class TestEngineResilience:
+    """Tests for engine-level retry, message preservation, timeout, and backoff."""
+
+    @pytest.mark.asyncio
+    async def test_engine_retries_transient_error(
+        self, config, audit_logger, policy_engine
+    ):
+        call_count = 0
+
+        class RetryAgent(BaseAgent):
+            async def execute(self, prompt, session, **kwargs):
+                nonlocal call_count
+                call_count += 1
+                if call_count == 1:
+                    return AgentResponse(
+                        content="temporarily unavailable",
+                        session_id="sid",
+                        cost=0.0,
+                        is_error=True,
+                    )
+                return AgentResponse(
+                    content="success",
+                    session_id="sid",
+                    cost=0.01,
+                )
+
+            async def cancel(self, session_id):
+                pass
+
+            async def shutdown(self):
+                pass
+
+        eng = Engine(
+            connector=None,
+            agent=RetryAgent(),
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+        )
+
+        with patch("asyncio.sleep", new_callable=AsyncMock):
+            result = await eng.handle_message("u1", "hello", "c1")
+
+        assert "success" in result
+        assert call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_engine_no_retry_permanent_error(
+        self, config, audit_logger, policy_engine
+    ):
+        call_count = 0
+
+        class PermanentErrorAgent(BaseAgent):
+            async def execute(self, prompt, session, **kwargs):
+                nonlocal call_count
+                call_count += 1
+                return AgentResponse(
+                    content="authentication_error: invalid key",
+                    session_id="sid",
+                    cost=0.0,
+                    is_error=True,
+                )
+
+            async def cancel(self, session_id):
+                pass
+
+            async def shutdown(self):
+                pass
+
+        eng = Engine(
+            connector=None,
+            agent=PermanentErrorAgent(),
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+        )
+
+        result = await eng.handle_message("u1", "hello", "c1")
+        assert "authentication_error" in result
+        assert call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_pending_messages_preserved_on_transient_error(
+        self, config, audit_logger, policy_engine
+    ):
+        class TransientFailAgent(BaseAgent):
+            async def execute(self, prompt, session, **kwargs):
+                raise AgentError(
+                    "The AI service is temporarily unavailable. Please try again in a moment."
+                )
+
+            async def cancel(self, session_id):
+                pass
+
+            async def shutdown(self):
+                pass
+
+        eng = Engine(
+            connector=None,
+            agent=TransientFailAgent(),
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+        )
+
+        eng._pending_messages["c1"] = [("u1", "queued msg")]
+
+        result = await eng.handle_message("u1", "trigger", "c1")
+        assert "Error:" in result
+        assert eng._pending_messages.get("c1") == [("u1", "queued msg")]
+
+    @pytest.mark.asyncio
+    async def test_pending_messages_dropped_on_permanent_error(
+        self, config, audit_logger, policy_engine
+    ):
+        class PermanentFailAgent(BaseAgent):
+            async def execute(self, prompt, session, **kwargs):
+                raise AgentError("Agent error: something broke permanently")
+
+            async def cancel(self, session_id):
+                pass
+
+            async def shutdown(self):
+                pass
+
+        eng = Engine(
+            connector=None,
+            agent=PermanentFailAgent(),
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+        )
+
+        eng._pending_messages["c1"] = [("u1", "queued msg")]
+
+        result = await eng.handle_message("u1", "trigger", "c1")
+        assert "Error:" in result
+        assert "c1" not in eng._pending_messages
+
+    @pytest.mark.asyncio
+    async def test_agent_timeout_cancels_and_raises(
+        self, config, audit_logger, policy_engine
+    ):
+        cancel_called = False
+
+        class HangingAgent(BaseAgent):
+            async def execute(self, prompt, session, **kwargs):
+                await asyncio.sleep(9999)
+
+            async def cancel(self, session_id):
+                nonlocal cancel_called
+                cancel_called = True
+
+            async def shutdown(self):
+                pass
+
+        config_short = TetherConfig(
+            approved_directories=config.approved_directories,
+            max_turns=5,
+            agent_timeout_seconds=1,
+            audit_log_path=config.audit_log_path,
+        )
+
+        eng = Engine(
+            connector=None,
+            agent=HangingAgent(),
+            config=config_short,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+        )
+
+        result = await eng.handle_message("u1", "hello", "c1")
+        assert "timed out" in result.lower()
+        assert cancel_called
+
+    @pytest.mark.asyncio
+    async def test_agent_timeout_persists_session_id(
+        self, config, audit_logger, policy_engine
+    ):
+        """When agent sets session.claude_session_id before timeout, it gets persisted."""
+
+        class HangingAgentWithSession(BaseAgent):
+            async def execute(self, prompt, session, **kwargs):
+                session.claude_session_id = "sdk-timeout-id"
+                await asyncio.sleep(9999)
+
+            async def cancel(self, session_id):
+                pass
+
+            async def shutdown(self):
+                pass
+
+        config_short = TetherConfig(
+            approved_directories=config.approved_directories,
+            max_turns=5,
+            agent_timeout_seconds=1,
+            audit_log_path=config.audit_log_path,
+        )
+
+        sm = SessionManager()
+        eng = Engine(
+            connector=None,
+            agent=HangingAgentWithSession(),
+            config=config_short,
+            session_manager=sm,
+            policy_engine=policy_engine,
+            audit=audit_logger,
+        )
+
+        result = await eng.handle_message("u1", "hello", "c1")
+        assert "timed out" in result.lower()
+
+        session = await sm.get_or_create(
+            "u1", "c1", config_short.approved_directories[0]
+        )
+        assert session.claude_session_id == "sdk-timeout-id"
+
+    @pytest.mark.asyncio
+    async def test_agent_timeout_without_session_id(
+        self, config, audit_logger, policy_engine
+    ):
+        """When agent hangs without setting session_id, no persistence is attempted."""
+
+        class HangingAgentNoSession(BaseAgent):
+            async def execute(self, prompt, session, **kwargs):
+                await asyncio.sleep(9999)
+
+            async def cancel(self, session_id):
+                pass
+
+            async def shutdown(self):
+                pass
+
+        config_short = TetherConfig(
+            approved_directories=config.approved_directories,
+            max_turns=5,
+            agent_timeout_seconds=1,
+            audit_log_path=config.audit_log_path,
+        )
+
+        sm = SessionManager()
+        eng = Engine(
+            connector=None,
+            agent=HangingAgentNoSession(),
+            config=config_short,
+            session_manager=sm,
+            policy_engine=policy_engine,
+            audit=audit_logger,
+        )
+
+        result = await eng.handle_message("u1", "hello", "c1")
+        assert "timed out" in result.lower()
+
+        session = await sm.get_or_create(
+            "u1", "c1", config_short.approved_directories[0]
+        )
+        assert session.claude_session_id is None
+
+    @pytest.mark.asyncio
+    async def test_sustained_degradation_backoff(
+        self, config, audit_logger, policy_engine
+    ):
+        eng = Engine(
+            connector=None,
+            agent=FakeAgent(),
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+        )
+
+        assert eng._failure_backoff("c1") == 0
+
+        now = time.monotonic()
+        eng._recent_failures["c1"] = [now - 10, now - 5, now - 1]
+        backoff = eng._failure_backoff("c1")
+        assert backoff == 30  # 10 * 3
+
+        eng._recent_failures["c1"] = [now] * 7
+        backoff = eng._failure_backoff("c1")
+        assert backoff == 60  # capped at 60
+
+    def test_is_retryable_response_true(self):
+        resp = AgentResponse(content="temporarily unavailable", is_error=True)
+        assert Engine._is_retryable_response(resp) is True
+
+    def test_is_retryable_response_false_not_error(self):
+        resp = AgentResponse(content="temporarily unavailable", is_error=False)
+        assert Engine._is_retryable_response(resp) is False
+
+    def test_is_retryable_response_false_permanent(self):
+        resp = AgentResponse(content="authentication_error: invalid key", is_error=True)
+        assert Engine._is_retryable_response(resp) is False
+
+    def test_is_retryable_response_buffer_overflow(self):
+        resp = AgentResponse(
+            content="The AI agent's response was too large. Resuming where it left off.",
+            is_error=True,
+        )
+        assert Engine._is_retryable_response(resp) is True
+
+    @pytest.mark.asyncio
+    async def test_pending_messages_preserved_on_buffer_overflow(
+        self, config, audit_logger, policy_engine
+    ):
+        class BufferOverflowAgent(BaseAgent):
+            async def execute(self, prompt, session, **kwargs):
+                raise AgentError(
+                    "The AI agent's response was too large. Resuming where it left off."
+                )
+
+            async def cancel(self, session_id):
+                pass
+
+            async def shutdown(self):
+                pass
+
+        eng = Engine(
+            connector=None,
+            agent=BufferOverflowAgent(),
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+        )
+
+        eng._pending_messages["c1"] = [("u1", "queued msg")]
+
+        result = await eng.handle_message("u1", "trigger", "c1")
+        assert "Error:" in result
+        assert eng._pending_messages.get("c1") == [("u1", "queued msg")]

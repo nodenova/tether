@@ -9,6 +9,7 @@ import structlog
 
 from tether.git.models import (
     FileChange,
+    FileStatus,
     GitBranch,
     GitLogEntry,
     GitResult,
@@ -60,36 +61,11 @@ class GitService:
                     elif part.startswith("-"):
                         behind = int(part[1:])
             elif line.startswith("1 ") or line.startswith("2 "):
-                # Type 1: "1 XY sub mH mI mW hH hI path"
-                # Type 2: "2 XY sub mH mI mW hH hI Xscore path\torigPath"
-                is_rename = line.startswith("2 ")
-                max_split = 9 if is_rename else 8
-                parts = line.split(" ", max_split)
-                if len(parts) < max_split + 1:
-                    continue
-                xy = parts[1]
-                path_part = parts[max_split]
-                # For renames, take the new path (before tab)
-                if "\t" in path_part:
-                    path_part = path_part.split("\t")[0]
-
-                x_status = xy[0] if len(xy) > 0 else "."
-                y_status = xy[1] if len(xy) > 1 else "."
-
-                if x_status != ".":
-                    staged.append(
-                        FileChange(
-                            path=path_part,
-                            status=_porcelain_to_status(x_status),
-                        )
-                    )
-                if y_status != ".":
-                    unstaged.append(
-                        FileChange(
-                            path=path_part,
-                            status=_porcelain_to_status(y_status),
-                        )
-                    )
+                staged_fc, unstaged_fc = _parse_changed_entry(line)
+                if staged_fc:
+                    staged.append(staged_fc)
+                if unstaged_fc:
+                    unstaged.append(unstaged_fc)
             elif line.startswith("u "):
                 # Unmerged entry
                 parts = line.split(" ", 10)
@@ -121,7 +97,7 @@ class GitService:
             if not line:
                 continue
             is_current = line.startswith("* ")
-            name = line.lstrip("* ").strip()
+            name = line.removeprefix("* ").strip()
             # Skip detached HEAD
             if name.startswith("("):
                 continue
@@ -140,7 +116,7 @@ class GitService:
             if not line:
                 continue
             is_current = line.startswith("* ")
-            name = line.lstrip("* ").strip()
+            name = line.removeprefix("* ").strip()
             if name.startswith("("):
                 continue
             # Skip HEAD pointers like "remotes/origin/HEAD -> origin/main"
@@ -434,14 +410,46 @@ class GitService:
             return 1, "", str(e)
 
 
-def _porcelain_to_status(code: str) -> str:
+def _parse_changed_entry(line: str) -> tuple[FileChange | None, FileChange | None]:
+    """Parse a porcelain v2 type-1 or type-2 changed entry into staged/unstaged FileChanges."""
+    is_rename = line.startswith("2 ")
+    max_split = 9 if is_rename else 8
+    parts = line.split(" ", max_split)
+    if len(parts) < max_split + 1:
+        return None, None
+
+    xy = parts[1]
+    path_part = parts[max_split]
+    if "\t" in path_part:
+        path_part = path_part.split("\t")[0]
+
+    x_status = xy[0] if len(xy) > 0 else "."
+    y_status = xy[1] if len(xy) > 1 else "."
+
+    staged = (
+        FileChange(path=path_part, status=_porcelain_to_status(x_status))
+        if x_status != "."
+        else None
+    )
+    unstaged = (
+        FileChange(path=path_part, status=_porcelain_to_status(y_status))
+        if y_status != "."
+        else None
+    )
+    return staged, unstaged
+
+
+_STATUS_MAP: dict[str, FileStatus] = {
+    "M": "modified",
+    "T": "modified",
+    "A": "added",
+    "D": "deleted",
+    "R": "renamed",
+    "C": "copied",
+    "U": "conflicted",
+}
+
+
+def _porcelain_to_status(code: str) -> FileStatus:
     """Convert porcelain v2 status code to human-readable status."""
-    return {
-        "M": "modified",
-        "T": "modified",
-        "A": "added",
-        "D": "deleted",
-        "R": "renamed",
-        "C": "copied",
-        "U": "conflicted",
-    }.get(code, "modified")
+    return _STATUS_MAP.get(code, "modified")

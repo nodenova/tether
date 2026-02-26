@@ -4,13 +4,11 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from tether.storage.base import SessionStore
-
 if TYPE_CHECKING:
     from tether.core.session import Session
 
 
-class MemorySessionStore(SessionStore):
+class MemorySessionStore:
     def __init__(self) -> None:
         self._data: dict[str, Session] = {}
 

@@ -6,6 +6,8 @@ import pytest
 
 from tether.agents.base import AgentResponse, ToolActivity
 from tether.agents.claude_code import (
+    _AUTO_MODE_INSTRUCTION,
+    _PLAN_MODE_INSTRUCTION,
     ClaudeCodeAgent,
     _describe_tool,
     _friendly_error,
@@ -163,7 +165,7 @@ class TestClaudeCodeAgent:
             mode="auto",
         )
         opts = agent._build_options(session, can_use_tool=None)
-        assert agent._AUTO_MODE_INSTRUCTION in opts.system_prompt
+        assert _AUTO_MODE_INSTRUCTION in opts.system_prompt
         assert "Be a pirate." in opts.system_prompt
 
     def test_build_options_with_allowed_tools(self, tmp_path):
@@ -272,12 +274,12 @@ class TestClaudeCodeAgent:
     def test_auto_mode_sets_instruction_when_no_config_prompt(self, agent, session):
         session.mode = "auto"
         opts = agent._build_options(session, can_use_tool=None)
-        assert opts.system_prompt == agent._AUTO_MODE_INSTRUCTION
+        assert opts.system_prompt == _AUTO_MODE_INSTRUCTION
 
     def test_plan_mode_prepends_instruction(self, agent, session):
         session.mode = "plan"
         opts = agent._build_options(session, can_use_tool=None)
-        assert opts.system_prompt == agent._PLAN_MODE_INSTRUCTION
+        assert opts.system_prompt == _PLAN_MODE_INSTRUCTION
 
     def test_plan_mode_with_existing_system_prompt(self, tmp_path):
         config = TetherConfig(
@@ -293,20 +295,20 @@ class TestClaudeCodeAgent:
             mode="plan",
         )
         opts = agent._build_options(session, can_use_tool=None)
-        assert agent._PLAN_MODE_INSTRUCTION in opts.system_prompt
+        assert _PLAN_MODE_INSTRUCTION in opts.system_prompt
         assert "Be a pirate." in opts.system_prompt
-        assert opts.system_prompt.startswith(agent._PLAN_MODE_INSTRUCTION)
+        assert opts.system_prompt.startswith(_PLAN_MODE_INSTRUCTION)
 
     def test_auto_mode_no_plan_instruction(self, agent, session):
         session.mode = "auto"
         opts = agent._build_options(session, can_use_tool=None)
-        assert agent._AUTO_MODE_INSTRUCTION in opts.system_prompt
-        assert agent._PLAN_MODE_INSTRUCTION not in opts.system_prompt
+        assert _AUTO_MODE_INSTRUCTION in opts.system_prompt
+        assert _PLAN_MODE_INSTRUCTION not in opts.system_prompt
 
     def test_auto_mode_prepends_instruction(self, agent, session):
         session.mode = "auto"
         opts = agent._build_options(session, can_use_tool=None)
-        assert opts.system_prompt == agent._AUTO_MODE_INSTRUCTION
+        assert opts.system_prompt == _AUTO_MODE_INSTRUCTION
 
     def test_auto_mode_with_existing_system_prompt(self, tmp_path):
         config = TetherConfig(
@@ -322,16 +324,16 @@ class TestClaudeCodeAgent:
             mode="auto",
         )
         opts = agent._build_options(session, can_use_tool=None)
-        assert agent._AUTO_MODE_INSTRUCTION in opts.system_prompt
+        assert _AUTO_MODE_INSTRUCTION in opts.system_prompt
         assert "Be a pirate." in opts.system_prompt
-        assert opts.system_prompt.startswith(agent._AUTO_MODE_INSTRUCTION)
+        assert opts.system_prompt.startswith(_AUTO_MODE_INSTRUCTION)
 
     def test_default_mode_no_auto_instruction(self, agent, session):
         session.mode = "default"
         opts = agent._build_options(session, can_use_tool=None)
         sp = getattr(opts, "system_prompt", None)
         if sp:
-            assert agent._AUTO_MODE_INSTRUCTION not in sp
+            assert _AUTO_MODE_INSTRUCTION not in sp
 
     def test_build_options_auto_mode_sets_accept_edits_permission(self, agent, session):
         session.mode = "auto"
@@ -380,7 +382,7 @@ class TestClaudeCodeAgent:
         session.mode = "plan"
         session.mode_instruction = "This should be ignored."
         opts = agent._build_options(session, can_use_tool=None)
-        assert agent._PLAN_MODE_INSTRUCTION in opts.system_prompt
+        assert _PLAN_MODE_INSTRUCTION in opts.system_prompt
         assert "This should be ignored." not in opts.system_prompt
 
     def test_build_options_merges_mcp_servers(self, tmp_path):

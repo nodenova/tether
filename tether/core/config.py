@@ -2,7 +2,7 @@
 
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -82,7 +82,7 @@ class TetherConfig(BaseSettings):
     storage_path: Path = Path(".tether/tether.db")
 
     # Agent mode
-    default_mode: str = "default"  # "default", "plan", or "auto"
+    default_mode: Literal["default", "plan", "auto"] = "default"
 
     # Streaming
     streaming_enabled: bool = True

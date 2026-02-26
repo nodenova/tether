@@ -224,23 +224,17 @@ class TestPlanReviewHandling:
         assert result.target_mode == "edit"
 
     @pytest.mark.asyncio
-    async def test_plan_review_waits_indefinitely(self, mock_connector, config):
-        from tether.core.interactions import InteractionCoordinator, PlanReviewDecision
+    async def test_plan_review_times_out(self, mock_connector, config):
+        from claude_agent_sdk.types import PermissionResultDeny
 
-        config.approval_timeout_seconds = 0.1  # Plan reviews should ignore this
+        from tether.core.interactions import InteractionCoordinator
+
+        config.approval_timeout_seconds = 0.1
         coord = InteractionCoordinator(mock_connector, config)
 
-        async def resolve_after_delay():
-            await asyncio.sleep(0.3)  # Well past the 0.1s timeout
-            req = mock_connector.plan_review_requests[0]
-            await coord.resolve_option(req["interaction_id"], "edit")
-
-        task = asyncio.create_task(resolve_after_delay())
         result = await coord.handle_plan_review("chat1", {})
-        await task
-        # Should succeed despite exceeding approval_timeout_seconds
-        assert isinstance(result, PlanReviewDecision)
-        assert result.permission.behavior == "allow"
+        assert isinstance(result, PermissionResultDeny)
+        assert "timed out" in result.message
 
     @pytest.mark.asyncio
     async def test_default_allows_without_auto_approve(

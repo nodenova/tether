@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 import structlog
 from pydantic import BaseModel, Field
@@ -15,6 +15,7 @@ if TYPE_CHECKING:
 logger = structlog.get_logger()
 
 
+# Intentionally mutable — SessionManager updates fields in-place for simplicity.
 class Session(BaseModel):
     session_id: str
     user_id: str
@@ -25,7 +26,7 @@ class Session(BaseModel):
     last_used: datetime = Field(default_factory=lambda: datetime.now(UTC))
     total_cost: float = 0.0
     message_count: int = 0
-    mode: str = "default"
+    mode: Literal["default", "plan", "auto", "test", "merge"] = "default"
     mode_instruction: str | None = None
     is_active: bool = True
 

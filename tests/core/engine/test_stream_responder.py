@@ -1,0 +1,329 @@
+"""Engine tests — streaming responder reset, tracking, transient messages."""
+
+import asyncio
+
+import pytest
+
+from tests.core.engine.conftest import FakeAgent, _make_git_handler_mock
+from tether.agents.base import AgentResponse, BaseAgent
+from tether.core.engine import Engine
+from tether.core.interactions import InteractionCoordinator
+from tether.core.session import SessionManager
+
+
+class TestStreamingResponderReset:
+    @pytest.mark.asyncio
+    async def test_reset_clears_state_and_new_chunk_creates_new_message(
+        self, config, policy_engine, audit_logger
+    ):
+        """After reset(), the next chunk should create a new message (not edit the old one)."""
+        from tests.conftest import MockConnector
+        from tether.core.engine import _StreamingResponder
+
+        connector = MockConnector(support_streaming=True)
+        responder = _StreamingResponder(connector, "chat1", throttle_seconds=0)
+
+        # Send initial chunk — creates first message
+        await responder.on_chunk("plan output")
+        assert responder._message_id == "1"
+        first_id = responder._message_id
+
+        # Reset
+        responder.reset()
+        assert responder._message_id is None
+        assert responder._buffer == ""
+        assert responder._has_activity is False
+        assert responder._tool_counts == {}
+
+        # Send new chunk — should create a second message, not edit the first
+        await responder.on_chunk("implementation output")
+        assert responder._message_id == "2"
+        assert responder._message_id != first_id
+
+
+class TestStreamingResponderMessageTracking:
+    @pytest.mark.asyncio
+    async def test_all_message_ids_tracks_initial_message(self):
+        from tests.conftest import MockConnector
+        from tether.core.engine import _StreamingResponder
+
+        connector = MockConnector(support_streaming=True)
+        responder = _StreamingResponder(connector, "chat1", throttle_seconds=0)
+
+        await responder.on_chunk("hello")
+        assert responder.all_message_ids == ["1"]
+
+    @pytest.mark.asyncio
+    async def test_all_message_ids_tracks_overflow_messages(self):
+        from tests.conftest import MockConnector
+        from tether.core.engine import _MAX_STREAMING_DISPLAY, _StreamingResponder
+
+        connector = MockConnector(support_streaming=True)
+        responder = _StreamingResponder(connector, "chat1", throttle_seconds=0)
+
+        # First chunk creates initial message
+        await responder.on_chunk("A" * (_MAX_STREAMING_DISPLAY - 10))
+        assert responder.all_message_ids == ["1"]
+        # Second chunk overflows, triggering a new message
+        await responder.on_chunk("B" * 200)
+        assert len(responder.all_message_ids) == 2
+        assert responder.all_message_ids == ["1", "2"]
+
+    @pytest.mark.asyncio
+    async def test_reset_clears_all_message_ids(self):
+        from tests.conftest import MockConnector
+        from tether.core.engine import _StreamingResponder
+
+        connector = MockConnector(support_streaming=True)
+        responder = _StreamingResponder(connector, "chat1", throttle_seconds=0)
+
+        await responder.on_chunk("hello")
+        assert responder.all_message_ids == ["1"]
+        responder.reset()
+        assert responder.all_message_ids == []
+
+    @pytest.mark.asyncio
+    async def test_delete_all_messages_deletes_and_clears(self):
+        from tests.conftest import MockConnector
+        from tether.core.engine import _StreamingResponder
+
+        connector = MockConnector(support_streaming=True)
+        responder = _StreamingResponder(connector, "chat1", throttle_seconds=0)
+
+        await responder.on_chunk("hello")
+        await responder.on_chunk(" world")
+        assert len(responder.all_message_ids) >= 1
+
+        await responder.delete_all_messages()
+        assert responder.all_message_ids == []
+        assert len(connector.deleted_messages) >= 1
+
+
+class TestTransientMessages:
+    @pytest.mark.asyncio
+    async def test_context_cleared_message_scheduled_for_cleanup(
+        self, config, policy_engine, audit_logger
+    ):
+        from tests.conftest import MockConnector
+
+        connector = MockConnector(support_streaming=True)
+        coordinator = InteractionCoordinator(connector, config)
+
+        class PlanAgent(BaseAgent):
+            async def execute(self, prompt, session, *, can_use_tool=None, **kwargs):
+                if not prompt.startswith("Implement"):
+
+                    async def click_clean():
+                        await asyncio.sleep(0.05)
+                        req = connector.plan_review_requests[0]
+                        await coordinator.resolve_option(
+                            req["interaction_id"], "clean_edit"
+                        )
+
+                    task = asyncio.create_task(click_clean())
+                    await can_use_tool("ExitPlanMode", {}, None)
+                    await task
+                return AgentResponse(
+                    content=f"Done: {prompt}", session_id="sid", cost=0.01
+                )
+
+            async def cancel(self, session_id):
+                pass
+
+            async def shutdown(self):
+                pass
+
+        eng = Engine(
+            connector=connector,
+            agent=PlanAgent(),
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+            interaction_coordinator=coordinator,
+        )
+        await eng.handle_message("user1", "Make a plan", "chat1")
+
+        cleanups = [c for c in connector.scheduled_cleanups if c["delay"] == 5.0]
+        assert len(cleanups) >= 1
+
+    @pytest.mark.asyncio
+    async def test_context_cleared_fallback_when_no_id(
+        self, config, policy_engine, audit_logger, mock_connector
+    ):
+        coordinator = InteractionCoordinator(mock_connector, config)
+
+        class PlanAgent(BaseAgent):
+            async def execute(self, prompt, session, *, can_use_tool=None, **kwargs):
+                if not prompt.startswith("Implement"):
+
+                    async def click_clean():
+                        await asyncio.sleep(0.05)
+                        req = mock_connector.plan_review_requests[0]
+                        await coordinator.resolve_option(
+                            req["interaction_id"], "clean_edit"
+                        )
+
+                    task = asyncio.create_task(click_clean())
+                    await can_use_tool("ExitPlanMode", {}, None)
+                    await task
+                return AgentResponse(
+                    content=f"Done: {prompt}", session_id="sid", cost=0.01
+                )
+
+            async def cancel(self, session_id):
+                pass
+
+            async def shutdown(self):
+                pass
+
+        eng = Engine(
+            connector=mock_connector,
+            agent=PlanAgent(),
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+            interaction_coordinator=coordinator,
+        )
+        await eng.handle_message("user1", "Make a plan", "chat1")
+
+        # MockConnector without support_streaming returns None from send_message_with_id
+        # so the fallback send_message should be used
+        context_msgs = [
+            m
+            for m in mock_connector.sent_messages
+            if "Context cleared" in m.get("text", "")
+        ]
+        assert len(context_msgs) >= 1
+
+    @pytest.mark.asyncio
+    async def test_smart_commit_ack_scheduled_for_cleanup(
+        self, config, audit_logger, policy_engine
+    ):
+        from tests.conftest import MockConnector
+
+        connector = MockConnector(support_streaming=True)
+        agent = FakeAgent()
+        git_handler = _make_git_handler_mock()
+        eng = Engine(
+            connector=connector,
+            agent=agent,
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+            git_handler=git_handler,
+        )
+
+        await eng.handle_command("user1", "git", "commit", "chat1")
+
+        ack_cleanups = [c for c in connector.scheduled_cleanups if c["delay"] == 5.0]
+        assert len(ack_cleanups) >= 1
+        # The ack message should have been sent via send_message_with_id
+        analyzing_msgs = [
+            m for m in connector.sent_messages if "Analyzing" in m.get("text", "")
+        ]
+        assert len(analyzing_msgs) == 1
+        assert "message_id" in analyzing_msgs[0]
+
+    @pytest.mark.asyncio
+    async def test_smart_commit_ack_fallback_when_no_id(
+        self, config, audit_logger, policy_engine, mock_connector
+    ):
+        agent = FakeAgent()
+        git_handler = _make_git_handler_mock()
+        eng = Engine(
+            connector=mock_connector,
+            agent=agent,
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+            git_handler=git_handler,
+        )
+
+        await eng.handle_command("user1", "git", "commit", "chat1")
+
+        analyzing_msgs = [
+            m for m in mock_connector.sent_messages if "Analyzing" in m.get("text", "")
+        ]
+        assert len(analyzing_msgs) == 1
+        assert mock_connector.scheduled_cleanups == []
+
+    @pytest.mark.asyncio
+    async def test_plan_inline_ack_scheduled_for_cleanup(
+        self, config, audit_logger, policy_engine
+    ):
+        from tests.conftest import MockConnector
+
+        connector = MockConnector(support_streaming=True)
+        agent = FakeAgent()
+        eng = Engine(
+            connector=connector,
+            agent=agent,
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+        )
+
+        result = await eng.handle_command("user1", "plan", "build a widget", "chat1")
+
+        assert result == ""
+        plan_acks = [c for c in connector.scheduled_cleanups if c["delay"] == 5.0]
+        assert len(plan_acks) >= 1
+        plan_msgs = [
+            m
+            for m in connector.sent_messages
+            if "plan mode" in m.get("text", "").lower()
+        ]
+        assert len(plan_msgs) == 1
+        assert "message_id" in plan_msgs[0]
+
+    @pytest.mark.asyncio
+    async def test_edit_inline_ack_scheduled_for_cleanup(
+        self, config, audit_logger, policy_engine
+    ):
+        from tests.conftest import MockConnector
+
+        connector = MockConnector(support_streaming=True)
+        agent = FakeAgent()
+        eng = Engine(
+            connector=connector,
+            agent=agent,
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+        )
+
+        result = await eng.handle_command("user1", "edit", "fix the bug", "chat1")
+
+        assert result == ""
+        edit_acks = [c for c in connector.scheduled_cleanups if c["delay"] == 5.0]
+        assert len(edit_acks) >= 1
+        edit_msgs = [
+            m
+            for m in connector.sent_messages
+            if "accept edits" in m.get("text", "").lower()
+        ]
+        assert len(edit_msgs) == 1
+        assert "message_id" in edit_msgs[0]
+
+    @pytest.mark.asyncio
+    async def test_send_transient_without_connector(
+        self, config, audit_logger, policy_engine
+    ):
+        agent = FakeAgent()
+        eng = Engine(
+            connector=None,
+            agent=agent,
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+        )
+
+        # Should be a no-op, no error raised
+        await eng._send_transient("chat1", "some status message")

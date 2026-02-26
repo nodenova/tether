@@ -1,11 +1,16 @@
 """Bash command parser and path classifier."""
 
 import re
+from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
+
+RiskLevel = Literal["low", "medium", "high", "critical"]
 
 
 class CommandAnalysis(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
     original: str
     commands: list[str]
     has_pipe: bool = False
@@ -14,7 +19,7 @@ class CommandAnalysis(BaseModel):
     has_subshell: bool = False
     has_redirect: bool = False
     risk_factors: list[str] = Field(default_factory=list)
-    risk_level: str = "low"
+    risk_level: RiskLevel = "low"
 
     @property
     def is_compound(self) -> bool:
@@ -22,6 +27,8 @@ class CommandAnalysis(BaseModel):
 
 
 class PathAnalysis(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
     path: str
     operation: str
     is_credential: bool = False
@@ -66,74 +73,85 @@ def strip_cd_prefix(command: str) -> str:
     return command
 
 
-class CommandAnalyzer:
-    @staticmethod
-    def analyze_bash(command: str) -> CommandAnalysis:
-        analysis = CommandAnalysis(original=command, commands=[])
-        risk_factors: list[str] = []
+def analyze_bash(command: str) -> CommandAnalysis:
+    """Analyze a bash command for structural features and risk factors."""
+    risk_factors: list[str] = []
 
-        # Detect structural features
-        analysis.has_pipe = "|" in command
-        analysis.has_chain = "&&" in command or "||" in command or ";" in command
-        analysis.has_subshell = "$(" in command or "`" in command
-        analysis.has_redirect = any(op in command for op in [">", ">>", "<"])
-        analysis.has_sudo = bool(re.search(r"\bsudo\b", command))
+    has_pipe = "|" in command
+    has_chain = "&&" in command or "||" in command or ";" in command
+    has_subshell = "$(" in command or "`" in command
+    has_redirect = any(op in command for op in [">", ">>", "<"])
+    has_sudo = bool(re.search(r"\bsudo\b", command))
 
-        if analysis.has_sudo:
-            risk_factors.append("uses sudo")
-        if analysis.has_subshell:
-            risk_factors.append("contains subshell")
-        if analysis.has_pipe and analysis.has_redirect:
-            risk_factors.append("pipe with redirect")
+    if has_sudo:
+        risk_factors.append("uses sudo")
+    if has_subshell:
+        risk_factors.append("contains subshell")
+    if has_pipe and has_redirect:
+        risk_factors.append("pipe with redirect")
 
-        # Split on pipes and chains to get individual commands
-        parts = re.split(r"\s*[|;]\s*|\s*&&\s*|\s*\|\|\s*", command)
-        for part in parts:
-            part = part.strip()
-            if part:
-                analysis.commands.append(part)
+    # Split on pipes and chains to get individual commands
+    parts = re.split(r"\s*[|;]\s*|\s*&&\s*|\s*\|\|\s*", command)
+    commands = [part.strip() for part in parts if part.strip()]
 
-        # Check for dangerous patterns
-        if re.search(r"\brm\s.*-.*r.*f|\brm\s+-rf", command):
-            risk_factors.append("recursive force delete")
-        if re.search(r"\bchmod\s+777\b", command):
-            risk_factors.append("world-writable permissions")
-        if re.search(r"\b(curl|wget)\b.*\|\s*\b(bash|sh|zsh)\b", command):
-            risk_factors.append("remote code execution via pipe")
-        if re.search(r"\b(DROP|TRUNCATE)\s+(TABLE|DATABASE)\b", command, re.IGNORECASE):
-            risk_factors.append("database destructive operation")
+    # Check for dangerous patterns
+    if re.search(r"\brm\s.*-.*r.*f|\brm\s+-rf", command):
+        risk_factors.append("recursive force delete")
+    if re.search(r"\bchmod\s+777\b", command):
+        risk_factors.append("world-writable permissions")
+    if re.search(r"\b(curl|wget)\b.*\|\s*\b(bash|sh|zsh)\b", command):
+        risk_factors.append("remote code execution via pipe")
+    if re.search(r"\b(DROP|TRUNCATE)\s+(TABLE|DATABASE)\b", command, re.IGNORECASE):
+        risk_factors.append("database destructive operation")
 
-        analysis.risk_factors = risk_factors
-        if len(risk_factors) >= 2:
-            analysis.risk_level = "critical"
-        elif risk_factors:
-            analysis.risk_level = "high"
-        elif analysis.is_compound:
-            analysis.risk_level = "medium"
-        else:
-            analysis.risk_level = "low"
+    if len(risk_factors) >= 2:
+        risk_level: RiskLevel = "critical"
+    elif risk_factors:
+        risk_level = "high"
+    elif has_pipe or has_chain or has_subshell:
+        risk_level = "medium"
+    else:
+        risk_level = "low"
 
-        return analysis
+    return CommandAnalysis(
+        original=command,
+        commands=commands,
+        has_pipe=has_pipe,
+        has_chain=has_chain,
+        has_sudo=has_sudo,
+        has_subshell=has_subshell,
+        has_redirect=has_redirect,
+        risk_factors=risk_factors,
+        risk_level=risk_level,
+    )
 
 
-class PathAnalyzer:
-    @staticmethod
-    def analyze(path: str, operation: str = "read") -> PathAnalysis:
-        analysis = PathAnalysis(path=path, operation=operation)
+def analyze_path(path: str, operation: str = "read") -> PathAnalysis:
+    """Classify a file path for credential sensitivity and traversal risk."""
+    has_traversal = ".." in path
+    is_credential = False
+    sensitivity = "normal"
+    reason = ""
 
-        if ".." in path:
-            analysis.has_traversal = True
-            analysis.sensitivity = "high"
-            analysis.reason = "Path contains traversal components"
+    if has_traversal:
+        sensitivity = "high"
+        reason = "Path contains traversal components"
 
-        for pattern in _CREDENTIAL_PATTERNS:
-            if pattern.search(path):
-                analysis.is_credential = True
-                analysis.sensitivity = "critical"
-                analysis.reason = f"Matches credential pattern: {pattern.pattern}"
-                break
+    for pattern in _CREDENTIAL_PATTERNS:
+        if pattern.search(path):
+            is_credential = True
+            sensitivity = "critical"
+            reason = f"Matches credential pattern: {pattern.pattern}"
+            break
 
-        if operation in ("write", "edit") and analysis.sensitivity == "normal":
-            analysis.sensitivity = "elevated"
+    if operation in ("write", "edit") and sensitivity == "normal":
+        sensitivity = "elevated"
 
-        return analysis
+    return PathAnalysis(
+        path=path,
+        operation=operation,
+        is_credential=is_credential,
+        has_traversal=has_traversal,
+        sensitivity=sensitivity,
+        reason=reason,
+    )

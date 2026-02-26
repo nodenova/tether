@@ -14,7 +14,6 @@ from tether.plugins.builtin.browser_tools import (
 from tether.plugins.builtin.test_config_loader import ProjectTestConfig
 from tether.plugins.builtin.test_runner import (
     TEST_BASH_AUTO_APPROVE,
-    TEST_MODE_INSTRUCTION,
     TestConfig,
     TestRunnerPlugin,
     _build_test_prompt,
@@ -532,11 +531,11 @@ class TestTestRunnerPlugin:
         assert "Framework: django" in session.mode_instruction
 
 
-class TestBackwardCompat:
-    def test_test_mode_instruction_is_default(self):
-        """TEST_MODE_INSTRUCTION matches default config output for backward compat."""
-        assert build_test_instruction(TestConfig()) == TEST_MODE_INSTRUCTION
-        assert "TEST MODE" in TEST_MODE_INSTRUCTION
+class TestDefaultInstruction:
+    def test_default_instruction_contains_test_mode(self):
+        """Default config instruction includes TEST MODE marker."""
+        instruction = build_test_instruction(TestConfig())
+        assert "TEST MODE" in instruction
 
 
 class TestParseTestArgsEdgeCases:

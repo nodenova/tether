@@ -38,6 +38,7 @@ flowchart LR
 | [Connectors](connectors.md) | BaseConnector ABC, handler registration, building a connector |
 | [Middleware](middleware.md) | MiddlewareChain, auth, rate limiting |
 | [Storage](storage.md) | SessionStore protocol, memory and SQLite backends |
+| [Browser Testing](browser-testing.md) | Playwright MCP setup, browser tool policies, test agents |
 | [Interactions](interactions.md) | Question flow, plan review flow, asyncio bridge |
 
 ## Quick Start

@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.3.0] - 2026-02-26
+
+### Added
+- `/git merge <branch>` — AI-assisted conflict resolution with auto-resolve/abort buttons and 4-phase merge workflow
+- `/test` command — 9-phase agent-driven test workflow with structured args (`--url`, `--framework`, `--dir`, `--no-e2e`, `--no-unit`, `--no-backend`), project config (`.tether/test.yaml`), write-ahead crash recovery, and context persistence across sessions
+- `/plan <text>` and `/edit <text>` — switch mode and start agent in one step
+- `/dir` inline keyboard buttons for one-tap directory switching
+- Message interrupt — inline buttons to interrupt or wait during agent execution instead of silent queuing
+- `dev-tools.yaml` policy overlay — auto-allows common dev commands (package managers, linters, test runners)
+- Auto-delete transient messages (interrupt prompts, ack messages, completion notices)
+
+### Fixed
+- Agent resilience — exponential backoff on retries, auto-retry for transient API errors, 30-minute execution timeout, human-readable error messages
+- Session continuity — `claude_session_id` persisted on agent timeout so next message resumes
+- Pending messages no longer dropped on transient errors
+- Playwright MCP tools now available when agent works in repos without their own `.mcp.json`
+
 ## [0.2.1] - 2026-02-23
 - **added**: Network resilience for Telegram connector — exponential-backoff retries on `NetworkError`/`TimedOut` for startup and send operations
 - **fixed**: Streaming freezes on long responses — overflow now finalizes current message and chains into a new one instead of silently truncating at 4000 chars

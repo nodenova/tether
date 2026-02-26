@@ -51,6 +51,9 @@ class MockConnector(BaseConnector):
         self.plan_messages_sent: list[dict] = []
         self.bulk_deleted: list[dict] = []
         self.cleared_plan_chats: list[str] = []
+        self.cleared_question_chats: list[str] = []
+        self.interrupt_prompts: list[dict] = []
+        self.scheduled_cleanups: list[dict] = []
         self._support_streaming = support_streaming
         self._next_message_id = 1
         self._activity_message_id: dict[str, str] = {}
@@ -228,6 +231,41 @@ class MockConnector(BaseConnector):
     async def clear_plan_messages(self, chat_id: str) -> None:
         self.cleared_plan_chats.append(chat_id)
 
+    async def clear_question_message(self, chat_id: str) -> None:
+        self.cleared_question_chats.append(chat_id)
+
+    def schedule_message_cleanup(
+        self, chat_id: str, message_id: str, *, delay: float = 4.0
+    ) -> None:
+        self.scheduled_cleanups.append(
+            {"chat_id": chat_id, "message_id": message_id, "delay": delay}
+        )
+
+    async def send_interrupt_prompt(
+        self,
+        chat_id: str,
+        interrupt_id: str,
+        message_preview: str,
+    ) -> str | None:
+        msg_id = str(self._next_message_id)
+        self._next_message_id += 1
+        self.interrupt_prompts.append(
+            {
+                "chat_id": chat_id,
+                "interrupt_id": interrupt_id,
+                "message_preview": message_preview,
+                "message_id": msg_id,
+            }
+        )
+        return msg_id
+
+    async def simulate_interrupt(
+        self, interrupt_id: str, send_now: bool = True
+    ) -> bool:
+        if self._interrupt_resolver:
+            return await self._interrupt_resolver(interrupt_id, send_now)
+        return False
+
     async def simulate_approval(self, approval_id: str, approved: bool = True) -> bool:
         if self._approval_resolver:
             return await self._approval_resolver(approval_id, approved)
@@ -281,12 +319,13 @@ def sandbox(tmp_path):
 
 @pytest.fixture
 def policy_engine():
-    default_policy = (
-        Path(__file__).parent.parent / "tether" / "policies" / "default.yaml"
-    )
-    if default_policy.exists():
-        return PolicyEngine([default_policy])
-    return PolicyEngine()
+    policies_dir = Path(__file__).parent.parent / "tether" / "policies"
+    policy_paths = []
+    for name in ("default.yaml", "dev-tools.yaml"):
+        p = policies_dir / name
+        if p.exists():
+            policy_paths.append(p)
+    return PolicyEngine(policy_paths) if policy_paths else PolicyEngine()
 
 
 @pytest.fixture

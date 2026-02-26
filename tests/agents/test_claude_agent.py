@@ -6,8 +6,11 @@ import pytest
 
 from tether.agents.base import AgentResponse, ToolActivity
 from tether.agents.claude_code import (
+    _AUTO_MODE_INSTRUCTION,
+    _PLAN_MODE_INSTRUCTION,
     ClaudeCodeAgent,
     _describe_tool,
+    _friendly_error,
     _is_retryable_error,
     _truncate,
 )
@@ -73,6 +76,15 @@ def _make_assistant_message(blocks):
 
     msg = MagicMock(spec=AssistantMessage)
     msg.content = blocks
+    return msg
+
+
+def _make_system_message(subtype="init", data=None):
+    from claude_agent_sdk import SystemMessage
+
+    msg = MagicMock(spec=SystemMessage)
+    msg.subtype = subtype
+    msg.data = data or {}
     return msg
 
 
@@ -153,7 +165,7 @@ class TestClaudeCodeAgent:
             mode="auto",
         )
         opts = agent._build_options(session, can_use_tool=None)
-        assert agent._AUTO_MODE_INSTRUCTION in opts.system_prompt
+        assert _AUTO_MODE_INSTRUCTION in opts.system_prompt
         assert "Be a pirate." in opts.system_prompt
 
     def test_build_options_with_allowed_tools(self, tmp_path):
@@ -262,12 +274,12 @@ class TestClaudeCodeAgent:
     def test_auto_mode_sets_instruction_when_no_config_prompt(self, agent, session):
         session.mode = "auto"
         opts = agent._build_options(session, can_use_tool=None)
-        assert opts.system_prompt == agent._AUTO_MODE_INSTRUCTION
+        assert opts.system_prompt == _AUTO_MODE_INSTRUCTION
 
     def test_plan_mode_prepends_instruction(self, agent, session):
         session.mode = "plan"
         opts = agent._build_options(session, can_use_tool=None)
-        assert opts.system_prompt == agent._PLAN_MODE_INSTRUCTION
+        assert opts.system_prompt == _PLAN_MODE_INSTRUCTION
 
     def test_plan_mode_with_existing_system_prompt(self, tmp_path):
         config = TetherConfig(
@@ -283,20 +295,20 @@ class TestClaudeCodeAgent:
             mode="plan",
         )
         opts = agent._build_options(session, can_use_tool=None)
-        assert agent._PLAN_MODE_INSTRUCTION in opts.system_prompt
+        assert _PLAN_MODE_INSTRUCTION in opts.system_prompt
         assert "Be a pirate." in opts.system_prompt
-        assert opts.system_prompt.startswith(agent._PLAN_MODE_INSTRUCTION)
+        assert opts.system_prompt.startswith(_PLAN_MODE_INSTRUCTION)
 
     def test_auto_mode_no_plan_instruction(self, agent, session):
         session.mode = "auto"
         opts = agent._build_options(session, can_use_tool=None)
-        assert agent._AUTO_MODE_INSTRUCTION in opts.system_prompt
-        assert agent._PLAN_MODE_INSTRUCTION not in opts.system_prompt
+        assert _AUTO_MODE_INSTRUCTION in opts.system_prompt
+        assert _PLAN_MODE_INSTRUCTION not in opts.system_prompt
 
     def test_auto_mode_prepends_instruction(self, agent, session):
         session.mode = "auto"
         opts = agent._build_options(session, can_use_tool=None)
-        assert opts.system_prompt == agent._AUTO_MODE_INSTRUCTION
+        assert opts.system_prompt == _AUTO_MODE_INSTRUCTION
 
     def test_auto_mode_with_existing_system_prompt(self, tmp_path):
         config = TetherConfig(
@@ -312,16 +324,16 @@ class TestClaudeCodeAgent:
             mode="auto",
         )
         opts = agent._build_options(session, can_use_tool=None)
-        assert agent._AUTO_MODE_INSTRUCTION in opts.system_prompt
+        assert _AUTO_MODE_INSTRUCTION in opts.system_prompt
         assert "Be a pirate." in opts.system_prompt
-        assert opts.system_prompt.startswith(agent._AUTO_MODE_INSTRUCTION)
+        assert opts.system_prompt.startswith(_AUTO_MODE_INSTRUCTION)
 
     def test_default_mode_no_auto_instruction(self, agent, session):
         session.mode = "default"
         opts = agent._build_options(session, can_use_tool=None)
         sp = getattr(opts, "system_prompt", None)
         if sp:
-            assert agent._AUTO_MODE_INSTRUCTION not in sp
+            assert _AUTO_MODE_INSTRUCTION not in sp
 
     def test_build_options_auto_mode_sets_accept_edits_permission(self, agent, session):
         session.mode = "auto"
@@ -342,6 +354,121 @@ class TestClaudeCodeAgent:
         session.mode = "unknown"
         opts = agent._build_options(session, can_use_tool=None)
         assert opts.permission_mode == "default"
+
+    def test_mode_instruction_prepends(self, agent, session):
+        session.mode_instruction = "You are in test mode."
+        opts = agent._build_options(session, can_use_tool=None)
+        assert opts.system_prompt == "You are in test mode."
+
+    def test_mode_instruction_with_existing_system_prompt(self, tmp_path):
+        config = TetherConfig(
+            approved_directories=[tmp_path],
+            system_prompt="Be helpful.",
+        )
+        agent = ClaudeCodeAgent(config)
+        session = Session(
+            session_id="s1",
+            user_id="u1",
+            chat_id="c1",
+            working_directory=str(tmp_path),
+        )
+        session.mode_instruction = "You are in test mode."
+        opts = agent._build_options(session, can_use_tool=None)
+        assert "You are in test mode." in opts.system_prompt
+        assert "Be helpful." in opts.system_prompt
+        assert opts.system_prompt.startswith("You are in test mode.")
+
+    def test_plan_mode_takes_priority_over_mode_instruction(self, agent, session):
+        session.mode = "plan"
+        session.mode_instruction = "This should be ignored."
+        opts = agent._build_options(session, can_use_tool=None)
+        assert _PLAN_MODE_INSTRUCTION in opts.system_prompt
+        assert "This should be ignored." not in opts.system_prompt
+
+    def test_build_options_merges_mcp_servers(self, tmp_path):
+        import json
+
+        mcp_file = tmp_path / ".mcp.json"
+        mcp_file.write_text(
+            json.dumps({"mcpServers": {"local-tool": {"command": "node"}}})
+        )
+        config = TetherConfig(
+            approved_directories=[tmp_path],
+            mcp_servers={"tether-tool": {"command": "python"}},
+        )
+        agent = ClaudeCodeAgent(config)
+        session = Session(
+            session_id="s1",
+            user_id="u1",
+            chat_id="c1",
+            working_directory=str(tmp_path),
+        )
+        opts = agent._build_options(session, can_use_tool=None)
+        assert "local-tool" in opts.mcp_servers
+        assert "tether-tool" in opts.mcp_servers
+
+    def test_build_options_tether_mcp_wins_collision(self, tmp_path):
+        import json
+
+        mcp_file = tmp_path / ".mcp.json"
+        mcp_file.write_text(
+            json.dumps({"mcpServers": {"shared": {"command": "local"}}})
+        )
+        config = TetherConfig(
+            approved_directories=[tmp_path],
+            mcp_servers={"shared": {"command": "tether"}},
+        )
+        agent = ClaudeCodeAgent(config)
+        session = Session(
+            session_id="s1",
+            user_id="u1",
+            chat_id="c1",
+            working_directory=str(tmp_path),
+        )
+        opts = agent._build_options(session, can_use_tool=None)
+        assert opts.mcp_servers["shared"]["command"] == "tether"
+
+    def test_build_options_no_mcp_servers(self, agent, session):
+        opts = agent._build_options(session, can_use_tool=None)
+        assert not opts.mcp_servers
+
+    def test_build_options_malformed_mcp_json(self, tmp_path):
+        mcp_file = tmp_path / ".mcp.json"
+        mcp_file.write_text("not valid json {{{")
+        config = TetherConfig(approved_directories=[tmp_path])
+        agent = ClaudeCodeAgent(config)
+        session = Session(
+            session_id="s1",
+            user_id="u1",
+            chat_id="c1",
+            working_directory=str(tmp_path),
+        )
+        opts = agent._build_options(session, can_use_tool=None)
+        assert not opts.mcp_servers
+
+    def test_build_options_logs_mcp_server_names(self, tmp_path, capsys):
+        import json
+
+        mcp_file = tmp_path / ".mcp.json"
+        mcp_file.write_text(
+            json.dumps({"mcpServers": {"playwright": {"command": "npx"}}})
+        )
+        config = TetherConfig(
+            approved_directories=[tmp_path],
+            mcp_servers={"custom-tool": {"command": "node"}},
+        )
+        agent = ClaudeCodeAgent(config)
+        session = Session(
+            session_id="s1",
+            user_id="u1",
+            chat_id="c1",
+            working_directory=str(tmp_path),
+        )
+        agent._build_options(session, can_use_tool=None)
+        captured = capsys.readouterr()
+        assert "agent_mcp_servers" in captured.out
+        assert "playwright" in captured.out
+        assert "custom-tool" in captured.out
 
     @pytest.mark.asyncio
     async def test_shutdown_suppresses_disconnect_errors(self, agent):
@@ -1080,6 +1207,11 @@ class TestIsRetryableError:
     def test_case_insensitive(self):
         assert _is_retryable_error("API_ERROR from upstream")
 
+    def test_buffer_overflow_is_retryable(self):
+        assert _is_retryable_error(
+            "JSON message exceeded maximum buffer size of 1048576 bytes"
+        )
+
 
 class TestRetryableApiErrors:
     @pytest.mark.asyncio
@@ -1188,3 +1320,182 @@ class TestRetryableApiErrors:
             "The AI service is temporarily unavailable. Please try again in a moment."
         )
         assert resp.is_error is True
+
+
+class TestExponentialBackoff:
+    @pytest.mark.asyncio
+    async def test_exponential_backoff_delays(self, agent, session):
+        """Retry sleep durations increase: 2, 4, 8."""
+        error_result = _make_result_message(
+            result="api_error: overloaded",
+            is_error=True,
+            num_turns=1,
+        )
+
+        class FakeCtx:
+            async def __aenter__(self):
+                client = MagicMock()
+                client.query = AsyncMock(return_value=None)
+                client.receive_response = MagicMock(
+                    return_value=AsyncIterHelper([error_result])
+                )
+                return client
+
+            async def __aexit__(self, *args):
+                return False
+
+        sleep_delays = []
+
+        async def capture_sleep(delay):
+            sleep_delays.append(delay)
+
+        with (
+            patch("tether.agents.claude_code._SafeSDKClient", return_value=FakeCtx()),
+            patch("asyncio.sleep", side_effect=capture_sleep),
+        ):
+            await agent._run_with_resume(
+                "hello", session, agent._build_options(session, None)
+            )
+
+        assert sleep_delays == [2, 4, 8]
+
+
+class TestBufferOverflowRetry:
+    """Tests for exception-level retry on buffer overflow during streaming."""
+
+    @pytest.mark.asyncio
+    async def test_buffer_overflow_retried_in_stream(self, agent, session):
+        """Exception in receive_response() triggers retry, 2nd attempt succeeds."""
+        success_result = _make_result_message(result="Recovered!", num_turns=2)
+
+        call_count = 0
+
+        class FakeCtx:
+            async def __aenter__(self):
+                nonlocal call_count
+                call_count += 1
+                client = MagicMock()
+                client.query = AsyncMock(return_value=None)
+                if call_count == 1:
+
+                    async def _explode():
+                        raise RuntimeError(
+                            "JSON message exceeded maximum buffer size of 1048576 bytes"
+                        )
+                        yield
+
+                    client.receive_response = MagicMock(return_value=_explode())
+                else:
+                    client.receive_response = MagicMock(
+                        return_value=AsyncIterHelper([success_result])
+                    )
+                return client
+
+            async def __aexit__(self, *args):
+                return False
+
+        with (
+            patch("tether.agents.claude_code._SafeSDKClient", return_value=FakeCtx()),
+            patch("asyncio.sleep", new_callable=AsyncMock),
+        ):
+            resp = await agent.execute("hello", session)
+
+        assert resp.content == "Recovered!"
+        assert resp.is_error is False
+        assert call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_buffer_overflow_exhausted_friendly(self, agent, session):
+        """All 3 retries fail with buffer overflow → is_error=True, friendly message."""
+
+        class FakeCtx:
+            async def __aenter__(self):
+                client = MagicMock()
+                client.query = AsyncMock(return_value=None)
+
+                async def _explode():
+                    raise RuntimeError(
+                        "JSON message exceeded maximum buffer size of 1048576 bytes"
+                    )
+                    yield
+
+                client.receive_response = MagicMock(return_value=_explode())
+                return client
+
+            async def __aexit__(self, *args):
+                return False
+
+        with (
+            patch("tether.agents.claude_code._SafeSDKClient", return_value=FakeCtx()),
+            patch("asyncio.sleep", new_callable=AsyncMock),
+        ):
+            resp = await agent.execute("hello", session)
+
+        assert resp.is_error is True
+        assert "response was too large" in resp.content.lower()
+
+
+class TestFriendlyErrors:
+    def test_exit_code_minus_2(self):
+        assert "interrupted" in _friendly_error("Process exit code -2").lower()
+
+    def test_exit_code_minus_1(self):
+        assert "unexpected error" in _friendly_error("exit code -1 failure").lower()
+
+    def test_exit_code_1(self):
+        assert "exited unexpectedly" in _friendly_error("exit code 1").lower()
+
+    def test_retryable_api_error(self):
+        msg = _friendly_error("API Error: 529 overloaded")
+        assert "temporarily unavailable" in msg.lower()
+
+    def test_buffer_overflow_friendly(self):
+        msg = _friendly_error(
+            "JSON message exceeded maximum buffer size of 1048576 bytes"
+        )
+        assert "response was too large" in msg.lower()
+
+    def test_unknown_error_truncated(self):
+        raw = "x" * 300
+        msg = _friendly_error(raw)
+        assert msg.startswith("Agent error: ")
+        assert len(msg) <= 215  # "Agent error: " + 200 chars
+
+    @pytest.mark.asyncio
+    async def test_execute_raises_friendly_on_exception(self, agent, session):
+        with patch.object(
+            agent, "_run_with_resume", new_callable=AsyncMock
+        ) as mock_run:
+            mock_run.side_effect = RuntimeError("exit code -2 killed")
+            with pytest.raises(AgentError, match="interrupted"):
+                await agent.execute("hello", session)
+
+
+class TestSystemMessageSessionCapture:
+    @pytest.mark.asyncio
+    async def test_system_message_sets_session_id(self, agent, session):
+        """SystemMessage with session_id in data eagerly sets session.claude_session_id."""
+        messages = [
+            _make_system_message(subtype="init", data={"session_id": "sdk-early-id"}),
+            _make_assistant_message([_make_text_block("hi")]),
+            _make_result_message(result="done", session_id="sdk-early-id"),
+        ]
+        ctx, _ = _patch_sdk_client(messages)
+        with ctx:
+            await agent.execute("hello", session)
+        assert session.claude_session_id == "sdk-early-id"
+
+    @pytest.mark.asyncio
+    async def test_system_message_without_session_id_no_change(self, agent, session):
+        """SystemMessage without session_id leaves session.claude_session_id unchanged."""
+        session.claude_session_id = None
+        messages = [
+            _make_system_message(subtype="init", data={"version": "1.0"}),
+            _make_assistant_message([_make_text_block("hi")]),
+            _make_result_message(result="done", session_id="sdk-session"),
+        ]
+        ctx, _ = _patch_sdk_client(messages)
+        with ctx:
+            await agent.execute("hello", session)
+        # session_id comes from ResultMessage, not SystemMessage
+        assert session.claude_session_id is None

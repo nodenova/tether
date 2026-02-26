@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import TYPE_CHECKING, Any
 
 import structlog
@@ -20,6 +21,17 @@ if TYPE_CHECKING:
 
 logger = structlog.get_logger()
 
+_MCP_PREFIX_RE = re.compile(r"^mcp__[a-zA-Z0-9_]+__")
+
+
+def normalize_tool_name(tool_name: str) -> str:
+    """Strip ``mcp__<server>__`` prefix so policy/auto-approve keys match.
+
+    The SDK passes MCP tool names as ``mcp__playwright__browser_navigate``
+    but policies and auto-approve entries use bare ``browser_navigate``.
+    """
+    return _MCP_PREFIX_RE.sub("", tool_name)
+
 
 _SKIP_CHARS = frozenset("-/.~$")
 
@@ -33,9 +45,11 @@ def _approval_key(tool_name: str, tool_input: dict[str, Any]) -> str:
     Strips leading ``cd <path> &&`` prefixes so the real command is keyed.
     Skips leading inline env var assignments (VAR=value).
     For others: just the tool name ('Write', 'Edit', etc.)
+    MCP prefixes (``mcp__<server>__``) are stripped before key generation.
     """
-    if tool_name != "Bash":
-        return tool_name
+    normalized = normalize_tool_name(tool_name)
+    if normalized != "Bash":
+        return normalized
     command = strip_cd_prefix(tool_input.get("command", "").strip())
     tokens = command.split()
     if not tokens:
@@ -112,6 +126,10 @@ class ToolGatekeeper:
         session_id: str,
         chat_id: str,
     ) -> PermissionResultAllow | PermissionResultDeny:
+        # Normalize MCP tool names (mcp__playwright__browser_navigate → browser_navigate)
+        # for policy/sandbox/approval matching. Keep original for events/audit.
+        normalized = normalize_tool_name(tool_name)
+
         await self._event_bus.emit(
             Event(
                 name=TOOL_GATED,
@@ -123,7 +141,7 @@ class ToolGatekeeper:
             )
         )
 
-        sandbox_ok, sandbox_reason = self._check_sandbox(tool_name, tool_input)
+        sandbox_ok, sandbox_reason = self._check_sandbox(normalized, tool_input)
         if not sandbox_ok:
             self._audit.log_security_violation(
                 session_id, tool_name, sandbox_reason, "critical"
@@ -138,13 +156,14 @@ class ToolGatekeeper:
             )
             return await self._emit_and_allow(session_id, tool_name, tool_input)
 
-        classification = self._policy_engine.classify(tool_name, tool_input)
+        classification = self._policy_engine.classify(normalized, tool_input)
         decision = self._policy_engine.evaluate(classification)
 
         logger.debug(
             "policy_evaluated",
             session_id=session_id,
             tool_name=tool_name,
+            normalized_name=normalized,
             category=classification.category,
             decision=decision.value,
             risk_level=classification.risk_level,

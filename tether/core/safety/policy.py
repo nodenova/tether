@@ -9,7 +9,7 @@ import structlog
 import yaml
 from pydantic import BaseModel, ConfigDict, Field
 
-from tether.core.safety.analyzer import strip_cd_prefix
+from tether.core.safety.analyzer import RiskLevel, strip_cd_prefix
 
 logger = structlog.get_logger()
 
@@ -30,7 +30,7 @@ class PolicyRule(BaseModel):
     path_patterns: list[re.Pattern[str]] = Field(default_factory=list)
     reason: str | None = None
     description: str | None = None
-    risk_level: str = "medium"
+    risk_level: RiskLevel = "medium"
 
 
 class Classification(BaseModel):
@@ -39,7 +39,7 @@ class Classification(BaseModel):
     category: str
     tool_name: str
     tool_input: dict[str, Any]
-    risk_level: str = "medium"
+    risk_level: RiskLevel = "medium"
     description: str = ""
     deny_reason: str | None = None
     matched_rule: PolicyRule | None = None
@@ -71,6 +71,8 @@ class PolicyEngine:
 
         if "settings" in data:
             self.settings.update(data["settings"])
+            if "default_action" in data["settings"]:
+                PolicyDecision(self.settings["default_action"])  # fail-fast
 
         rules_data = data.get("rules", [])
         for rule_data in rules_data:

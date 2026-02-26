@@ -14,10 +14,10 @@ from tether.core.events import EventBus
 from tether.core.safety.audit import AuditLogger
 from tether.core.safety.sandbox import SandboxEnforcer
 from tether.core.session import Session
+from tether.git.formatter import build_auto_message
 from tether.git.handler import (
     GIT_CALLBACK_PREFIX,
     GitCommandHandler,
-    _build_auto_message,
 )
 from tether.git.models import (
     FileChange,
@@ -925,19 +925,19 @@ class TestEdgeCases:
 class TestBuildAutoMessage:
     def test_single_modified(self):
         staged = [FileChange(path="src/app.py", status="modified")]
-        assert _build_auto_message(staged) == "update src/app.py"
+        assert build_auto_message(staged) == "update src/app.py"
 
     def test_single_added(self):
         staged = [FileChange(path="new_file.py", status="added")]
-        assert _build_auto_message(staged) == "add new_file.py"
+        assert build_auto_message(staged) == "add new_file.py"
 
     def test_single_deleted(self):
         staged = [FileChange(path="old_file.py", status="deleted")]
-        assert _build_auto_message(staged) == "delete old_file.py"
+        assert build_auto_message(staged) == "delete old_file.py"
 
     def test_single_renamed(self):
         staged = [FileChange(path="config.py", status="renamed")]
-        assert _build_auto_message(staged) == "rename config.py"
+        assert build_auto_message(staged) == "rename config.py"
 
     def test_multiple_same_status(self):
         staged = [
@@ -945,7 +945,7 @@ class TestBuildAutoMessage:
             FileChange(path="b.py", status="modified"),
             FileChange(path="c.py", status="modified"),
         ]
-        assert _build_auto_message(staged) == "update 3 files"
+        assert build_auto_message(staged) == "update 3 files"
 
     def test_multiple_mixed(self):
         staged = [
@@ -953,17 +953,17 @@ class TestBuildAutoMessage:
             FileChange(path="b.py", status="modified"),
             FileChange(path="c.py", status="added"),
         ]
-        result = _build_auto_message(staged)
+        result = build_auto_message(staged)
         assert result.startswith("update 3 files (")
         assert "2 modified" in result
         assert "1 added" in result
 
     def test_empty(self):
-        assert _build_auto_message([]) == "update files"
+        assert build_auto_message([]) == "update files"
 
     def test_unknown_status_falls_back_to_update(self):
         staged = [FileChange(path="file.py", status="copied")]
-        assert _build_auto_message(staged) == "update file.py"
+        assert build_auto_message(staged) == "update file.py"
 
 
 class TestCommitPromptAutoSuggestion:

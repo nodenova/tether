@@ -7,7 +7,11 @@ from unittest.mock import MagicMock
 import pytest
 
 from tether.core.events import EventBus
-from tether.core.safety.gatekeeper import ToolGatekeeper, _approval_key
+from tether.core.safety.gatekeeper import (
+    ToolGatekeeper,
+    _approval_key,
+    normalize_tool_name,
+)
 from tether.core.safety.policy import (
     PolicyDecision,
 )
@@ -525,14 +529,16 @@ class TestGatekeeperAutoApprove:
         assert result.behavior == "allow"
         assert len(mock_connector.approval_requests) == 0
 
-        # npm install should still require approval
+        # curl should still require approval (different prefix, not in dev-tools)
         async def approve():
             await asyncio.sleep(0.05)
             req = mock_connector.approval_requests[0]
             await approval_coordinator.resolve_approval(req["approval_id"], True)
 
         task = asyncio.create_task(approve())
-        result2 = await gk.check("Bash", {"command": "npm install foo"}, "s1", "c1")
+        result2 = await gk.check(
+            "Bash", {"command": "curl https://example.com"}, "s1", "c1"
+        )
         await task
         assert result2.behavior == "allow"
         assert len(mock_connector.approval_requests) == 1
@@ -546,14 +552,16 @@ class TestGatekeeperAutoApprove:
         gk = auto_approve_gatekeeper
         gk.enable_tool_auto_approve("c1", "Bash::git")
 
-        # uv run pytest should still require approval
+        # curl should still require approval (different prefix, not in dev-tools)
         async def approve():
             await asyncio.sleep(0.05)
             req = mock_connector.approval_requests[0]
             await approval_coordinator.resolve_approval(req["approval_id"], True)
 
         task = asyncio.create_task(approve())
-        result = await gk.check("Bash", {"command": "uv run pytest tests/"}, "s1", "c1")
+        result = await gk.check(
+            "Bash", {"command": "curl https://example.com"}, "s1", "c1"
+        )
         await task
         assert result.behavior == "allow"
         assert len(mock_connector.approval_requests) == 1
@@ -567,14 +575,14 @@ class TestGatekeeperAutoApprove:
         gk = auto_approve_gatekeeper
         gk.enable_tool_auto_approve("c1", "Bash::uv run")
 
-        # uv sync has a different subcommand — should NOT be auto-approved
+        # uv publish has a different subcommand — should NOT be auto-approved
         async def approve():
             await asyncio.sleep(0.05)
             req = mock_connector.approval_requests[0]
             await approval_coordinator.resolve_approval(req["approval_id"], True)
 
         task = asyncio.create_task(approve())
-        result = await gk.check("Bash", {"command": "uv sync"}, "s1", "c1")
+        result = await gk.check("Bash", {"command": "uv publish"}, "s1", "c1")
         await task
         assert result.behavior == "allow"
         assert len(mock_connector.approval_requests) == 1
@@ -1032,3 +1040,97 @@ class TestHierarchicalAutoApprove:
         gk.enable_tool_auto_approve("c1", "Write")
         assert gk._matches_auto_approved("c1", "Write") is True
         assert gk._matches_auto_approved("c1", "WriteExtra") is False
+
+
+class TestMCPToolNameNormalization:
+    """Tests for MCP tool name prefix stripping."""
+
+    def test_normalize_strips_mcp_prefix(self):
+        assert (
+            normalize_tool_name("mcp__playwright__browser_navigate")
+            == "browser_navigate"
+        )
+
+    def test_normalize_strips_arbitrary_server(self):
+        assert normalize_tool_name("mcp__my_server__some_tool") == "some_tool"
+
+    def test_normalize_noop_for_standard_tools(self):
+        assert normalize_tool_name("Write") == "Write"
+        assert normalize_tool_name("Bash") == "Bash"
+        assert normalize_tool_name("browser_navigate") == "browser_navigate"
+
+    def test_normalize_empty_string(self):
+        assert normalize_tool_name("") == ""
+
+    @pytest.mark.asyncio
+    async def test_mcp_tool_matches_policy_after_normalization(
+        self, sandbox, mock_audit, event_bus
+    ):
+        """mcp__playwright__browser_snapshot should match browser_snapshot allow rule."""
+        from pathlib import Path
+
+        from tether.core.safety.policy import PolicyEngine
+
+        policies_dir = (
+            Path(__file__).parent.parent.parent.parent / "tether" / "policies"
+        )
+        policy_paths = [policies_dir / "default.yaml"]
+        pe = PolicyEngine(policy_paths)
+
+        gk = ToolGatekeeper(
+            sandbox=sandbox,
+            audit=mock_audit,
+            event_bus=event_bus,
+            policy_engine=pe,
+        )
+        # browser_snapshot is in the allow rule for readonly browser tools
+        result = await gk.check("mcp__playwright__browser_snapshot", {}, "s1", "c1")
+        assert result.behavior == "allow"
+
+    @pytest.mark.asyncio
+    async def test_mcp_tool_matches_auto_approve_after_normalization(
+        self, sandbox, mock_audit, event_bus, policy_engine, approval_coordinator
+    ):
+        """Auto-approve with browser_navigate matches mcp__playwright__browser_navigate."""
+        gk = ToolGatekeeper(
+            sandbox=sandbox,
+            audit=mock_audit,
+            event_bus=event_bus,
+            policy_engine=policy_engine,
+            approval_coordinator=approval_coordinator,
+        )
+        gk.enable_tool_auto_approve("c1", "browser_navigate")
+
+        result = await gk.check(
+            "mcp__playwright__browser_navigate",
+            {"url": "http://localhost:3000"},
+            "s1",
+            "c1",
+        )
+        assert result.behavior == "allow"
+
+    def test_approval_key_normalizes_mcp_prefix(self):
+        """_approval_key strips MCP prefix for non-Bash tools."""
+        key = _approval_key(
+            "mcp__playwright__browser_navigate",
+            {"url": "http://localhost:3000"},
+        )
+        assert key == "browser_navigate"
+
+    @pytest.mark.asyncio
+    async def test_events_preserve_original_tool_name(
+        self, sandbox, mock_audit, event_bus
+    ):
+        """Events should contain the original MCP-prefixed tool name."""
+        from tether.core.events import TOOL_GATED
+
+        events = []
+
+        async def capture(event):
+            events.append(event)
+
+        event_bus.subscribe(TOOL_GATED, capture)
+        gk = ToolGatekeeper(sandbox=sandbox, audit=mock_audit, event_bus=event_bus)
+        await gk.check("mcp__playwright__browser_snapshot", {}, "s1", "c1")
+        assert len(events) == 1
+        assert events[0].data["tool_name"] == "mcp__playwright__browser_snapshot"

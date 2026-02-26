@@ -4,31 +4,36 @@ from __future__ import annotations
 
 import asyncio
 import time
+import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import structlog
 
-from tether.core.config import build_directory_names
+from tether.connectors.base import InlineButton
+from tether.core.config import build_directory_names, ensure_tether_dir
 from tether.core.events import (
+    COMMAND_TEST,
     ENGINE_STARTED,
     ENGINE_STOPPED,
+    EXECUTION_INTERRUPTED,
     MESSAGE_IN,
     MESSAGE_OUT,
     MESSAGE_QUEUED,
     Event,
     EventBus,
 )
+from tether.core.interactions import PlanReviewDecision
 from tether.core.safety.audit import AuditLogger
 from tether.core.safety.gatekeeper import ToolGatekeeper
 from tether.core.safety.policy import PolicyEngine
 from tether.core.safety.sandbox import SandboxEnforcer
 from tether.exceptions import AgentError
 from tether.middleware.base import MessageContext
-from tether.storage.sqlite import SqliteSessionStore
+from tether.storage.base import MessageStore
 
 if TYPE_CHECKING:
-    from tether.agents.base import BaseAgent, ToolActivity
+    from tether.agents.base import AgentResponse, BaseAgent, ToolActivity
     from tether.connectors.base import BaseConnector
     from tether.core.config import TetherConfig
     from tether.core.interactions import InteractionCoordinator
@@ -43,6 +48,7 @@ logger = structlog.get_logger()
 
 _STREAMING_CURSOR = "\u258d"
 _MAX_STREAMING_DISPLAY = 4000
+_TRANSIENT_MESSAGE_DELAY = 5.0  # seconds before auto-deleting status messages (longer than connector's 4.0s approval cleanup)
 
 
 class _ToolCallbackState:
@@ -82,10 +88,20 @@ class _StreamingResponder:
         self._has_activity: bool = False
         self._tool_counts: dict[str, int] = {}
         self._display_offset: int = 0
+        self._all_message_ids: list[str] = []
 
     @property
     def buffer(self) -> str:
         return self._buffer
+
+    @property
+    def all_message_ids(self) -> list[str]:
+        return list(self._all_message_ids)
+
+    async def delete_all_messages(self) -> None:
+        for msg_id in self._all_message_ids:
+            await self._connector.delete_message(self._chat_id, msg_id)
+        self._all_message_ids.clear()
 
     def _build_display(self) -> str:
         text = self._buffer[
@@ -128,6 +144,7 @@ class _StreamingResponder:
                 self._active = False
                 return
             self._message_id = msg_id
+            self._all_message_ids.append(msg_id)
             self._last_edit = time.monotonic()
 
         if self._message_id is None:
@@ -137,6 +154,7 @@ class _StreamingResponder:
                 self._active = False
                 return
             self._message_id = msg_id
+            self._all_message_ids.append(msg_id)
             self._last_edit = time.monotonic()
             return
 
@@ -168,6 +186,7 @@ class _StreamingResponder:
         self._tool_counts = {}
         self._last_edit = 0.0
         self._display_offset = 0
+        self._all_message_ids.clear()
 
     async def deactivate(self) -> None:
         """Suppress all further streaming and clear any visible activity."""
@@ -218,7 +237,12 @@ class Engine:
         plugin_registry: PluginRegistry | None = None,
         middleware_chain: MiddlewareChain | None = None,
         store: SessionStore | None = None,
+        message_store: MessageStore | None = None,
         git_handler: GitCommandHandler | None = None,
+        audit_path_pinned: bool = True,
+        storage_path_pinned: bool = True,
+        audit_path_template: Path | None = None,
+        storage_path_template: Path | None = None,
     ) -> None:
         self.connector = connector
         self.agent = agent
@@ -237,9 +261,17 @@ class Engine:
         self.plugin_registry = plugin_registry
         self.middleware_chain = middleware_chain
         self._store = store
-        self._message_store: SqliteSessionStore | None = (
-            store if isinstance(store, SqliteSessionStore) else None
+        self._message_store: MessageStore | None = (
+            message_store
+            if message_store is not None
+            else (store if isinstance(store, MessageStore) else None)
         )
+        self._shared_store = message_store is None and isinstance(store, MessageStore)
+
+        self._audit_path_pinned = audit_path_pinned
+        self._storage_path_pinned = storage_path_pinned
+        self._audit_path_template = audit_path_template or Path(".tether/audit.jsonl")
+        self._storage_path_template = storage_path_template or Path(".tether/tether.db")
 
         self._gatekeeper = ToolGatekeeper(
             sandbox=self.sandbox,
@@ -253,6 +285,12 @@ class Engine:
         self._git_handler = git_handler
         self._executing_chats: set[str] = set()
         self._pending_messages: dict[str, list[tuple[str, str]]] = {}
+        self._recent_failures: dict[str, list[float]] = {}
+        self._pending_interrupts: dict[str, str] = {}  # chat_id -> interrupt_id
+        self._interrupt_to_chat: dict[str, str] = {}  # interrupt_id -> chat_id
+        self._interrupt_message_ids: dict[str, str] = {}  # chat_id -> msg_id
+        self._interrupted_chats: set[str] = set()
+        self._executing_sessions: dict[str, str] = {}  # chat_id -> session_id
 
         if connector:
             if self.middleware_chain and self.middleware_chain.has_middleware():
@@ -269,22 +307,56 @@ class Engine:
                 self._gatekeeper.enable_tool_auto_approve
             )
             connector.set_command_handler(self.handle_command)
+            connector.set_interrupt_resolver(self._resolve_interrupt)
             if git_handler:
                 connector.set_git_handler(self._handle_git_callback)
 
     async def _handle_git_callback(
         self, user_id: str, chat_id: str, action: str, payload: str
     ) -> None:
+        if not self._git_handler:
+            return
         session = await self.session_manager.get_or_create(
             user_id, chat_id, self._default_directory
         )
-        await self._git_handler.handle_callback(  # type: ignore[union-attr]
+        await self._realign_paths_for_session(session)
+        await self._git_handler.handle_callback(
             user_id, chat_id, action, payload, session
         )
+
+        pending = self._git_handler.pop_pending_merge_event()
+        if pending is not None:
+            _merge_chat_id, merge_event = pending
+            merge_event.data["gatekeeper"] = self._gatekeeper
+            await self.event_bus.emit(merge_event)
+            prompt = merge_event.data.get("prompt", "")
+            if prompt:
+                await self.handle_message(user_id, prompt, chat_id)
+
+    async def _resolve_interrupt(self, interrupt_id: str, send_now: bool) -> bool:
+        chat_id = self._interrupt_to_chat.pop(interrupt_id, None)
+        if not chat_id:
+            return False
+
+        self._pending_interrupts.pop(chat_id, None)
+        self._interrupt_message_ids.pop(chat_id, None)
+
+        if send_now:
+            self._interrupted_chats.add(chat_id)
+            session_id = self._executing_sessions.get(chat_id)
+            if session_id:
+                await self.agent.cancel(session_id)
+            logger.info("interrupt_send_now", chat_id=chat_id)
+        else:
+            logger.info("interrupt_wait", chat_id=chat_id)
+
+        return True
 
     async def startup(self) -> None:
         if self._store:
             await self._store.setup()
+        if self._message_store and not self._shared_store:
+            await self._message_store.setup()
         if self.plugin_registry:
             from tether.plugins.base import PluginContext
 
@@ -297,6 +369,8 @@ class Engine:
         await self.event_bus.emit(Event(name=ENGINE_STOPPED))
         if self.plugin_registry:
             await self.plugin_registry.stop_all()
+        if self._message_store and not self._shared_store:
+            await self._message_store.teardown()
         if self._store:
             await self._store.teardown()
         await self.agent.shutdown()
@@ -344,11 +418,31 @@ class Engine:
                     data={"user_id": user_id, "text": text, "chat_id": chat_id},
                 )
             )
-            if self.connector:
-                await self.connector.send_message(
-                    chat_id,
-                    "Message received, will process after current task completes.",
+            if self.connector and chat_id not in self._pending_interrupts:
+                interrupt_id = uuid.uuid4().hex[:12]
+                msg_id = await self.connector.send_interrupt_prompt(
+                    chat_id, interrupt_id, text
                 )
+                if msg_id:
+                    self._pending_interrupts[chat_id] = interrupt_id
+                    self._interrupt_to_chat[interrupt_id] = chat_id
+                    self._interrupt_message_ids[chat_id] = msg_id
+                else:
+                    fallback_id = await self.connector.send_message_with_id(
+                        chat_id,
+                        "Message received, will process after current task completes.",
+                    )
+                    if fallback_id:
+                        self.connector.schedule_message_cleanup(
+                            chat_id,
+                            fallback_id,
+                            delay=_TRANSIENT_MESSAGE_DELAY,
+                        )
+                    else:
+                        await self.connector.send_message(
+                            chat_id,
+                            "Message received, will process after current task completes.",
+                        )
             return ""
 
         self._executing_chats.add(chat_id)
@@ -369,10 +463,34 @@ class Engine:
 
             return result
         except AgentError as e:
-            self._pending_messages.pop(chat_id, None)
+            err_str = str(e).lower()
+            is_transient = any(
+                p in err_str
+                for p in (
+                    "temporarily unavailable",
+                    "interrupted",
+                    "timed out",
+                    "response was too large",
+                )
+            )
+            if chat_id not in self._interrupted_chats and not is_transient:
+                self._pending_messages.pop(chat_id, None)
             return f"Error: {e}"
         finally:
             self._executing_chats.discard(chat_id)
+            self._executing_sessions.pop(chat_id, None)
+            self._interrupted_chats.discard(chat_id)
+            old_iid = self._pending_interrupts.pop(chat_id, None)
+            if old_iid:
+                self._interrupt_to_chat.pop(old_iid, None)
+                mid = self._interrupt_message_ids.pop(chat_id, None)
+                if mid and self.connector:
+                    await self.connector.edit_message(
+                        chat_id, mid, "\u2713 Task completed."
+                    )
+                    self.connector.schedule_message_cleanup(
+                        chat_id, mid, delay=_TRANSIENT_MESSAGE_DELAY
+                    )
 
     @staticmethod
     def _combine_queued_messages(
@@ -408,6 +526,9 @@ class Engine:
         session = await self.session_manager.get_or_create(
             user_id, chat_id, self._default_directory
         )
+        await self._realign_paths_for_session(session)
+        self._ensure_session_tether_dir(session)
+        self._executing_sessions[chat_id] = session.session_id
 
         responder = None
         on_text_chunk = None
@@ -422,21 +543,64 @@ class Engine:
             on_tool_activity = responder.on_activity
 
         can_use_tool, tool_state = self._build_can_use_tool(session, chat_id, responder)
-        self._tool_state = tool_state
 
         try:
-            response = await self.agent.execute(
-                prompt=text,
-                session=session,
-                can_use_tool=can_use_tool,
-                on_text_chunk=on_text_chunk,
-                on_tool_activity=on_tool_activity,
+            response = await self._execute_agent_with_timeout(
+                text, session, can_use_tool, on_text_chunk, on_tool_activity, chat_id
             )
+
+            if response.is_error and self._is_retryable_response(response):
+                self._recent_failures.setdefault(chat_id, []).append(time.monotonic())
+                backoff = self._failure_backoff(chat_id)
+                delay = max(4, backoff)
+                logger.warning(
+                    "engine_retry_transient",
+                    chat_id=chat_id,
+                    attempt=1,
+                    delay=delay,
+                )
+                await asyncio.sleep(delay)
+                if responder:
+                    responder.reset()
+                response = await self._execute_agent_with_timeout(
+                    text,
+                    session,
+                    can_use_tool,
+                    on_text_chunk,
+                    on_tool_activity,
+                    chat_id,
+                )
+
             await self.session_manager.update_from_result(
                 session,
                 claude_session_id=response.session_id,
                 cost=response.cost,
             )
+
+            if chat_id in self._interrupted_chats:
+                self._interrupted_chats.discard(chat_id)
+                if responder:
+                    await responder.deactivate()
+                if self.connector:
+                    int_msg_id = await self.connector.send_message_with_id(
+                        chat_id, "\u26a1 Task interrupted."
+                    )
+                    if int_msg_id:
+                        self.connector.schedule_message_cleanup(
+                            chat_id, int_msg_id, delay=_TRANSIENT_MESSAGE_DELAY
+                        )
+                    else:
+                        await self.connector.send_message(
+                            chat_id, "\u26a1 Task interrupted."
+                        )
+                logger.info("execution_interrupted", chat_id=chat_id)
+                await self.event_bus.emit(
+                    Event(
+                        name=EXECUTION_INTERRUPTED,
+                        data={"chat_id": chat_id, "user_id": user_id},
+                    )
+                )
+                return ""
 
             duration_ms = round((time.monotonic() - start) * 1000)
             await self._log_message(
@@ -523,14 +687,14 @@ class Engine:
                     content_length=len(fallback_content),
                     chat_id=chat_id,
                 )
-                from tether.core.interactions import PlanReviewDecision
-
                 review = await self.interaction_coordinator.handle_plan_review(
                     chat_id,
                     {},
                     plan_content=fallback_content.strip() or None,
                 )
                 if isinstance(review, PlanReviewDecision):
+                    if responder:
+                        await responder.delete_all_messages()
                     return await self._exit_plan_mode(
                         session,
                         chat_id,
@@ -550,6 +714,11 @@ class Engine:
             return response.content
 
         except AgentError as e:
+            if chat_id in self._interrupted_chats:
+                self._interrupted_chats.discard(chat_id)
+                if responder:
+                    await responder.deactivate()
+                return ""
             duration_ms = round((time.monotonic() - start) * 1000)
             logger.error(
                 "request_failed",
@@ -566,6 +735,77 @@ class Engine:
             if self.connector:
                 await self.connector.send_message(chat_id, error_msg)
             raise
+
+    async def _execute_agent_with_timeout(
+        self,
+        text: str,
+        session: Session,
+        can_use_tool: Any,
+        on_text_chunk: Any,
+        on_tool_activity: Any,
+        chat_id: str,
+    ) -> AgentResponse:
+        try:
+            return await asyncio.wait_for(
+                self.agent.execute(
+                    prompt=text,
+                    session=session,
+                    can_use_tool=can_use_tool,
+                    on_text_chunk=on_text_chunk,
+                    on_tool_activity=on_tool_activity,
+                ),
+                timeout=self.config.agent_timeout_seconds,
+            )
+        except TimeoutError:
+            logger.error(
+                "agent_execution_timeout",
+                chat_id=chat_id,
+                timeout=self.config.agent_timeout_seconds,
+            )
+            await self.agent.cancel(session.session_id)
+            if session.claude_session_id:
+                await self.session_manager.update_from_result(
+                    session,
+                    claude_session_id=session.claude_session_id,
+                    cost=0.0,
+                )
+                logger.info(
+                    "session_persisted_on_timeout",
+                    session_id=session.session_id,
+                    claude_session_id=session.claude_session_id,
+                )
+            raise AgentError(
+                f"Agent timed out after {self.config.agent_timeout_seconds // 60} minutes. "
+                "Send your message again to continue."
+            ) from None
+
+    @staticmethod
+    def _is_retryable_response(response: AgentResponse) -> bool:
+        if not response.is_error:
+            return False
+        lowered = response.content.lower()
+        return any(
+            p in lowered
+            for p in (
+                "temporarily unavailable",
+                "api_error",
+                "overloaded",
+                "rate_limit",
+                "500",
+                "529",
+                "maximum buffer size",
+                "response was too large",
+            )
+        )
+
+    def _failure_backoff(self, chat_id: str) -> float:
+        now = time.monotonic()
+        failures = self._recent_failures.get(chat_id, [])
+        recent = [t for t in failures if now - t < 300]
+        self._recent_failures[chat_id] = recent
+        if len(recent) >= 3:
+            return min(10 * len(recent), 60)
+        return 0
 
     async def _log_message(
         self,
@@ -617,10 +857,15 @@ class Engine:
         session = await self.session_manager.get_or_create(
             user_id, chat_id, self._default_directory
         )
+        await self._realign_paths_for_session(session)
+        self._ensure_session_tether_dir(session)
 
         if command == "git":
             if not self._git_handler:
                 return "Git commands not available."
+            git_args = args.strip()
+            if git_args == "commit":
+                return await self._handle_smart_commit(session, chat_id, user_id)
             return await self._git_handler.handle_command(
                 user_id, args, chat_id, session
             )
@@ -631,7 +876,6 @@ class Engine:
         if command == "plan":
             old_mode = session.mode
             session.mode = "plan"
-            session.claude_session_id = None
             self._gatekeeper.disable_auto_approve(chat_id)
             await self.session_manager.save(session)
             logger.info(
@@ -641,7 +885,31 @@ class Engine:
                 from_mode=old_mode,
                 to_mode="plan",
             )
+            if args.strip():
+                await self._send_transient(
+                    chat_id,
+                    "Switched to plan mode. I'll create a plan before implementing.",
+                )
+                await self.handle_message(user_id, args.strip(), chat_id)
+                return ""
             return "Switched to plan mode. I'll create a plan before implementing."
+
+        if command == "test":
+            event = Event(
+                name=COMMAND_TEST,
+                data={
+                    "session": session,
+                    "chat_id": chat_id,
+                    "args": args,
+                    "gatekeeper": self._gatekeeper,
+                    "prompt": "",
+                },
+            )
+            await self.event_bus.emit(event)
+            prompt = event.data.get("prompt", "")
+            if prompt:
+                await self.handle_message(user_id, prompt, chat_id)
+            return ""
 
         if command == "edit":
             old_mode = session.mode
@@ -656,6 +924,13 @@ class Engine:
                 from_mode=old_mode,
                 to_mode="auto",
             )
+            if args.strip():
+                await self._send_transient(
+                    chat_id,
+                    "Accept edits on. I'll implement directly and auto-approve file edits.",
+                )
+                await self.handle_message(user_id, args.strip(), chat_id)
+                return ""
             return (
                 "Accept edits on. I'll implement directly and auto-approve file edits."
             )
@@ -663,6 +938,7 @@ class Engine:
         if command == "default":
             old_mode = session.mode
             session.mode = "default"
+            session.mode_instruction = None
             self._gatekeeper.disable_auto_approve(chat_id)
             logger.info(
                 "mode_switched",
@@ -711,13 +987,47 @@ class Engine:
                 return name
         return wd.name
 
+    def _ensure_session_tether_dir(self, session: Session) -> None:
+        wd = Path(session.working_directory)
+        if wd.is_dir():
+            ensure_tether_dir(wd)
+
+    async def _realign_paths_for_session(self, session: Session) -> None:
+        """Switch audit/message paths to match the restored session's directory."""
+        if session.working_directory == self._default_directory:
+            return
+        target = Path(session.working_directory)
+        if not target.is_dir():
+            return
+        ensure_tether_dir(target)
+        if not self._audit_path_pinned:
+            self.audit.switch_path(target / self._audit_path_template)
+        if not self._storage_path_pinned and self._message_store is not None:
+            await self._message_store.switch_db(target / self._storage_path_template)
+
     async def _handle_dir_command(
         self, session: Session, args: str, chat_id: str
     ) -> str:
         if not args:
+            if self.connector and len(self._dir_names) > 1:
+                buttons: list[list[InlineButton]] = []
+                for name, path in self._dir_names.items():
+                    marker = " ✅" if str(path) == session.working_directory else ""
+                    buttons.append(
+                        [
+                            InlineButton(
+                                text=f"{name}{marker}",
+                                callback_data=f"dir:{name}",
+                            )
+                        ]
+                    )
+                await self.connector.send_message(
+                    chat_id, "Select directory:", buttons=buttons
+                )
+                return ""
             lines = []
             for name, path in self._dir_names.items():
-                marker = " (active)" if str(path) == session.working_directory else ""
+                marker = " ✅" if str(path) == session.working_directory else ""
                 lines.append(f"  {name} → {path}{marker}")
             return "Directories:\n" + "\n".join(lines)
 
@@ -733,7 +1043,19 @@ class Engine:
         session.working_directory = str(target_path)
         session.claude_session_id = None
         self._gatekeeper.disable_auto_approve(chat_id)
+
+        # Save session to the stable session store BEFORE switching message DB
         await self.session_manager.save(session)
+
+        ensure_tether_dir(target_path)
+
+        if not self._audit_path_pinned:
+            self.audit.switch_path(target_path / self._audit_path_template)
+
+        if not self._storage_path_pinned and self._message_store is not None:
+            await self._message_store.switch_db(
+                target_path / self._storage_path_template
+            )
         logger.info(
             "directory_switched",
             chat_id=chat_id,
@@ -741,6 +1063,41 @@ class Engine:
             name=target,
         )
         return f"Switched to {target} ({target_path})"
+
+    async def _send_transient(self, chat_id: str, text: str) -> None:
+        """Send a status message that auto-deletes after a short delay."""
+        if not self.connector:
+            return
+        ack_id = await self.connector.send_message_with_id(chat_id, text)
+        if ack_id:
+            self.connector.schedule_message_cleanup(
+                chat_id, ack_id, delay=_TRANSIENT_MESSAGE_DELAY
+            )
+        else:
+            await self.connector.send_message(chat_id, text)
+
+    async def _handle_smart_commit(
+        self, session: Session, chat_id: str, user_id: str
+    ) -> str:
+        """Use Claude agent to generate a conventional commit message."""
+        for key in ("Bash::git diff", "Bash::git status", "Bash::git commit"):
+            self._gatekeeper.enable_tool_auto_approve(chat_id, key)
+
+        prompt = (
+            "I need you to create a git commit with a good conventional commit message. "
+            "Follow these steps:\n\n"
+            "1. Run `git diff --staged` to see what's staged\n"
+            "2. If nothing is staged, tell me and stop\n"
+            "3. Analyze the changes and generate a conventional commit message "
+            "(feat:, fix:, chore:, refactor:, docs:, test:, style:, etc.) — "
+            "keep it to 1-2 sentences max\n"
+            '4. Run `git commit -m "<your message>"`\n'
+            "5. Report the commit hash and message used\n\n"
+            f"Working directory: {session.working_directory}"
+        )
+        await self._send_transient(chat_id, "\U0001f50d Analyzing staged changes...")
+        await self.handle_message(user_id, prompt, chat_id)
+        return ""
 
     @staticmethod
     def _discover_plan_file(working_directory: str | None = None) -> str | None:
@@ -826,8 +1183,8 @@ class Engine:
         if target_mode == "edit":
             self._gatekeeper.enable_tool_auto_approve(chat_id, "Write")
             self._gatekeeper.enable_tool_auto_approve(chat_id, "Edit")
-        if clear_context and self.connector:
-            await self.connector.send_message(
+        if clear_context:
+            await self._send_transient(
                 chat_id, "Context cleared. Starting implementation..."
             )
         return await self._execute_turn(
@@ -907,8 +1264,6 @@ class Engine:
                     has_cached_content=state.plan_file_content is not None,
                     has_streaming_buffer=bool(responder and responder.buffer.strip()),
                 )
-                from tether.core.interactions import PlanReviewDecision
-
                 result = await self.interaction_coordinator.handle_plan_review(
                     chat_id, tool_input, plan_content=plan_content
                 )
@@ -921,6 +1276,7 @@ class Engine:
                         self._gatekeeper.enable_tool_auto_approve(chat_id, "Write")
                         self._gatekeeper.enable_tool_auto_approve(chat_id, "Edit")
                     if responder:
+                        await responder.delete_all_messages()
                         responder.reset()
                         await responder.deactivate()
                     if result.clear_context:

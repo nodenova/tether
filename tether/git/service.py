@@ -9,10 +9,12 @@ import structlog
 
 from tether.git.models import (
     FileChange,
+    FileStatus,
     GitBranch,
     GitLogEntry,
     GitResult,
     GitStatus,
+    MergeResult,
 )
 
 logger = structlog.get_logger()
@@ -59,36 +61,11 @@ class GitService:
                     elif part.startswith("-"):
                         behind = int(part[1:])
             elif line.startswith("1 ") or line.startswith("2 "):
-                # Type 1: "1 XY sub mH mI mW hH hI path"
-                # Type 2: "2 XY sub mH mI mW hH hI Xscore path\torigPath"
-                is_rename = line.startswith("2 ")
-                max_split = 9 if is_rename else 8
-                parts = line.split(" ", max_split)
-                if len(parts) < max_split + 1:
-                    continue
-                xy = parts[1]
-                path_part = parts[max_split]
-                # For renames, take the new path (before tab)
-                if "\t" in path_part:
-                    path_part = path_part.split("\t")[0]
-
-                x_status = xy[0] if len(xy) > 0 else "."
-                y_status = xy[1] if len(xy) > 1 else "."
-
-                if x_status != ".":
-                    staged.append(
-                        FileChange(
-                            path=path_part,
-                            status=_porcelain_to_status(x_status),
-                        )
-                    )
-                if y_status != ".":
-                    unstaged.append(
-                        FileChange(
-                            path=path_part,
-                            status=_porcelain_to_status(y_status),
-                        )
-                    )
+                staged_fc, unstaged_fc = _parse_changed_entry(line)
+                if staged_fc:
+                    staged.append(staged_fc)
+                if unstaged_fc:
+                    unstaged.append(unstaged_fc)
             elif line.startswith("u "):
                 # Unmerged entry
                 parts = line.split(" ", 10)
@@ -120,7 +97,7 @@ class GitService:
             if not line:
                 continue
             is_current = line.startswith("* ")
-            name = line.lstrip("* ").strip()
+            name = line.removeprefix("* ").strip()
             # Skip detached HEAD
             if name.startswith("("):
                 continue
@@ -139,7 +116,7 @@ class GitService:
             if not line:
                 continue
             is_current = line.startswith("* ")
-            name = line.lstrip("* ").strip()
+            name = line.removeprefix("* ").strip()
             if name.startswith("("):
                 continue
             # Skip HEAD pointers like "remotes/origin/HEAD -> origin/main"
@@ -344,6 +321,60 @@ class GitService:
             return GitResult(success=True, message="Pull successful", details=output)
         return GitResult(success=False, message="Pull failed", details=output)
 
+    async def merge(
+        self, cwd: Path, branch: str, *, no_commit: bool = False
+    ) -> MergeResult:
+        """Merge a branch into the current branch."""
+        if not _BRANCH_NAME_RE.match(branch):
+            return MergeResult(success=False, message=f"Invalid branch name: {branch}")
+
+        args = ["merge", branch]
+        if no_commit:
+            args.append("--no-commit")
+        code, stdout, stderr = await self._run(*args, cwd=cwd, timeout=60)
+        output = stdout.strip() + "\n" + stderr.strip()
+
+        if code == 0:
+            return MergeResult(
+                success=True, message=f"Merged '{branch}' into current branch"
+            )
+
+        if "CONFLICT" in output or "conflict" in output.lower():
+            conflicted = await self.conflict_files(cwd)
+            return MergeResult(
+                success=False,
+                had_conflicts=True,
+                conflicted_files=conflicted,
+                message="Merge conflicts detected",
+                details=output.strip(),
+            )
+
+        return MergeResult(
+            success=False,
+            message=f"Merge failed for '{branch}'",
+            details=stderr.strip() or stdout.strip(),
+        )
+
+    async def merge_abort(self, cwd: Path) -> GitResult:
+        """Abort an in-progress merge."""
+        code, stdout, stderr = await self._run("merge", "--abort", cwd=cwd)
+        if code == 0:
+            return GitResult(success=True, message="Merge aborted")
+        return GitResult(
+            success=False,
+            message="Failed to abort merge",
+            details=stderr.strip() or stdout.strip(),
+        )
+
+    async def conflict_files(self, cwd: Path) -> list[str]:
+        """List files with unresolved merge conflicts."""
+        code, stdout, _ = await self._run(
+            "diff", "--name-only", "--diff-filter=U", cwd=cwd
+        )
+        if code != 0:
+            return []
+        return [line.strip() for line in stdout.splitlines() if line.strip()]
+
     async def _run(
         self, *args: str, cwd: Path, timeout: int = _DEFAULT_TIMEOUT
     ) -> tuple[int, str, str]:
@@ -379,14 +410,46 @@ class GitService:
             return 1, "", str(e)
 
 
-def _porcelain_to_status(code: str) -> str:
+def _parse_changed_entry(line: str) -> tuple[FileChange | None, FileChange | None]:
+    """Parse a porcelain v2 type-1 or type-2 changed entry into staged/unstaged FileChanges."""
+    is_rename = line.startswith("2 ")
+    max_split = 9 if is_rename else 8
+    parts = line.split(" ", max_split)
+    if len(parts) < max_split + 1:
+        return None, None
+
+    xy = parts[1]
+    path_part = parts[max_split]
+    if "\t" in path_part:
+        path_part = path_part.split("\t")[0]
+
+    x_status = xy[0] if len(xy) > 0 else "."
+    y_status = xy[1] if len(xy) > 1 else "."
+
+    staged = (
+        FileChange(path=path_part, status=_porcelain_to_status(x_status))
+        if x_status != "."
+        else None
+    )
+    unstaged = (
+        FileChange(path=path_part, status=_porcelain_to_status(y_status))
+        if y_status != "."
+        else None
+    )
+    return staged, unstaged
+
+
+_STATUS_MAP: dict[str, FileStatus] = {
+    "M": "modified",
+    "T": "modified",
+    "A": "added",
+    "D": "deleted",
+    "R": "renamed",
+    "C": "copied",
+    "U": "conflicted",
+}
+
+
+def _porcelain_to_status(code: str) -> FileStatus:
     """Convert porcelain v2 status code to human-readable status."""
-    return {
-        "M": "modified",
-        "T": "modified",
-        "A": "added",
-        "D": "deleted",
-        "R": "renamed",
-        "C": "copied",
-        "U": "conflicted",
-    }.get(code, "modified")
+    return _STATUS_MAP.get(code, "modified")

@@ -99,8 +99,8 @@ Tether ships with three policy files in `policies/`:
 flowchart TB
     subgraph Default["default.yaml — Balanced"]
         d_deny["DENY: credentials, force push, rm -rf, sudo, curl\|bash, DROP/TRUNCATE"]
-        d_allow["ALLOW: agent tools, reads, safe bash, plan files"]
-        d_approval["APPROVAL: git mutations, file writes, network bash"]
+        d_allow["ALLOW: agent tools, reads, safe bash, plan files, browser readonly"]
+        d_approval["APPROVAL: git mutations, file writes, network bash, browser mutations"]
         d_default["Default: require_approval"]
         d_timeout["Timeout: 300s"]
     end
@@ -108,14 +108,14 @@ flowchart TB
     subgraph Strict["strict.yaml — Maximum Restrictions"]
         s_deny["DENY: credentials, any rm, sudo, cp, mv, chmod, curl\|bash"]
         s_allow["ALLOW: agent tools, reads (no Web*), minimal bash"]
-        s_approval["APPROVAL: all file writes, all bash, all web"]
+        s_approval["APPROVAL: all file writes, all bash, all web, all browser tools"]
         s_default["Default: require_approval"]
         s_timeout["Timeout: 120s"]
     end
 
     subgraph Permissive["permissive.yaml — Trusted Environments"]
         p_deny["DENY: credentials, force push, rm -rf, sudo, curl\|bash, DROP/TRUNCATE"]
-        p_allow["ALLOW: agent tools, all reads, all writes, safe bash + npm/pip/python, git add/commit/stash"]
+        p_allow["ALLOW: agent tools, all reads, all writes, safe bash + npm/pip/python, git add/commit/stash, all browser tools"]
         p_approval["APPROVAL: git mutations only"]
         p_default["Default: require_approval"]
         p_timeout["Timeout: 600s"]
@@ -131,6 +131,8 @@ flowchart TB
 | Web tools | Allow | Approval | Allow |
 | Safe bash (ls, git status) | Allow | Allow (minimal) | Allow (extended) |
 | Git mutations | Approval | Approval | Approval |
+| Browser tools (readonly) | Allow | Approval | Allow |
+| Browser tools (mutation) | Approval | Approval | Allow |
 | rm -rf / sudo | Deny | Deny | Deny |
 | Credential files | Deny | Deny | Deny |
 | Approval timeout | 300s | 120s | 600s |
@@ -180,3 +182,103 @@ rules:
     action: allow
     risk_level: low
 ```
+
+## Policy Overlays
+
+Overlays are additional YAML policy files layered on top of a base policy (usually `default.yaml`). They let you grant extra permissions for specific workflows — dev tooling, CI, testing — without modifying the base policy.
+
+### How Overlay Loading Works
+
+Set `TETHER_POLICY_FILES` to a comma-separated list of YAML paths:
+
+```env
+TETHER_POLICY_FILES=tether/policies/default.yaml,tether/policies/dev-tools.yaml
+```
+
+The `PolicyEngine` loads rules from each file in order and concatenates them into a single rule list. Since **first-match wins**, the position matters:
+
+1. Rules from `default.yaml` are evaluated first
+2. Rules from `dev-tools.yaml` are appended after
+3. Unmatched commands fall through to the overlay rules
+4. If nothing matches, the `default_action` from settings applies (`require_approval`)
+
+### Why Deny Rules Always Win
+
+Deny rules in `default.yaml` appear before any overlay rules. Because the engine uses first-match-wins evaluation, a command matching a deny pattern (like `rm -rf` or credential file access) is blocked before the overlay rules are ever reached. **Overlays cannot bypass deny rules.**
+
+```
+default.yaml deny rules  →  blocked here, overlay never checked
+default.yaml allow rules  →  allowed here if matched
+default.yaml approval rules  →  caught here if matched
+overlay allow rules  →  grants extra permissions for unmatched commands
+fallback  →  require_approval
+```
+
+### Built-In `dev-tools.yaml`
+
+Tether ships `tether/policies/dev-tools.yaml` for common development workflows. It contains two rules:
+
+**`dev-linters`** — Auto-allows standalone linters, formatters, and test runners:
+```
+pytest, ruff, jest, vitest, mypy, black, flake8, eslint, prettier
+```
+
+**`dev-build-tools`** — Auto-allows package managers restricted to safe subcommands:
+
+| Tool | Allowed subcommands | Blocked (falls to approval) |
+|------|--------------------|-----------------------------|
+| npm/yarn/pnpm/bun | install, ci, test, run, ls, outdated, audit, add, remove, ... | publish, exec |
+| pip | install, list, show, freeze, check, uninstall | — |
+| uv | sync, lock, add, remove, pip, venv, tool | — |
+| uv run | pytest, ruff, mypy, black, flake8 | arbitrary scripts (`uv run script.py`) |
+| cargo | build, test, check, clippy, fmt, doc, add, remove, update | publish, install |
+| go | build, test, vet, fmt, mod, generate | run, install, get |
+| make | test, check, lint, build, clean, format, fmt, all, dev, install | deploy, release, push |
+
+`dev-tools.yaml` is auto-loaded alongside `default.yaml` when no `TETHER_POLICY_FILES` is set. To disable it, set `TETHER_POLICY_FILES` explicitly without it:
+
+```env
+# Only default policy, no dev-tools overlay
+TETHER_POLICY_FILES=tether/policies/default.yaml
+```
+
+### Creating Your Own Overlay
+
+1. Create a YAML file with `version`, `name`, and `rules`:
+
+```yaml
+version: "1.0"
+name: my-team-overlay
+rules:
+  - name: allow-docker-build
+    tool: Bash
+    command_patterns:
+      - "^docker\\s+(build|compose|ps|logs|images)\\b"
+    action: allow
+    description: "Docker local commands"
+
+  - name: allow-terraform-plan
+    tool: Bash
+    command_patterns:
+      - "^terraform\\s+(init|plan|validate|fmt)\\b"
+    action: allow
+    description: "Terraform read-only operations"
+```
+
+2. Add it to your policy chain:
+
+```env
+TETHER_POLICY_FILES=tether/policies/default.yaml,tether/policies/dev-tools.yaml,overlays/my-team.yaml
+```
+
+3. Rules from all files combine in order — your overlay rules are checked last.
+
+### Security Considerations
+
+- **Restrict subcommands, not just tool names.** `^npm\s` allows `npm publish`. `^npm\s+(install|ci|test)\b` does not.
+- **Overlays cannot bypass deny rules.** Deny patterns from the base policy always match first. This is by design.
+- **Use `\b` word boundaries** in patterns to prevent partial matches (e.g., `install` matching `installer`).
+- **Anchor with `^`** to ensure patterns match from the start of the command, preventing injection via chained commands.
+- **Review overlays regularly.** As tools evolve, new subcommands may warrant re-evaluation.
+- **Test your overlay.** Load it in `PolicyEngine` and verify both allowed and blocked commands with `classify()` + `evaluate()`.
+- **Command chaining:** Policy patterns evaluate the full command string. A chained command like `npm install && <destructive>` matches `^npm\s+install\b` and is allowed. Base deny rules catch common destructive patterns, but novel chained attacks may slip through overlay allow rules. Use the strict policy in untrusted environments.

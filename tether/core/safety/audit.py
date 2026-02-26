@@ -7,6 +7,7 @@ from typing import Any
 
 import structlog
 
+from tether.core.safety.analyzer import RiskLevel
 from tether.core.safety.policy import Classification, PolicyDecision
 
 logger = structlog.get_logger()
@@ -16,6 +17,11 @@ class AuditLogger:
     def __init__(self, log_path: Path | str) -> None:
         self._path = Path(log_path)
         self._path.parent.mkdir(parents=True, exist_ok=True)
+
+    def switch_path(self, new_path: Path) -> None:
+        """Move future audit writes to a new file (e.g. on /dir switch)."""
+        new_path.parent.mkdir(parents=True, exist_ok=True)
+        self._path = new_path
 
     def _write(self, entry: dict[str, Any]) -> None:
         entry["timestamp"] = datetime.now(UTC).isoformat()
@@ -72,12 +78,32 @@ class AuditLogger:
             entry["rejection_reason"] = rejection_reason
         self._write(entry)
 
+    def log_operation(
+        self,
+        session_id: str,
+        operation: str,
+        detail: str,
+        working_directory: str,
+        *,
+        user_id: str | None = None,
+    ) -> None:
+        entry: dict[str, Any] = {
+            "event": "git_operation",
+            "session_id": session_id,
+            "operation": operation,
+            "detail": detail,
+            "working_directory": working_directory,
+        }
+        if user_id is not None:
+            entry["user_id"] = user_id
+        self._write(entry)
+
     def log_security_violation(
         self,
         session_id: str,
         tool_name: str,
         reason: str,
-        risk_level: str,
+        risk_level: RiskLevel,
     ) -> None:
         self._write(
             {

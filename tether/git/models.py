@@ -1,15 +1,19 @@
 """Data models for git command results."""
 
+from typing import Literal
+
 from pydantic import BaseModel, ConfigDict
+
+FileStatus = Literal[
+    "modified", "added", "deleted", "renamed", "copied", "conflicted", "untracked"
+]
 
 
 class FileChange(BaseModel):
-    """A single file change in git status."""
-
     model_config = ConfigDict(frozen=True)
 
     path: str
-    status: str  # "modified", "added", "deleted", "renamed", "untracked", "conflicted"
+    status: FileStatus
 
 
 class GitStatus(BaseModel):
@@ -27,8 +31,6 @@ class GitStatus(BaseModel):
 
 
 class GitBranch(BaseModel):
-    """A git branch."""
-
     model_config = ConfigDict(frozen=True)
 
     name: str
@@ -37,8 +39,6 @@ class GitBranch(BaseModel):
 
 
 class GitLogEntry(BaseModel):
-    """A single commit in git log."""
-
     model_config = ConfigDict(frozen=True)
 
     hash: str
@@ -54,5 +54,17 @@ class GitResult(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     success: bool
+    message: str
+    details: str = ""
+
+
+class MergeResult(BaseModel):
+    """Result from a git merge — distinguishes clean merge from conflicts."""
+
+    model_config = ConfigDict(frozen=True)
+
+    success: bool
+    had_conflicts: bool = False
+    conflicted_files: list[str] = []
     message: str
     details: str = ""

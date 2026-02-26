@@ -45,7 +45,14 @@ class PluginRegistry:
 
     async def start_all(self) -> None:
         for plugin in self._plugins.values():
-            await plugin.start()
+            try:
+                await plugin.start()
+                logger.info("plugin_started", name=plugin.meta.name)
+            except Exception as e:
+                logger.error("plugin_start_failed", name=plugin.meta.name, error=str(e))
+                raise PluginError(
+                    f"Plugin {plugin.meta.name} failed to start: {e}"
+                ) from e
 
     async def stop_all(self) -> None:
         for plugin in reversed(self._plugins.values()):

@@ -5,8 +5,8 @@ from __future__ import annotations
 from unittest.mock import AsyncMock, patch
 
 import pytest
-from conftest import MockConnector
 
+from tests.conftest import MockConnector
 from tether.agents.base import AgentResponse, BaseAgent, ToolActivity
 from tether.core.engine import Engine, _StreamingResponder
 from tether.core.session import SessionManager

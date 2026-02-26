@@ -23,11 +23,16 @@ class TestFileChange:
             "added",
             "deleted",
             "renamed",
+            "copied",
             "untracked",
             "conflicted",
         ):
             fc = FileChange(path="file.txt", status=status)
             assert fc.status == status
+
+    def test_rejects_invalid_status(self):
+        with pytest.raises(ValidationError):
+            FileChange(path="file.txt", status="unknown_status")
 
     def test_requires_path(self):
         with pytest.raises(ValidationError):

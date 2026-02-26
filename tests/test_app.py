@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
+import json
 from unittest.mock import patch
 
-from tether.app import build_engine
+from tether.app import _load_default_mcp_servers, build_engine
 from tether.core.config import TetherConfig
 from tether.core.engine import Engine
 from tether.middleware.auth import AuthMiddleware
 from tether.middleware.rate_limit import RateLimitMiddleware
 from tether.plugins.builtin.audit_plugin import AuditPlugin
+from tether.plugins.builtin.browser_tools import BrowserToolsPlugin
 from tether.storage.memory import MemorySessionStore
 from tether.storage.sqlite import SqliteSessionStore
 
@@ -76,6 +78,13 @@ class TestBuildEngine:
         audit = engine.plugin_registry.get("audit")
         assert audit is not None
         assert isinstance(audit, AuditPlugin)
+
+    def test_plugin_registry_has_browser_tools_plugin(self, tmp_path):
+        config = TetherConfig(approved_directories=[tmp_path])
+        engine = _patched_build_engine(config=config)
+        bt = engine.plugin_registry.get("browser_tools")
+        assert bt is not None
+        assert isinstance(bt, BrowserToolsPlugin)
 
     def test_default_policy_loaded(self, tmp_path):
         config = TetherConfig(approved_directories=[tmp_path])
@@ -157,3 +166,50 @@ class TestBuildEngine:
         engine = _patched_build_engine(config=config)
         rule_names = [r.name for r in engine.policy_engine.rules]
         assert "credential-files" in rule_names
+
+    def test_default_mcp_servers_loaded(self, tmp_path):
+        config = TetherConfig(approved_directories=[tmp_path])
+        _patched_build_engine(config=config)
+        assert "playwright" in config.mcp_servers
+
+
+class TestLoadDefaultMcpServers:
+    def test_loads_servers_from_file(self, tmp_path):
+        mcp_file = tmp_path / ".mcp.json"
+        mcp_file.write_text(
+            json.dumps({"mcpServers": {"my-tool": {"command": "node"}}})
+        )
+        config = TetherConfig(approved_directories=[tmp_path])
+        _load_default_mcp_servers(config, tmp_path)
+        assert config.mcp_servers == {"my-tool": {"command": "node"}}
+
+    def test_missing_file_is_noop(self, tmp_path):
+        config = TetherConfig(approved_directories=[tmp_path])
+        _load_default_mcp_servers(config, tmp_path)
+        assert config.mcp_servers == {}
+
+    def test_env_override_wins(self, tmp_path):
+        mcp_file = tmp_path / ".mcp.json"
+        mcp_file.write_text(
+            json.dumps({"mcpServers": {"shared": {"command": "from-file"}}})
+        )
+        config = TetherConfig(
+            approved_directories=[tmp_path],
+            mcp_servers={"shared": {"command": "from-env"}},
+        )
+        _load_default_mcp_servers(config, tmp_path)
+        assert config.mcp_servers["shared"]["command"] == "from-env"
+
+    def test_empty_mcp_servers_in_file(self, tmp_path):
+        mcp_file = tmp_path / ".mcp.json"
+        mcp_file.write_text(json.dumps({"mcpServers": {}}))
+        config = TetherConfig(approved_directories=[tmp_path])
+        _load_default_mcp_servers(config, tmp_path)
+        assert config.mcp_servers == {}
+
+    def test_malformed_json_logs_warning(self, tmp_path):
+        mcp_file = tmp_path / ".mcp.json"
+        mcp_file.write_text("not json{{{")
+        config = TetherConfig(approved_directories=[tmp_path])
+        _load_default_mcp_servers(config, tmp_path)
+        assert config.mcp_servers == {}

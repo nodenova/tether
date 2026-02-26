@@ -58,14 +58,16 @@ The system follows a three-layer safety pipeline: **Sandbox → Policy → Appro
 - `AuthMiddleware` — user whitelist via `TETHER_ALLOWED_USER_IDS`
 - `RateLimitMiddleware` — token-bucket rate limiting per user via `TETHER_RATE_LIMIT_RPM`
 
-**EventBus** (`core/events.py`): Pub/sub system for decoupling subsystems. Plugins and internal components subscribe to named events. Key events: `tool.gated`, `tool.allowed`, `tool.denied`, `message.in`, `message.out`, `approval.requested`, `approval.resolved`, `safety.violation`, `engine.started`, `engine.stopped`.
+**EventBus** (`core/events.py`): Pub/sub system for decoupling subsystems. Plugins and internal components subscribe to named events. Key events: `tool.gated`, `tool.allowed`, `tool.denied`, `message.in`, `message.out`, `approval.requested`, `approval.resolved`, `safety.violation`, `engine.started`, `engine.stopped`, `command.test`, `test.started`, `test.completed`, `command.merge`, `merge.started`, `merge.completed`, `interaction.requested`, `interaction.resolved`, `message.queued`, `execution.interrupted`.
 
 **Plugin system** (`plugins/`):
 - `TetherPlugin` ABC with lifecycle hooks: `initialize → start → stop`
 - `PluginRegistry` for explicit registration (no auto-discovery)
 - Plugins receive a `PluginContext` (event bus + config) and subscribe to `EventBus` events in `initialize()`
 - Built-in: `AuditPlugin` logs sandbox violations from `tool.denied` events
-- Built-in: `BrowserToolsPlugin` provides structured logging for the 25 Playwright MCP browser tools (classifies as readonly vs mutation, logs gated/allowed/denied events)
+- Built-in: `BrowserToolsPlugin` provides structured logging for the 28 Playwright MCP browser tools (classifies as readonly vs mutation, logs gated/allowed/denied events)
+- Built-in: `TestRunnerPlugin` activates 9-phase test workflow via `/test` command, auto-approves browser tools and test commands
+- Built-in: `MergeResolverPlugin` handles `/git merge` conflict resolution, auto-approves Edit/Write/Read and git read commands
 
 **Agent abstraction** (`agents/`): `BaseAgent` protocol with `ClaudeCodeAgent` implementation wrapping `claude-agent-sdk`. Supports session resume for multi-turn continuity.
 
@@ -82,11 +84,11 @@ The system follows a three-layer safety pipeline: **Sandbox → Policy → Appro
 Tether integrates with Playwright MCP for browser automation. The `.mcp.json` at project root configures Claude Code to spawn the MCP server (pinned `@playwright/mcp@0.0.41`, headed mode by default). Tether's Python process does not touch Playwright — Claude Code's SDK manages the MCP server lifecycle.
 
 - **Prerequisites:** Node.js 18+, one-time `npx playwright install chromium`
-- **25 browser tools** (7 readonly, 18 mutation) flow through the existing safety pipeline — policy rules are defined in all three YAML presets (`default.yaml`, `strict.yaml`, `permissive.yaml`)
+- **28 browser tools** (7 readonly, 21 mutation) flow through the existing safety pipeline — policy rules are defined in all three YAML presets (`default.yaml`, `strict.yaml`, `permissive.yaml`)
 - **`BrowserToolsPlugin`** (`plugins/builtin/browser_tools.py`) provides structured logging; exports `BROWSER_READONLY_TOOLS`, `BROWSER_MUTATION_TOOLS`, `ALL_BROWSER_TOOLS`, `is_browser_tool()`
 - **Playwright test agents:** `npx playwright init-agents --loop=claude` initializes Planner, Generator, and Healer agents
 - **`/healer` slash command** at `.claude/commands/healer.md` runs the healer agent workflow to find and fix broken Playwright tests
-- **`/test` command** activates 9-phase test workflow via `TestRunnerPlugin` (`plugins/builtin/test_runner.py`) — auto-approves all browser tools, test bash commands, and file writes. Accepts `--url`, `--server`, `--framework`, `--dir`, `--no-e2e`, `--no-unit`, `--no-backend` flags.
+- **`/test` command** activates 9-phase test workflow via `TestRunnerPlugin` (`plugins/builtin/test_runner.py`) — auto-approves all browser tools, test bash commands, and file writes. Accepts `--url`, `--server`, `--framework`, `--dir`, `--unit`, `--backend`, `--no-e2e`, `--no-unit`, `--no-backend` flags.
 - **Setup guide:** `docs/testing-setup.md` covers how to configure target repos for e2e testing (three tiers: zero-config, Playwright Test framework, AI agents)
 
 ## Code Conventions

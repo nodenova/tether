@@ -538,6 +538,89 @@ class TestSqliteConcurrentAccess:
             await store.teardown()
 
 
+class TestSqliteSwitchDb:
+    @pytest.mark.asyncio
+    async def test_switch_db_opens_new_database(self, tmp_path):
+        db1 = tmp_path / "db1" / "tether.db"
+        db2 = tmp_path / "db2" / "tether.db"
+        db1.parent.mkdir(parents=True)
+        store = SqliteSessionStore(db1)
+        await store.setup()
+        try:
+            await store.save(_make_session(session_id="s1"))
+            await store.switch_db(db2)
+            assert db2.exists()
+            # New DB should be empty
+            loaded = await store.load("u1", "c1")
+            assert loaded is None
+            # Save in new DB
+            await store.save(_make_session(session_id="s2"))
+            loaded = await store.load("u1", "c1")
+            assert loaded.session_id == "s2"
+        finally:
+            await store.teardown()
+
+    @pytest.mark.asyncio
+    async def test_switch_db_noop_for_same_path(self, tmp_path):
+        db = tmp_path / "tether.db"
+        store = SqliteSessionStore(db)
+        await store.setup()
+        try:
+            await store.save(_make_session())
+            await store.switch_db(db)  # same path — no-op
+            loaded = await store.load("u1", "c1")
+            assert loaded is not None
+        finally:
+            await store.teardown()
+
+    @pytest.mark.asyncio
+    async def test_switch_db_creates_parent_dirs(self, tmp_path):
+        db1 = tmp_path / "tether.db"
+        db2 = tmp_path / "deep" / "nested" / "tether.db"
+        store = SqliteSessionStore(db1)
+        await store.setup()
+        try:
+            await store.switch_db(db2)
+            assert db2.parent.is_dir()
+        finally:
+            await store.teardown()
+
+
+class TestSeparateStores:
+    @pytest.mark.asyncio
+    async def test_separate_stores_independent_after_switch(self, tmp_path):
+        """Two SqliteSessionStore instances stay independent after switch_db on one."""
+        db_session = tmp_path / "sessions.db"
+        db_msg1 = tmp_path / "proj1" / "tether.db"
+        db_msg2 = tmp_path / "proj2" / "tether.db"
+        db_msg1.parent.mkdir(parents=True)
+
+        session_store = SqliteSessionStore(db_session)
+        message_store = SqliteSessionStore(db_msg1)
+        await session_store.setup()
+        await message_store.setup()
+        try:
+            # Save a session to the session store
+            await session_store.save(
+                _make_session(session_id="s1", working_directory="/tmp/proj1")
+            )
+
+            # Switch message store to a different project DB
+            await message_store.switch_db(db_msg2)
+
+            # Session store should still be at original path and return our session
+            assert session_store._db_path == str(db_session)
+            loaded = await session_store.load("u1", "c1")
+            assert loaded is not None
+            assert loaded.session_id == "s1"
+
+            # Message store is now at proj2 DB
+            assert message_store._db_path == str(db_msg2)
+        finally:
+            await session_store.teardown()
+            await message_store.teardown()
+
+
 class TestSessionManagerEdgeCases:
     @pytest.mark.asyncio
     async def test_session_manager_deactivate_then_recreate(self):

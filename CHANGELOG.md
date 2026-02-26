@@ -1,6 +1,21 @@
 # Changelog
 
-## [0.3.0] - 2026-02-25
+## [0.3.0] - 2026-02-26
+- **changed**: Default `TETHER_STORAGE_BACKEND` from `"memory"` to `"sqlite"` so sessions survive restarts out of the box
+- **added**: `/plan` and `/edit` with inline message forwarding — `/plan create a login page` switches mode and starts agent in one step
+- **added**: `/dir` shows inline keyboard buttons for directory switching instead of plain text (tap to switch)
+- **added**: `/git commit` (no args) uses Claude agent to generate conventional commit messages from staged changes
+- **changed**: Per-project `.tether/` directories — audit log, SQLite DB, and file logs default to `{project}/.tether/` and switch on `/dir`
+- **fixed**: Persist `claude_session_id` on agent timeout so the next message can resume the SDK session
+- **added**: Write-ahead persistence for `/test` sessions — `.tether/test-session.md` updated BEFORE each phase so mid-phase crashes leave a trail for resumption
+- **fixed**: BadRequest errors (e.g., "Message is not modified") no longer retried 3x — propagated immediately instead of wasting API calls with 7s backoff
+- **fixed**: Duplicate activity message edits — same tool description no longer triggers identical `edit_message` calls
+- **fixed**: Planning-phase streaming messages ("Now I have full context...") cleaned up on plan approval instead of lingering
+- **added**: Documentation for `.tether-test.yaml`, context persistence, and self-healing sub-agents in `docs/testing-setup.md`
+- **added**: Project test config (`.tether-test.yaml`) — persist URL, credentials, framework, preconditions, and focus areas across test sessions
+- **added**: Context persistence — test mode instructs agent to maintain `.tether/test-session.md` as working memory across restarts
+- **added**: Auto-approve browser readonly tools in test mode (not just mutation tools)
+- **added**: `"test": "acceptEdits"` permission mode so sub-agents in test mode can write/edit files
 - **fixed**: Playwright MCP not available when agent works in target repos without their own `.mcp.json` — tether's own `.mcp.json` now loaded as default MCP servers at startup
 - **added**: Agent resilience — exponential backoff in agent retries (2s→4s→8s), engine-level auto-retry for transient API errors, 30-minute execution timeout, sustained degradation backoff across turns
 - **added**: User-friendly error messages — raw exit codes and API errors mapped to human-readable text instead of exposing internals
@@ -17,6 +32,7 @@
 - **added**: Auto-delete transient messages — interrupt prompts, "Task interrupted", "Task completed", and fallback ack messages are scheduled for deletion after a short delay
 - **changed**: `dev-tools.yaml` now auto-loaded alongside `default.yaml` by default
 - **fixed**: Agent claiming browser MCP tools aren't available during `/test` — preamble now explicitly declares tool availability, rules forbid silent fallback, and MCP server names are logged at agent startup for debugging
+- **fixed**: Telegram `callback_data` 64-byte enforcement — approval buttons, question buttons, and plan-review buttons now use byte-aware truncation via `_truncate_callback_data()` to prevent Telegram API rejections with long IDs or multi-byte labels
 
 ## [0.2.1] - 2026-02-23
 - **added**: Network resilience for Telegram connector — exponential-backoff retries on `NetworkError`/`TimedOut` for startup and send operations

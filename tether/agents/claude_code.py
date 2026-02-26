@@ -15,6 +15,7 @@ from claude_agent_sdk import (
     ClaudeAgentOptions,
     ClaudeSDKClient,
     ResultMessage,
+    SystemMessage,
     TextBlock,
     ToolResultBlock,
     ToolUseBlock,
@@ -44,12 +45,20 @@ def _truncate(text: str, max_len: int = 60) -> str:
     return collapsed[: max_len - 1] + "\u2026"
 
 
-_RETRYABLE_PATTERNS = ("api_error", "overloaded", "rate_limit", "529", "500")
+_RETRYABLE_PATTERNS = (
+    "api_error",
+    "overloaded",
+    "rate_limit",
+    "529",
+    "500",
+    "maximum buffer size",
+)
 
 _ERROR_MESSAGES: dict[str, str] = {
     "exit code -2": "The AI agent was interrupted. Your message will be retried automatically.",
     "exit code -1": "The AI agent encountered an unexpected error. Please try again.",
     "exit code 1": "The AI agent process exited unexpectedly. Please try again.",
+    "maximum buffer size": "The AI agent's response was too large. Resuming where it left off.",
 }
 
 
@@ -74,6 +83,7 @@ _PermissionMode = Literal["default", "acceptEdits", "plan", "bypassPermissions"]
 
 _SESSION_TO_PERMISSION_MODE: dict[str, _PermissionMode] = {
     "auto": "acceptEdits",
+    "test": "acceptEdits",
     "plan": "plan",
     "default": "default",
 }
@@ -173,7 +183,7 @@ class ClaudeCodeAgent(BaseAgent):
                 return AgentResponse(content="No response from agent.", is_error=True)
             if response.is_error and _is_retryable_error(response.content):
                 return AgentResponse(
-                    content="The AI service is temporarily unavailable. Please try again in a moment.",
+                    content=_friendly_error(response.content),
                     is_error=True,
                     session_id=response.session_id,
                     cost=response.cost,
@@ -216,6 +226,7 @@ class ClaudeCodeAgent(BaseAgent):
             can_use_tool=can_use_tool,
             permission_mode=_SESSION_TO_PERMISSION_MODE.get(session.mode, "default"),
             setting_sources=["project"],
+            max_buffer_size=10 * 1024 * 1024,  # 10MB
         )
         system_prompt = self._config.system_prompt or ""
         if session.mode == "plan":
@@ -321,6 +332,11 @@ class ClaudeCodeAgent(BaseAgent):
                                         except Exception:
                                             logger.debug("on_tool_activity_error")
 
+                        elif isinstance(message, SystemMessage):
+                            sid = message.data.get("session_id")
+                            if sid and isinstance(sid, str):
+                                session.claude_session_id = sid
+
                         elif isinstance(message, ResultMessage):
                             duration = int((time.monotonic() - start) * 1000)
 
@@ -378,6 +394,27 @@ class ClaudeCodeAgent(BaseAgent):
                                 tools_used=tools_used,
                                 is_error=message.is_error,
                             )
+                except Exception as exc:
+                    if _is_retryable_error(str(exc)):
+                        logger.warning(
+                            "retryable_stream_error",
+                            session_id=session.session_id,
+                            error_preview=str(exc)[:200],
+                            attempt=_attempt + 1,
+                        )
+                        last_error = AgentResponse(
+                            content=str(exc),
+                            session_id=session.claude_session_id,
+                            cost=0.0,
+                            duration_ms=int((time.monotonic() - start) * 1000),
+                            num_turns=0,
+                            tools_used=tools_used,
+                            is_error=True,
+                        )
+                        delay = min(2 * (2**_attempt), 16)
+                        await asyncio.sleep(delay)
+                        continue
+                    raise
                 finally:
                     self._active_clients.pop(session.session_id, None)
 

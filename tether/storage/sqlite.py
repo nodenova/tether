@@ -69,6 +69,18 @@ class SqliteSessionStore(SessionStore):
             )
             raise StorageError(f"Failed to initialize SQLite store: {e}") from e
 
+    async def switch_db(self, new_path: Path | str) -> None:
+        """Close current DB and open a new one (e.g. on /dir switch)."""
+        new_str = str(new_path)
+        if new_str == self._db_path:
+            return
+        if self._db:
+            await self._db.close()
+            self._db = None
+        Path(new_str).parent.mkdir(parents=True, exist_ok=True)
+        self._db_path = new_str
+        await self.setup()
+
     async def teardown(self) -> None:
         if self._db:
             await self._db.close()

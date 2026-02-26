@@ -708,6 +708,31 @@ class TestAuditLogger:
         assert result["flag"] is True
         assert result["data"] is None
 
+    def test_switch_path_writes_to_new_file(self, tmp_path):
+        from tether.core.safety.audit import AuditLogger
+
+        old_path = tmp_path / "old" / "audit.jsonl"
+        new_path = tmp_path / "new" / "audit.jsonl"
+        audit = AuditLogger(old_path)
+        audit._write({"event": "before_switch"})
+
+        audit.switch_path(new_path)
+        audit._write({"event": "after_switch"})
+
+        assert audit._path == new_path
+        assert new_path.exists()
+        lines = new_path.read_text().strip().split("\n")
+        assert len(lines) == 1
+        assert "after_switch" in lines[0]
+
+    def test_switch_path_creates_parent_dirs(self, tmp_path):
+        from tether.core.safety.audit import AuditLogger
+
+        audit = AuditLogger(tmp_path / "audit.jsonl")
+        new_path = tmp_path / "deep" / "nested" / "audit.jsonl"
+        audit.switch_path(new_path)
+        assert new_path.parent.is_dir()
+
 
 class TestEngineSessionManagement:
     @pytest.mark.asyncio
@@ -2333,7 +2358,7 @@ class TestTestCommand:
         await eng.handle_command("user1", "test", "verify login", "chat1")
 
         assert len(mock_connector.sent_messages) == 1
-        assert "Echo: verify login" in mock_connector.sent_messages[0]["text"]
+        assert "verify login" in mock_connector.sent_messages[0]["text"]
 
     @pytest.mark.asyncio
     async def test_test_command_routes_default_prompt(
@@ -2407,10 +2432,15 @@ class TestDirCommand:
 
         result = await eng.handle_command("user1", "dir", "", "chat1")
 
-        assert "Directories:" in result
-        assert "tether" in result
-        assert "api" in result
-        assert "✅" in result
+        assert result == ""
+        assert len(mock_connector.sent_messages) == 1
+        msg = mock_connector.sent_messages[0]
+        assert msg["text"] == "Select directory:"
+        assert msg["buttons"] is not None
+        button_texts = [row[0].text for row in msg["buttons"]]
+        assert any("tether" in t for t in button_texts)
+        assert any("api" in t for t in button_texts)
+        assert any("✅" in t for t in button_texts)
 
     @pytest.mark.asyncio
     async def test_dir_switches_directory(
@@ -2545,6 +2575,191 @@ class TestDirCommand:
         await eng.handle_command("user1", "dir", "api", "chat1")
 
         assert "chat1" not in eng._gatekeeper._auto_approved_tools
+
+
+class TestDirSwitchDataPaths:
+    """Verify /dir switch moves audit and storage paths for unpinned configs."""
+
+    @pytest.mark.asyncio
+    async def test_audit_path_switches_on_dir_change(
+        self, policy_engine, mock_connector, tmp_path
+    ):
+        d1 = tmp_path / "proj1"
+        d2 = tmp_path / "proj2"
+        d1.mkdir()
+        d2.mkdir()
+        audit_path = d1 / ".tether" / "audit.jsonl"
+        audit_path.parent.mkdir(parents=True, exist_ok=True)
+        from tether.core.safety.audit import AuditLogger
+
+        audit = AuditLogger(audit_path)
+        config = TetherConfig(approved_directories=[d1, d2])
+        eng = Engine(
+            connector=mock_connector,
+            agent=FakeAgent(),
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit,
+            audit_path_pinned=False,
+            storage_path_pinned=True,
+        )
+
+        await eng.handle_message("user1", "hello", "chat1")
+        await eng.handle_command("user1", "dir", "proj2", "chat1")
+
+        expected = d2 / ".tether" / "audit.jsonl"
+        assert eng.audit._path == expected
+
+    @pytest.mark.asyncio
+    async def test_sqlite_switches_on_dir_change(
+        self, policy_engine, mock_connector, tmp_path
+    ):
+        d1 = tmp_path / "proj1"
+        d2 = tmp_path / "proj2"
+        d1.mkdir()
+        d2.mkdir()
+        from tether.storage.sqlite import SqliteSessionStore
+
+        db_path = d1 / ".tether" / "tether.db"
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        store = SqliteSessionStore(db_path)
+        await store.setup()
+        config = TetherConfig(approved_directories=[d1, d2])
+        eng = Engine(
+            connector=mock_connector,
+            agent=FakeAgent(),
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            store=store,
+            storage_path_pinned=False,
+            audit_path_pinned=True,
+        )
+
+        await eng.handle_message("user1", "hello", "chat1")
+        await eng.handle_command("user1", "dir", "proj2", "chat1")
+
+        expected = str(d2 / ".tether" / "tether.db")
+        assert eng._message_store._db_path == expected
+        await store.teardown()
+
+    @pytest.mark.asyncio
+    async def test_pinned_audit_path_not_switched(
+        self, policy_engine, mock_connector, tmp_path
+    ):
+        d1 = tmp_path / "proj1"
+        d2 = tmp_path / "proj2"
+        d1.mkdir()
+        d2.mkdir()
+        pinned_path = tmp_path / "global_audit.jsonl"
+        from tether.core.safety.audit import AuditLogger
+
+        audit = AuditLogger(pinned_path)
+        config = TetherConfig(
+            approved_directories=[d1, d2],
+            audit_log_path=pinned_path,
+        )
+        eng = Engine(
+            connector=mock_connector,
+            agent=FakeAgent(),
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit,
+            audit_path_pinned=True,
+            storage_path_pinned=True,
+        )
+
+        await eng.handle_message("user1", "hello", "chat1")
+        await eng.handle_command("user1", "dir", "proj2", "chat1")
+
+        assert eng.audit._path == pinned_path
+
+    @pytest.mark.asyncio
+    async def test_dir_switch_creates_tether_dir(
+        self, policy_engine, mock_connector, tmp_path
+    ):
+        d1 = tmp_path / "proj1"
+        d2 = tmp_path / "proj2"
+        d1.mkdir()
+        d2.mkdir()
+        config = TetherConfig(
+            approved_directories=[d1, d2],
+            audit_log_path=tmp_path / "audit.jsonl",
+        )
+        from tether.core.safety.audit import AuditLogger
+
+        eng = Engine(
+            connector=mock_connector,
+            agent=FakeAgent(),
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=AuditLogger(tmp_path / "audit.jsonl"),
+        )
+
+        await eng.handle_message("user1", "hello", "chat1")
+        await eng.handle_command("user1", "dir", "proj2", "chat1")
+
+        assert (d2 / ".tether").is_dir()
+        assert (d2 / ".tether" / ".gitignore").is_file()
+
+
+class TestTetherDirCreatedOnSessionInit:
+    """Verify .tether/ is created on first message and on commands."""
+
+    @pytest.mark.asyncio
+    async def test_tether_dir_created_on_first_message(
+        self, policy_engine, mock_connector, tmp_path
+    ):
+        d1 = tmp_path / "proj1"
+        d1.mkdir()
+        config = TetherConfig(
+            approved_directories=[d1],
+            audit_log_path=tmp_path / "audit.jsonl",
+        )
+        from tether.core.safety.audit import AuditLogger
+
+        eng = Engine(
+            connector=mock_connector,
+            agent=FakeAgent(),
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=AuditLogger(tmp_path / "audit.jsonl"),
+        )
+
+        assert not (d1 / ".tether").exists()
+        await eng.handle_message("user1", "hello", "chat1")
+        assert (d1 / ".tether").is_dir()
+        assert (d1 / ".tether" / ".gitignore").is_file()
+
+    @pytest.mark.asyncio
+    async def test_tether_dir_created_on_command(
+        self, policy_engine, mock_connector, tmp_path
+    ):
+        d1 = tmp_path / "proj1"
+        d1.mkdir()
+        config = TetherConfig(
+            approved_directories=[d1],
+            audit_log_path=tmp_path / "audit.jsonl",
+        )
+        from tether.core.safety.audit import AuditLogger
+
+        eng = Engine(
+            connector=mock_connector,
+            agent=FakeAgent(),
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=AuditLogger(tmp_path / "audit.jsonl"),
+        )
+
+        assert not (d1 / ".tether").exists()
+        await eng.handle_command("user1", "status", "", "chat1")
+        assert (d1 / ".tether").is_dir()
+        assert (d1 / ".tether" / ".gitignore").is_file()
 
 
 class TestPlanFileDiskRead:
@@ -3286,6 +3501,7 @@ class TestSessionPersistenceOnDirSwitch:
             audit_log_path=tmp_path / "audit.jsonl",
         )
         store = AsyncMock()
+        store.load = AsyncMock(return_value=None)
         store.save = AsyncMock()
         sm = SessionManager(store=store)
 
@@ -5720,6 +5936,89 @@ class TestEngineResilience:
         assert cancel_called
 
     @pytest.mark.asyncio
+    async def test_agent_timeout_persists_session_id(
+        self, config, audit_logger, policy_engine
+    ):
+        """When agent sets session.claude_session_id before timeout, it gets persisted."""
+
+        class HangingAgentWithSession(BaseAgent):
+            async def execute(self, prompt, session, **kwargs):
+                session.claude_session_id = "sdk-timeout-id"
+                await asyncio.sleep(9999)
+
+            async def cancel(self, session_id):
+                pass
+
+            async def shutdown(self):
+                pass
+
+        config_short = TetherConfig(
+            approved_directories=config.approved_directories,
+            max_turns=5,
+            agent_timeout_seconds=1,
+            audit_log_path=config.audit_log_path,
+        )
+
+        sm = SessionManager()
+        eng = Engine(
+            connector=None,
+            agent=HangingAgentWithSession(),
+            config=config_short,
+            session_manager=sm,
+            policy_engine=policy_engine,
+            audit=audit_logger,
+        )
+
+        result = await eng.handle_message("u1", "hello", "c1")
+        assert "timed out" in result.lower()
+
+        session = await sm.get_or_create(
+            "u1", "c1", config_short.approved_directories[0]
+        )
+        assert session.claude_session_id == "sdk-timeout-id"
+
+    @pytest.mark.asyncio
+    async def test_agent_timeout_without_session_id(
+        self, config, audit_logger, policy_engine
+    ):
+        """When agent hangs without setting session_id, no persistence is attempted."""
+
+        class HangingAgentNoSession(BaseAgent):
+            async def execute(self, prompt, session, **kwargs):
+                await asyncio.sleep(9999)
+
+            async def cancel(self, session_id):
+                pass
+
+            async def shutdown(self):
+                pass
+
+        config_short = TetherConfig(
+            approved_directories=config.approved_directories,
+            max_turns=5,
+            agent_timeout_seconds=1,
+            audit_log_path=config.audit_log_path,
+        )
+
+        sm = SessionManager()
+        eng = Engine(
+            connector=None,
+            agent=HangingAgentNoSession(),
+            config=config_short,
+            session_manager=sm,
+            policy_engine=policy_engine,
+            audit=audit_logger,
+        )
+
+        result = await eng.handle_message("u1", "hello", "c1")
+        assert "timed out" in result.lower()
+
+        session = await sm.get_or_create(
+            "u1", "c1", config_short.approved_directories[0]
+        )
+        assert session.claude_session_id is None
+
+    @pytest.mark.asyncio
     async def test_sustained_degradation_backoff(
         self, config, audit_logger, policy_engine
     ):
@@ -5754,3 +6053,818 @@ class TestEngineResilience:
     def test_is_retryable_response_false_permanent(self):
         resp = AgentResponse(content="authentication_error: invalid key", is_error=True)
         assert Engine._is_retryable_response(resp) is False
+
+    def test_is_retryable_response_buffer_overflow(self):
+        resp = AgentResponse(
+            content="The AI agent's response was too large. Resuming where it left off.",
+            is_error=True,
+        )
+        assert Engine._is_retryable_response(resp) is True
+
+    @pytest.mark.asyncio
+    async def test_pending_messages_preserved_on_buffer_overflow(
+        self, config, audit_logger, policy_engine
+    ):
+        class BufferOverflowAgent(BaseAgent):
+            async def execute(self, prompt, session, **kwargs):
+                raise AgentError(
+                    "The AI agent's response was too large. Resuming where it left off."
+                )
+
+            async def cancel(self, session_id):
+                pass
+
+            async def shutdown(self):
+                pass
+
+        eng = Engine(
+            connector=None,
+            agent=BufferOverflowAgent(),
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+        )
+
+        eng._pending_messages["c1"] = [("u1", "queued msg")]
+
+        result = await eng.handle_message("u1", "trigger", "c1")
+        assert "Error:" in result
+        assert eng._pending_messages.get("c1") == [("u1", "queued msg")]
+
+
+# --- B7: Streaming message tracking ---
+
+
+class TestStreamingResponderMessageTracking:
+    @pytest.mark.asyncio
+    async def test_all_message_ids_tracks_initial_message(self):
+        from tests.conftest import MockConnector
+        from tether.core.engine import _StreamingResponder
+
+        connector = MockConnector(support_streaming=True)
+        responder = _StreamingResponder(connector, "chat1", throttle_seconds=0)
+
+        await responder.on_chunk("hello")
+        assert responder.all_message_ids == ["1"]
+
+    @pytest.mark.asyncio
+    async def test_all_message_ids_tracks_overflow_messages(self):
+        from tests.conftest import MockConnector
+        from tether.core.engine import _MAX_STREAMING_DISPLAY, _StreamingResponder
+
+        connector = MockConnector(support_streaming=True)
+        responder = _StreamingResponder(connector, "chat1", throttle_seconds=0)
+
+        # First chunk creates initial message
+        await responder.on_chunk("A" * (_MAX_STREAMING_DISPLAY - 10))
+        assert responder.all_message_ids == ["1"]
+        # Second chunk overflows, triggering a new message
+        await responder.on_chunk("B" * 200)
+        assert len(responder.all_message_ids) == 2
+        assert responder.all_message_ids == ["1", "2"]
+
+    @pytest.mark.asyncio
+    async def test_reset_clears_all_message_ids(self):
+        from tests.conftest import MockConnector
+        from tether.core.engine import _StreamingResponder
+
+        connector = MockConnector(support_streaming=True)
+        responder = _StreamingResponder(connector, "chat1", throttle_seconds=0)
+
+        await responder.on_chunk("hello")
+        assert responder.all_message_ids == ["1"]
+        responder.reset()
+        assert responder.all_message_ids == []
+
+    @pytest.mark.asyncio
+    async def test_delete_all_messages_deletes_and_clears(self):
+        from tests.conftest import MockConnector
+        from tether.core.engine import _StreamingResponder
+
+        connector = MockConnector(support_streaming=True)
+        responder = _StreamingResponder(connector, "chat1", throttle_seconds=0)
+
+        await responder.on_chunk("hello")
+        await responder.on_chunk(" world")
+        assert len(responder.all_message_ids) >= 1
+
+        await responder.delete_all_messages()
+        assert responder.all_message_ids == []
+        assert len(connector.deleted_messages) >= 1
+
+
+# --- B8: Transient messages ---
+
+
+class TestTransientMessages:
+    @pytest.mark.asyncio
+    async def test_context_cleared_message_scheduled_for_cleanup(
+        self, config, policy_engine, audit_logger
+    ):
+        from tests.conftest import MockConnector
+
+        connector = MockConnector(support_streaming=True)
+        coordinator = InteractionCoordinator(connector, config)
+
+        class PlanAgent(BaseAgent):
+            async def execute(self, prompt, session, *, can_use_tool=None, **kwargs):
+                if not prompt.startswith("Implement"):
+
+                    async def click_clean():
+                        await asyncio.sleep(0.05)
+                        req = connector.plan_review_requests[0]
+                        await coordinator.resolve_option(
+                            req["interaction_id"], "clean_edit"
+                        )
+
+                    task = asyncio.create_task(click_clean())
+                    await can_use_tool("ExitPlanMode", {}, None)
+                    await task
+                return AgentResponse(
+                    content=f"Done: {prompt}", session_id="sid", cost=0.01
+                )
+
+            async def cancel(self, session_id):
+                pass
+
+            async def shutdown(self):
+                pass
+
+        eng = Engine(
+            connector=connector,
+            agent=PlanAgent(),
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+            interaction_coordinator=coordinator,
+        )
+        await eng.handle_message("user1", "Make a plan", "chat1")
+
+        cleanups = [c for c in connector.scheduled_cleanups if c["delay"] == 5.0]
+        assert len(cleanups) >= 1
+
+    @pytest.mark.asyncio
+    async def test_context_cleared_fallback_when_no_id(
+        self, config, policy_engine, audit_logger, mock_connector
+    ):
+        coordinator = InteractionCoordinator(mock_connector, config)
+
+        class PlanAgent(BaseAgent):
+            async def execute(self, prompt, session, *, can_use_tool=None, **kwargs):
+                if not prompt.startswith("Implement"):
+
+                    async def click_clean():
+                        await asyncio.sleep(0.05)
+                        req = mock_connector.plan_review_requests[0]
+                        await coordinator.resolve_option(
+                            req["interaction_id"], "clean_edit"
+                        )
+
+                    task = asyncio.create_task(click_clean())
+                    await can_use_tool("ExitPlanMode", {}, None)
+                    await task
+                return AgentResponse(
+                    content=f"Done: {prompt}", session_id="sid", cost=0.01
+                )
+
+            async def cancel(self, session_id):
+                pass
+
+            async def shutdown(self):
+                pass
+
+        eng = Engine(
+            connector=mock_connector,
+            agent=PlanAgent(),
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+            interaction_coordinator=coordinator,
+        )
+        await eng.handle_message("user1", "Make a plan", "chat1")
+
+        # MockConnector without support_streaming returns None from send_message_with_id
+        # so the fallback send_message should be used
+        context_msgs = [
+            m
+            for m in mock_connector.sent_messages
+            if "Context cleared" in m.get("text", "")
+        ]
+        assert len(context_msgs) >= 1
+
+
+class TestPlanWithArgs:
+    @pytest.mark.asyncio
+    async def test_plan_with_args_forwards_to_agent(
+        self, config, audit_logger, policy_engine, mock_connector
+    ):
+        agent = FakeAgent()
+        eng = Engine(
+            connector=mock_connector,
+            agent=agent,
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+        )
+
+        result = await eng.handle_command(
+            "user1", "plan", "create a login page", "chat1"
+        )
+
+        assert result == ""
+        session = eng.session_manager.get("user1", "chat1")
+        assert session.mode == "plan"
+        confirmation_msgs = [
+            m
+            for m in mock_connector.sent_messages
+            if "plan mode" in m.get("text", "").lower()
+        ]
+        assert len(confirmation_msgs) == 1
+        agent_msgs = [
+            m
+            for m in mock_connector.sent_messages
+            if "create a login page" in m.get("text", "").lower()
+        ]
+        assert len(agent_msgs) >= 1
+
+    @pytest.mark.asyncio
+    async def test_plan_without_args_returns_confirmation(
+        self, config, audit_logger, policy_engine, mock_connector
+    ):
+        agent = FakeAgent()
+        eng = Engine(
+            connector=mock_connector,
+            agent=agent,
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+        )
+
+        result = await eng.handle_command("user1", "plan", "", "chat1")
+
+        assert "plan mode" in result.lower()
+        session = eng.session_manager.get("user1", "chat1")
+        assert session.mode == "plan"
+
+    @pytest.mark.asyncio
+    async def test_plan_with_whitespace_only_args_returns_confirmation(
+        self, config, audit_logger, policy_engine, mock_connector
+    ):
+        agent = FakeAgent()
+        eng = Engine(
+            connector=mock_connector,
+            agent=agent,
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+        )
+
+        result = await eng.handle_command("user1", "plan", "   ", "chat1")
+
+        assert "plan mode" in result.lower()
+
+    @pytest.mark.asyncio
+    async def test_plan_with_args_no_connector(
+        self, config, audit_logger, policy_engine
+    ):
+        agent = FakeAgent()
+        eng = Engine(
+            connector=None,
+            agent=agent,
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+        )
+
+        result = await eng.handle_command("user1", "plan", "build feature", "chat1")
+
+        assert result == ""
+
+
+class TestEditWithArgs:
+    @pytest.mark.asyncio
+    async def test_edit_with_args_forwards_to_agent(
+        self, config, audit_logger, policy_engine, mock_connector
+    ):
+        agent = FakeAgent()
+        eng = Engine(
+            connector=mock_connector,
+            agent=agent,
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+        )
+
+        result = await eng.handle_command("user1", "edit", "fix the auth bug", "chat1")
+
+        assert result == ""
+        session = eng.session_manager.get("user1", "chat1")
+        assert session.mode == "auto"
+        confirmation_msgs = [
+            m
+            for m in mock_connector.sent_messages
+            if "accept edits" in m.get("text", "").lower()
+        ]
+        assert len(confirmation_msgs) == 1
+        agent_msgs = [
+            m
+            for m in mock_connector.sent_messages
+            if "fix the auth bug" in m.get("text", "").lower()
+        ]
+        assert len(agent_msgs) >= 1
+
+    @pytest.mark.asyncio
+    async def test_edit_without_args_returns_confirmation(
+        self, config, audit_logger, policy_engine, mock_connector
+    ):
+        agent = FakeAgent()
+        eng = Engine(
+            connector=mock_connector,
+            agent=agent,
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+        )
+
+        result = await eng.handle_command("user1", "edit", "", "chat1")
+
+        assert "accept edits" in result.lower() or "auto-approve" in result.lower()
+        session = eng.session_manager.get("user1", "chat1")
+        assert session.mode == "auto"
+
+    @pytest.mark.asyncio
+    async def test_edit_with_args_auto_approves_tools(
+        self, config, audit_logger, policy_engine, mock_connector
+    ):
+        agent = FakeAgent()
+        eng = Engine(
+            connector=mock_connector,
+            agent=agent,
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+        )
+
+        await eng.handle_command("user1", "edit", "fix bug", "chat1")
+
+        auto_tools = eng._gatekeeper._auto_approved_tools.get("chat1", set())
+        assert "Write" in auto_tools
+        assert "Edit" in auto_tools
+        assert "NotebookEdit" in auto_tools
+
+    @pytest.mark.asyncio
+    async def test_edit_with_whitespace_only_args_returns_confirmation(
+        self, config, audit_logger, policy_engine, mock_connector
+    ):
+        agent = FakeAgent()
+        eng = Engine(
+            connector=mock_connector,
+            agent=agent,
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+        )
+
+        result = await eng.handle_command("user1", "edit", "   ", "chat1")
+
+        assert "accept edits" in result.lower() or "auto-approve" in result.lower()
+
+
+class TestDirButtons:
+    @pytest.mark.asyncio
+    async def test_dir_sends_buttons_with_connector(
+        self, audit_logger, policy_engine, mock_connector, tmp_path
+    ):
+        d1 = tmp_path / "tether"
+        d2 = tmp_path / "api"
+        d1.mkdir()
+        d2.mkdir()
+        config = TetherConfig(
+            approved_directories=[d1, d2],
+            audit_log_path=tmp_path / "audit.jsonl",
+        )
+        eng = Engine(
+            connector=mock_connector,
+            agent=FakeAgent(),
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+        )
+
+        result = await eng.handle_command("user1", "dir", "", "chat1")
+
+        assert result == ""
+        assert len(mock_connector.sent_messages) == 1
+        msg = mock_connector.sent_messages[0]
+        assert msg["text"] == "Select directory:"
+        assert msg["buttons"] is not None
+        button_texts = [row[0].text for row in msg["buttons"]]
+        assert any("tether" in t for t in button_texts)
+        assert any("api" in t for t in button_texts)
+
+    @pytest.mark.asyncio
+    async def test_dir_shows_active_marker_on_button(
+        self, audit_logger, policy_engine, mock_connector, tmp_path
+    ):
+        d1 = tmp_path / "tether"
+        d2 = tmp_path / "api"
+        d1.mkdir()
+        d2.mkdir()
+        config = TetherConfig(
+            approved_directories=[d1, d2],
+            audit_log_path=tmp_path / "audit.jsonl",
+        )
+        eng = Engine(
+            connector=mock_connector,
+            agent=FakeAgent(),
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+        )
+
+        await eng.handle_command("user1", "dir", "", "chat1")
+
+        msg = mock_connector.sent_messages[0]
+        # First directory is the default (active)
+        active_buttons = [row[0].text for row in msg["buttons"] if "✅" in row[0].text]
+        assert len(active_buttons) == 1
+
+    @pytest.mark.asyncio
+    async def test_dir_callback_data_uses_prefix(
+        self, audit_logger, policy_engine, mock_connector, tmp_path
+    ):
+        d1 = tmp_path / "tether"
+        d2 = tmp_path / "api"
+        d1.mkdir()
+        d2.mkdir()
+        config = TetherConfig(
+            approved_directories=[d1, d2],
+            audit_log_path=tmp_path / "audit.jsonl",
+        )
+        eng = Engine(
+            connector=mock_connector,
+            agent=FakeAgent(),
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+        )
+
+        await eng.handle_command("user1", "dir", "", "chat1")
+
+        msg = mock_connector.sent_messages[0]
+        callback_datas = [row[0].callback_data for row in msg["buttons"]]
+        assert all(cd.startswith("dir:") for cd in callback_datas)
+
+    @pytest.mark.asyncio
+    async def test_dir_falls_back_to_text_without_connector(
+        self, audit_logger, policy_engine, tmp_path
+    ):
+        d1 = tmp_path / "tether"
+        d2 = tmp_path / "api"
+        d1.mkdir()
+        d2.mkdir()
+        config = TetherConfig(
+            approved_directories=[d1, d2],
+            audit_log_path=tmp_path / "audit.jsonl",
+        )
+        eng = Engine(
+            connector=None,
+            agent=FakeAgent(),
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+        )
+
+        result = await eng.handle_command("user1", "dir", "", "chat1")
+
+        assert "Directories:" in result
+        assert "tether" in result
+        assert "api" in result
+
+    @pytest.mark.asyncio
+    async def test_dir_single_directory_falls_back_to_text(
+        self, audit_logger, policy_engine, mock_connector, tmp_path
+    ):
+        d1 = tmp_path / "tether"
+        d1.mkdir()
+        config = TetherConfig(
+            approved_directories=[d1],
+            audit_log_path=tmp_path / "audit.jsonl",
+        )
+        eng = Engine(
+            connector=mock_connector,
+            agent=FakeAgent(),
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+        )
+
+        result = await eng.handle_command("user1", "dir", "", "chat1")
+
+        assert "Directories:" in result
+        assert "tether" in result
+
+
+def _make_git_handler_mock():
+    handler = AsyncMock()
+    handler.has_pending_input = lambda _chat_id: False
+    return handler
+
+
+class TestSmartCommit:
+    @pytest.mark.asyncio
+    async def test_bare_git_commit_triggers_smart_flow(
+        self, config, audit_logger, policy_engine, mock_connector
+    ):
+        agent = FakeAgent()
+        git_handler = _make_git_handler_mock()
+        eng = Engine(
+            connector=mock_connector,
+            agent=agent,
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+            git_handler=git_handler,
+        )
+
+        result = await eng.handle_command("user1", "git", "commit", "chat1")
+
+        assert result == ""
+        analyzing_msgs = [
+            m
+            for m in mock_connector.sent_messages
+            if "analyzing" in m.get("text", "").lower()
+        ]
+        assert len(analyzing_msgs) == 1
+        git_handler.handle_command.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_git_commit_with_message_goes_through_handler(
+        self, config, audit_logger, policy_engine, mock_connector
+    ):
+        agent = FakeAgent()
+        git_handler = _make_git_handler_mock()
+        git_handler.handle_command = AsyncMock(return_value="committed")
+        eng = Engine(
+            connector=mock_connector,
+            agent=agent,
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+            git_handler=git_handler,
+        )
+
+        result = await eng.handle_command("user1", "git", "commit fix typo", "chat1")
+
+        assert result == "committed"
+        git_handler.handle_command.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_smart_commit_auto_approves_git_commands(
+        self, config, audit_logger, policy_engine, mock_connector
+    ):
+        agent = FakeAgent()
+        git_handler = _make_git_handler_mock()
+        eng = Engine(
+            connector=mock_connector,
+            agent=agent,
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+            git_handler=git_handler,
+        )
+
+        await eng.handle_command("user1", "git", "commit", "chat1")
+
+        auto_tools = eng._gatekeeper._auto_approved_tools.get("chat1", set())
+        assert "Bash::git diff" in auto_tools
+        assert "Bash::git status" in auto_tools
+        assert "Bash::git commit" in auto_tools
+
+    @pytest.mark.asyncio
+    async def test_smart_commit_without_git_handler(
+        self, config, audit_logger, policy_engine, mock_connector
+    ):
+        agent = FakeAgent()
+        eng = Engine(
+            connector=mock_connector,
+            agent=agent,
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+        )
+
+        result = await eng.handle_command("user1", "git", "commit", "chat1")
+
+        assert result == "Git commands not available."
+
+    @pytest.mark.asyncio
+    async def test_smart_commit_sends_prompt_to_agent(
+        self, config, audit_logger, policy_engine, mock_connector
+    ):
+        agent = FakeAgent()
+        git_handler = _make_git_handler_mock()
+        eng = Engine(
+            connector=mock_connector,
+            agent=agent,
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+            git_handler=git_handler,
+        )
+
+        await eng.handle_command("user1", "git", "commit", "chat1")
+
+        # Agent should have been called — check the response was streamed
+        agent_msgs = [
+            m
+            for m in mock_connector.sent_messages
+            if "conventional commit" in m.get("text", "").lower()
+            or "echo:" in m.get("text", "").lower()
+        ]
+        assert len(agent_msgs) >= 1
+
+
+class TestDirectoryPersistenceAcrossRestart:
+    """Verify /dir selection survives engine restart via two-tier storage."""
+
+    @pytest.mark.asyncio
+    async def test_dir_survives_restart(
+        self, audit_logger, policy_engine, mock_connector, tmp_path
+    ):
+        from tether.storage.sqlite import SqliteSessionStore
+
+        d1 = tmp_path / "tether"
+        d2 = tmp_path / "api"
+        d1.mkdir()
+        d2.mkdir()
+        config = TetherConfig(
+            approved_directories=[d1, d2],
+            audit_log_path=tmp_path / "audit.jsonl",
+        )
+        session_db = tmp_path / "sessions.db"
+        msg_db_1 = d1 / ".tether" / "tether.db"
+        msg_db_1.parent.mkdir(parents=True, exist_ok=True)
+
+        # Engine 1: switch to api
+        session_store_1 = SqliteSessionStore(session_db)
+        message_store_1 = SqliteSessionStore(msg_db_1)
+        await session_store_1.setup()
+        await message_store_1.setup()
+        eng1 = Engine(
+            connector=mock_connector,
+            agent=FakeAgent(),
+            config=config,
+            session_manager=SessionManager(store=session_store_1),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+            store=session_store_1,
+            message_store=message_store_1,
+        )
+        await eng1.handle_message("user1", "hello", "chat1")
+        await eng1.handle_command("user1", "dir", "api", "chat1")
+        session = eng1.session_manager.get("user1", "chat1")
+        assert session.working_directory == str(d2.resolve())
+        await session_store_1.teardown()
+        await message_store_1.teardown()
+
+        # Engine 2: fresh stores on same session DB — simulates restart
+        session_store_2 = SqliteSessionStore(session_db)
+        msg_db_default = d1 / ".tether" / "tether.db"
+        message_store_2 = SqliteSessionStore(msg_db_default)
+        await session_store_2.setup()
+        await message_store_2.setup()
+        eng2 = Engine(
+            connector=mock_connector,
+            agent=FakeAgent(),
+            config=config,
+            session_manager=SessionManager(store=session_store_2),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+            store=session_store_2,
+            message_store=message_store_2,
+        )
+        await eng2.handle_message("user1", "continue work", "chat1")
+        session2 = eng2.session_manager.get("user1", "chat1")
+        assert session2.working_directory == str(d2.resolve())
+        await session_store_2.teardown()
+        await message_store_2.teardown()
+
+    @pytest.mark.asyncio
+    async def test_session_restore_realigns_message_store(
+        self, audit_logger, policy_engine, tmp_path
+    ):
+        from tether.storage.sqlite import SqliteSessionStore
+
+        d1 = tmp_path / "tether"
+        d2 = tmp_path / "api"
+        d1.mkdir()
+        d2.mkdir()
+        config = TetherConfig(
+            approved_directories=[d1, d2],
+            audit_log_path=tmp_path / "audit.jsonl",
+        )
+        session_db = tmp_path / "sessions.db"
+
+        # Pre-seed: save session with api directory
+        session_store = SqliteSessionStore(session_db)
+        await session_store.setup()
+        from tether.core.session import Session
+
+        await session_store.save(
+            Session(
+                session_id="pre-seed",
+                user_id="user1",
+                chat_id="chat1",
+                working_directory=str(d2.resolve()),
+            )
+        )
+
+        msg_db = d1 / ".tether" / "tether.db"
+        msg_db.parent.mkdir(parents=True, exist_ok=True)
+        message_store = SqliteSessionStore(msg_db)
+        await message_store.setup()
+
+        eng = Engine(
+            connector=None,
+            agent=FakeAgent(),
+            config=config,
+            session_manager=SessionManager(store=session_store),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+            store=session_store,
+            message_store=message_store,
+            storage_path_pinned=False,
+            storage_path_template=config.storage_path,
+        )
+        await eng.handle_message("user1", "hello", "chat1")
+
+        # Message store should have been realigned to api's tether.db
+        expected_path = str(d2.resolve() / ".tether" / "tether.db")
+        assert message_store._db_path == expected_path
+        await session_store.teardown()
+        await message_store.teardown()
+
+    @pytest.mark.asyncio
+    async def test_dir_switch_saves_to_session_store_not_message_store(
+        self, audit_logger, policy_engine, mock_connector, tmp_path
+    ):
+        from tether.storage.sqlite import SqliteSessionStore
+
+        d1 = tmp_path / "tether"
+        d2 = tmp_path / "api"
+        d1.mkdir()
+        d2.mkdir()
+        config = TetherConfig(
+            approved_directories=[d1, d2],
+            audit_log_path=tmp_path / "audit.jsonl",
+        )
+        session_db = tmp_path / "sessions.db"
+        msg_db = d1 / ".tether" / "tether.db"
+        msg_db.parent.mkdir(parents=True, exist_ok=True)
+
+        session_store = SqliteSessionStore(session_db)
+        message_store = SqliteSessionStore(msg_db)
+        await session_store.setup()
+        await message_store.setup()
+
+        eng = Engine(
+            connector=mock_connector,
+            agent=FakeAgent(),
+            config=config,
+            session_manager=SessionManager(store=session_store),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+            store=session_store,
+            message_store=message_store,
+        )
+        await eng.handle_message("user1", "hello", "chat1")
+        await eng.handle_command("user1", "dir", "api", "chat1")
+
+        # Session should be in the session store (fixed DB)
+        loaded = await session_store.load("user1", "chat1")
+        assert loaded is not None
+        assert loaded.working_directory == str(d2.resolve())
+        await session_store.teardown()
+        await message_store.teardown()

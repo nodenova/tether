@@ -17,6 +17,11 @@ class AuditLogger:
         self._path = Path(log_path)
         self._path.parent.mkdir(parents=True, exist_ok=True)
 
+    def switch_path(self, new_path: Path) -> None:
+        """Move future audit writes to a new file (e.g. on /dir switch)."""
+        new_path.parent.mkdir(parents=True, exist_ok=True)
+        self._path = new_path
+
     def _write(self, entry: dict[str, Any]) -> None:
         entry["timestamp"] = datetime.now(UTC).isoformat()
         try:

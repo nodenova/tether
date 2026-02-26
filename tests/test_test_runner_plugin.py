@@ -7,7 +7,11 @@ import pytest
 from tether.core.events import COMMAND_TEST, TEST_STARTED, Event, EventBus
 from tether.core.session import Session
 from tether.plugins.base import PluginContext
-from tether.plugins.builtin.browser_tools import BROWSER_MUTATION_TOOLS
+from tether.plugins.builtin.browser_tools import (
+    BROWSER_MUTATION_TOOLS,
+    BROWSER_READONLY_TOOLS,
+)
+from tether.plugins.builtin.test_config_loader import ProjectTestConfig
 from tether.plugins.builtin.test_runner import (
     TEST_BASH_AUTO_APPROVE,
     TEST_MODE_INSTRUCTION,
@@ -289,7 +293,7 @@ class TestBuildTestInstruction:
 class TestBuildTestPrompt:
     def test_default_prompt(self):
         prompt = _build_test_prompt(TestConfig())
-        assert prompt == "Run comprehensive tests for the current codebase."
+        assert "Run comprehensive tests for the current codebase." in prompt
 
     def test_focus_becomes_prompt(self):
         prompt = _build_test_prompt(TestConfig(focus="verify login flow"))
@@ -317,7 +321,7 @@ class TestBuildTestPrompt:
 
     def test_no_focus_with_url(self):
         prompt = _build_test_prompt(TestConfig(app_url="http://localhost:3000"))
-        assert prompt.startswith("Run comprehensive tests")
+        assert "Run comprehensive tests" in prompt
         assert "http://localhost:3000" in prompt
 
 
@@ -363,6 +367,8 @@ class TestTestRunnerPlugin:
 
         for tool in BROWSER_MUTATION_TOOLS:
             gatekeeper.enable_tool_auto_approve.assert_any_call("chat1", tool)
+        for tool in BROWSER_READONLY_TOOLS:
+            gatekeeper.enable_tool_auto_approve.assert_any_call("chat1", tool)
 
     @pytest.mark.asyncio
     async def test_plugin_builds_prompt_from_args(
@@ -399,7 +405,7 @@ class TestTestRunnerPlugin:
         await event_bus.emit(event)
 
         assert (
-            event.data["prompt"] == "Run comprehensive tests for the current codebase."
+            "Run comprehensive tests for the current codebase." in event.data["prompt"]
         )
 
     @pytest.mark.asyncio
@@ -672,7 +678,12 @@ class TestAutoApproveTotalCount:
         )
         await event_bus.emit(event)
 
-        expected = len(BROWSER_MUTATION_TOOLS) + len(TEST_BASH_AUTO_APPROVE) + 2
+        expected = (
+            len(BROWSER_READONLY_TOOLS)
+            + len(BROWSER_MUTATION_TOOLS)
+            + len(TEST_BASH_AUTO_APPROVE)
+            + 2
+        )
         assert gatekeeper.enable_tool_auto_approve.call_count == expected
 
 
@@ -799,3 +810,215 @@ class TestAgenticE2EInstructions:
     def test_rules_forbid_silent_fallback(self):
         instruction = build_test_instruction(TestConfig())
         assert "NEVER silently fall back" in instruction
+
+
+class TestContextPersistenceInstructions:
+    """Verify context persistence section in test instructions."""
+
+    def test_build_instruction_includes_context_persistence(self):
+        instruction = build_test_instruction(TestConfig())
+        assert "CONTEXT PERSISTENCE" in instruction
+        assert ".tether/test-session.md" in instruction
+        assert "working memory" in instruction
+
+    def test_context_persistence_mentions_sections(self):
+        instruction = build_test_instruction(TestConfig())
+        assert "Configuration" in instruction
+        assert "Credentials" in instruction
+        assert "Test Plan" in instruction
+        assert "Progress" in instruction
+        assert "Issues Found" in instruction
+        assert "Fixes Applied" in instruction
+
+    def test_context_persistence_with_project_config(self):
+        project = ProjectTestConfig(url="http://localhost:3000")
+        instruction = build_test_instruction(TestConfig(), project_config=project)
+        assert "Seed the context file with project config" in instruction
+
+    def test_context_persistence_without_project_config(self):
+        instruction = build_test_instruction(TestConfig())
+        assert "Seed the context file with project config" not in instruction
+
+    def test_write_ahead_rule_in_context_persistence(self):
+        instruction = build_test_instruction(TestConfig())
+        assert "WRITE-AHEAD RULE" in instruction
+        assert "BEFORE starting each phase" in instruction
+        assert "status: in-progress" in instruction
+
+    def test_first_action_read_in_context_persistence(self):
+        instruction = build_test_instruction(TestConfig())
+        assert "FIRST ACTION" in instruction
+        assert "resume from recorded progress" in instruction
+
+    def test_context_persistence_before_phases(self):
+        """CONTEXT PERSISTENCE must appear before PHASE 1 for salience."""
+        instruction = build_test_instruction(TestConfig())
+        assert instruction.index("CONTEXT PERSISTENCE") < instruction.index("PHASE 1")
+
+    def test_phase1_starts_with_context_file(self):
+        """Phase 1 includes a reminder to read/create the context file."""
+        instruction = build_test_instruction(TestConfig())
+        phase1_start = instruction.index("PHASE 1")
+        phase1_end = (
+            instruction.index("PHASE 2")
+            if "PHASE 2" in instruction
+            else len(instruction)
+        )
+        phase1 = instruction[phase1_start:phase1_end]
+        assert ".tether/test-session.md" in phase1
+
+    def test_prompt_starts_with_context_instruction(self):
+        """User prompt begins with context file instruction for highest salience."""
+        prompt = _build_test_prompt(TestConfig())
+        assert prompt.startswith("IMPORTANT:")
+        assert ".tether/test-session.md" in prompt
+
+
+class TestSelfHealingInstructions:
+    """Verify Phase 7/8 self-healing instruction content."""
+
+    def test_build_instruction_phase7_mentions_context_file(self):
+        instruction = build_test_instruction(TestConfig())
+        assert ".tether/test-session.md" in instruction
+        # Phase 7 specifically mentions writing issues
+        assert "Issues Found table" in instruction
+
+    def test_build_instruction_phase8_mentions_task_tool(self):
+        instruction = build_test_instruction(TestConfig())
+        assert "Task tool" in instruction
+        assert "sub-agent" in instruction
+
+    def test_phase8_mentions_fix_tracking(self):
+        instruction = build_test_instruction(TestConfig())
+        assert "needs-human-attention" in instruction
+
+
+class TestProjectConfigInInstruction:
+    """Verify project config sections appear in instructions."""
+
+    def test_credentials_in_instruction(self):
+        project = ProjectTestConfig(credentials={"api_token": "abc123"})
+        instruction = build_test_instruction(TestConfig(), project_config=project)
+        assert "PROJECT CONFIG" in instruction
+        assert "api_token" in instruction
+        assert "abc123" in instruction
+
+    def test_preconditions_in_instruction(self):
+        project = ProjectTestConfig(preconditions=["Backend must be running"])
+        instruction = build_test_instruction(TestConfig(), project_config=project)
+        assert "Preconditions" in instruction
+        assert "Backend must be running" in instruction
+
+    def test_focus_areas_in_instruction(self):
+        project = ProjectTestConfig(focus_areas=["SKU replacement", "Cart management"])
+        instruction = build_test_instruction(TestConfig(), project_config=project)
+        assert "Focus areas" in instruction
+        assert "SKU replacement" in instruction
+        assert "Cart management" in instruction
+
+    def test_environment_in_instruction(self):
+        project = ProjectTestConfig(environment={"NODE_ENV": "test"})
+        instruction = build_test_instruction(TestConfig(), project_config=project)
+        assert "Environment" in instruction
+        assert "NODE_ENV=test" in instruction
+
+    def test_empty_project_config_no_section(self):
+        project = ProjectTestConfig()
+        instruction = build_test_instruction(TestConfig(), project_config=project)
+        assert "PROJECT CONFIG" not in instruction
+
+    def test_no_project_config_no_section(self):
+        instruction = build_test_instruction(TestConfig())
+        assert "PROJECT CONFIG" not in instruction
+
+
+class TestProjectConfigMergeInPlugin:
+    """Verify plugin loads and merges project config."""
+
+    @pytest.mark.asyncio
+    async def test_plugin_loads_project_config(self, tmp_path):
+        from tether.core.config import TetherConfig
+
+        # Write a project config file
+        tether_dir = tmp_path / ".tether"
+        tether_dir.mkdir()
+        config_file = tether_dir / "test.yaml"
+        config_file.write_text(
+            "url: http://localhost:3000\n"
+            "framework: next.js\n"
+            "credentials:\n"
+            "  token: abc123\n"
+        )
+
+        event_bus = EventBus()
+        config = TetherConfig(approved_directories=[str(tmp_path)])
+        p = TestRunnerPlugin()
+        ctx = PluginContext(event_bus=event_bus, config=config)
+        await p.initialize(ctx)
+
+        session = Session(
+            session_id="merge-test",
+            user_id="u1",
+            chat_id="chat1",
+            working_directory=str(tmp_path),
+        )
+        gatekeeper = MagicMock()
+        gatekeeper.enable_tool_auto_approve = MagicMock()
+
+        event = Event(
+            name=COMMAND_TEST,
+            data={
+                "session": session,
+                "chat_id": "chat1",
+                "args": "",
+                "gatekeeper": gatekeeper,
+                "prompt": "",
+            },
+        )
+        await event_bus.emit(event)
+
+        # Project URL should appear in instruction and prompt
+        assert "http://localhost:3000" in session.mode_instruction
+        assert "http://localhost:3000" in event.data["prompt"]
+        assert "PROJECT CONFIG" in session.mode_instruction
+        assert "token" in session.mode_instruction
+
+    @pytest.mark.asyncio
+    async def test_plugin_cli_overrides_project(self, tmp_path):
+        from tether.core.config import TetherConfig
+
+        tether_dir = tmp_path / ".tether"
+        tether_dir.mkdir()
+        config_file = tether_dir / "test.yaml"
+        config_file.write_text("url: http://project-url\n")
+
+        event_bus = EventBus()
+        config = TetherConfig(approved_directories=[str(tmp_path)])
+        p = TestRunnerPlugin()
+        ctx = PluginContext(event_bus=event_bus, config=config)
+        await p.initialize(ctx)
+
+        session = Session(
+            session_id="override-test",
+            user_id="u1",
+            chat_id="chat1",
+            working_directory=str(tmp_path),
+        )
+        gatekeeper = MagicMock()
+        gatekeeper.enable_tool_auto_approve = MagicMock()
+
+        event = Event(
+            name=COMMAND_TEST,
+            data={
+                "session": session,
+                "chat_id": "chat1",
+                "args": "--url http://cli-url",
+                "gatekeeper": gatekeeper,
+                "prompt": "",
+            },
+        )
+        await event_bus.emit(event)
+
+        # CLI URL should win
+        assert "http://cli-url" in session.mode_instruction
+        assert "http://cli-url" in event.data["prompt"]

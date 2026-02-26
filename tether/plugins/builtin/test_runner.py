@@ -10,7 +10,14 @@ from pydantic import BaseModel, ConfigDict
 
 from tether.core.events import COMMAND_TEST, TEST_STARTED, Event
 from tether.plugins.base import PluginMeta, TetherPlugin
-from tether.plugins.builtin.browser_tools import BROWSER_MUTATION_TOOLS
+from tether.plugins.builtin.browser_tools import (
+    BROWSER_MUTATION_TOOLS,
+    BROWSER_READONLY_TOOLS,
+)
+from tether.plugins.builtin.test_config_loader import (
+    ProjectTestConfig,
+    load_project_test_config,
+)
 
 if TYPE_CHECKING:
     from tether.plugins.base import PluginContext
@@ -158,7 +165,27 @@ def parse_test_args(args: str) -> TestConfig:
     return config
 
 
-def build_test_instruction(config: TestConfig) -> str:
+def _merge_project_config(cli: TestConfig, project: ProjectTestConfig) -> TestConfig:
+    """Merge project defaults into CLI config. CLI values win."""
+    updates: dict[str, object] = {}
+    if not cli.app_url and project.url:
+        updates["app_url"] = project.url
+    if not cli.dev_server_command and project.server:
+        updates["dev_server_command"] = project.server
+    if not cli.framework and project.framework:
+        updates["framework"] = project.framework
+    if not cli.test_directory and project.directory:
+        updates["test_directory"] = project.directory
+    if updates:
+        return cli.model_copy(update=updates)
+    return cli
+
+
+def build_test_instruction(
+    config: TestConfig,
+    *,
+    project_config: ProjectTestConfig | None = None,
+) -> str:
     """Generate a multi-phase system prompt based on test config."""
     sections: list[str] = []
 
@@ -173,6 +200,35 @@ def build_test_instruction(config: TestConfig) -> str:
         "are pre-configured and ready to use. Use them directly for all browser "
         "interactions — do not fall back to curl or code analysis as a substitute."
     )
+
+    # Context persistence — placed early so the agent sees write-ahead rules
+    # before any phase instructions
+    ctx_section = (
+        "CONTEXT PERSISTENCE:\n"
+        "- FIRST ACTION on every execution: Read .tether/test-session.md — "
+        "if it exists, resume from recorded progress instead of starting over\n"
+        "- Create .tether/test-session.md at the very start of Phase 1 with these "
+        "sections: Configuration, Credentials, Test Plan, Current Phase, "
+        "Progress (table), Issues Found (table), Fixes Applied\n"
+        "- WRITE-AHEAD RULE: Update the file BEFORE starting each phase — "
+        "record the phase name and 'status: in-progress' so a crash mid-phase "
+        "leaves a trail\n"
+        "- Update incrementally DURING phases — after each test result, "
+        "after each fix attempt, after discovering each issue\n"
+        "- Before any long-running operation (server startup, full test suite run, "
+        "multi-file fix), write current progress to the file first\n"
+        "- Record all URLs, credentials, and session tokens there immediately "
+        "when discovered\n"
+        "- When context window grows large, summarize completed phases in the file "
+        "and reference it\n"
+        "- The file persists across agent restarts — it IS your working memory"
+    )
+    if project_config:
+        ctx_section += (
+            "\n- Seed the context file with project config values "
+            "(URL, credentials, preconditions) from .tether/test.yaml"
+        )
+    sections.append(ctx_section)
 
     # User hints
     hints: list[str] = []
@@ -189,9 +245,30 @@ def build_test_instruction(config: TestConfig) -> str:
     if hints:
         sections.append("USER HINTS:\n" + "\n".join(f"- {h}" for h in hints))
 
+    # Project config sections
+    if project_config:
+        pc_parts: list[str] = []
+        if project_config.credentials:
+            cred_lines = [f"  {k}: {v}" for k, v in project_config.credentials.items()]
+            pc_parts.append("Credentials:\n" + "\n".join(cred_lines))
+        if project_config.preconditions:
+            pre_lines = [f"- {p}" for p in project_config.preconditions]
+            pc_parts.append("Preconditions:\n" + "\n".join(pre_lines))
+        if project_config.focus_areas:
+            fa_lines = [f"- {f}" for f in project_config.focus_areas]
+            pc_parts.append("Focus areas:\n" + "\n".join(fa_lines))
+        if project_config.environment:
+            env_lines = [f"  {k}={v}" for k, v in project_config.environment.items()]
+            pc_parts.append("Environment:\n" + "\n".join(env_lines))
+        if pc_parts:
+            sections.append("PROJECT CONFIG:\n" + "\n\n".join(pc_parts))
+
     # Phase 1: Discovery (always)
     sections.append(
         "PHASE 1 — DISCOVERY:\n"
+        "- FIRST: Read .tether/test-session.md — if it exists resume from last "
+        "progress; if not, create it now with Configuration, Test Plan, Progress "
+        "table, Issues Found table\n"
         "- Read project structure (package.json, pyproject.toml, Cargo.toml, go.mod)\n"
         "- Identify test frameworks, dev server commands, and existing test suites\n"
         "- Run git diff and git status to understand recent changes\n"
@@ -288,16 +365,23 @@ def build_test_instruction(config: TestConfig) -> str:
         "- CRITICAL: app crashes, data loss, security holes\n"
         "- HIGH: broken user flows, API errors, test failures\n"
         "- MEDIUM: console warnings, edge case failures\n"
-        "- LOW: style issues, minor UX problems"
+        "- LOW: style issues, minor UX problems\n"
+        "- Write each issue to .tether/test-session.md Issues Found table\n"
+        "- Include: severity, file path, line number, reproduction steps, "
+        "expected vs actual"
     )
 
     # Phase 8: Healing (always)
     sections.append(
         "PHASE 8 — HEALING:\n"
-        "- Fix bugs found in previous phases (both test bugs and app bugs)\n"
+        "- For one-line fixes (typo, wrong selector, missing import): fix directly\n"
+        "- For multi-file or complex fixes: use the Task tool to spawn a sub-agent:\n"
+        "  - Provide: issue title, details, file paths, expected behavior\n"
+        "  - The sub-agent fixes the code and returns results\n"
+        "  - You verify by re-running the affected test or re-navigating the flow\n"
         "- Re-run affected tests to verify fixes\n"
-        "- If a fix is complex, describe the issue and proposed fix clearly\n"
-        "- Track what was fixed and what remains"
+        "- Update .tether/test-session.md Issues table with fix status after each fix\n"
+        "- Track: fixed, remaining, needs-human-attention"
     )
 
     # Phase 9: Report (always)
@@ -338,7 +422,10 @@ def build_test_instruction(config: TestConfig) -> str:
 
 def _build_test_prompt(config: TestConfig) -> str:
     """Build the user-facing prompt from test config."""
-    parts: list[str] = []
+    parts: list[str] = [
+        "IMPORTANT: Start by reading .tether/test-session.md — if it exists, resume; "
+        "if not, create it. Update it BEFORE each phase.",
+    ]
 
     if config.focus:
         parts.append(config.focus)
@@ -380,11 +467,23 @@ class TestRunnerPlugin(TetherPlugin):
         config = parse_test_args(args)
 
         session = event.data["session"]
+
+        # Load project test config and merge with CLI args
+        project_config = load_project_test_config(session.working_directory)
+        if project_config:
+            config = _merge_project_config(config, project_config)
+
         session.mode = "test"
-        session.mode_instruction = build_test_instruction(config)
+        session.mode_instruction = build_test_instruction(
+            config, project_config=project_config
+        )
 
         gatekeeper = event.data["gatekeeper"]
         chat_id = event.data["chat_id"]
+
+        # Auto-approve browser readonly tools
+        for tool in BROWSER_READONLY_TOOLS:
+            gatekeeper.enable_tool_auto_approve(chat_id, tool)
 
         # Auto-approve browser mutation tools
         for tool in BROWSER_MUTATION_TOOLS:

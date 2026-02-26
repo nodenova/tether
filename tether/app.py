@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING
 import structlog
 
 from tether.agents.claude_code import ClaudeCodeAgent
-from tether.core.config import TetherConfig
+from tether.core.config import TetherConfig, ensure_tether_dir
 from tether.core.engine import Engine
 from tether.core.events import EventBus
 from tether.core.interactions import InteractionCoordinator
@@ -41,7 +41,12 @@ if TYPE_CHECKING:
 logger = structlog.get_logger()
 
 
-def _configure_logging(config: TetherConfig) -> None:
+def _resolve_against(path: Path, base: Path) -> Path:
+    """Return *path* unchanged if absolute, otherwise resolve it against *base*."""
+    return path if path.is_absolute() else base / path
+
+
+def _configure_logging(config: TetherConfig, *, log_dir: Path | None = None) -> None:
     """Set up structlog with console output and optional rotating JSON file handler."""
     shared_processors: list[structlog.types.Processor] = [
         structlog.contextvars.merge_contextvars,
@@ -66,10 +71,10 @@ def _configure_logging(config: TetherConfig) -> None:
     root_logger.addHandler(console_handler)
 
     # File handler — JSON lines for machine parsing
-    if config.log_dir is not None:
-        config.log_dir.mkdir(parents=True, exist_ok=True)
+    if log_dir is not None:
+        log_dir.mkdir(parents=True, exist_ok=True)
         file_handler = logging.handlers.RotatingFileHandler(
-            config.log_dir / "tether.log",
+            log_dir / "tether.log",
             maxBytes=config.log_max_bytes,
             backupCount=config.log_backup_count,
         )
@@ -111,7 +116,23 @@ def build_engine(
     if config is None:
         config = TetherConfig()  # type: ignore[call-arg]  # pydantic-settings loads from env
 
-    _configure_logging(config)
+    # Resolve relative paths against the first approved directory
+    project_base = config.approved_directories[0]
+
+    audit_is_pinned = config.audit_log_path.is_absolute()
+    storage_is_pinned = config.storage_path.is_absolute()
+
+    resolved_audit = _resolve_against(config.audit_log_path, project_base)
+    resolved_storage = _resolve_against(config.storage_path, project_base)
+    resolved_log_dir = (
+        _resolve_against(config.log_dir, project_base)
+        if config.log_dir is not None
+        else None
+    )
+
+    ensure_tether_dir(project_base)
+
+    _configure_logging(config, log_dir=resolved_log_dir)
 
     tether_root = Path(__file__).resolve().parent.parent
     _load_default_mcp_servers(config, tether_root)
@@ -125,14 +146,22 @@ def build_engine(
         approved_directories=[str(d) for d in config.approved_directories],
     )
 
-    # Storage
-    store: SessionStore
-    if config.storage_backend == "sqlite":
-        store = SqliteSessionStore(config.storage_path)
-    else:
-        store = MemorySessionStore()
+    # Session management store — fixed at tether root, never switches with /dir
+    ensure_tether_dir(tether_root)
+    session_db_path = tether_root / ".tether" / "sessions.db"
 
-    session_manager = SessionManager(store=store)
+    session_store: SessionStore
+    if config.storage_backend == "sqlite":
+        session_store = SqliteSessionStore(session_db_path)
+    else:
+        session_store = MemorySessionStore()
+
+    # Per-project message store — switches with /dir
+    message_store: SqliteSessionStore | None = None
+    if config.storage_backend == "sqlite":
+        message_store = SqliteSessionStore(resolved_storage)
+
+    session_manager = SessionManager(store=session_store)
     agent = ClaudeCodeAgent(config)
     event_bus = EventBus()
 
@@ -151,7 +180,7 @@ def build_engine(
     sandbox = SandboxEnforcer(
         [*config.approved_directories, Path.home() / ".claude" / "plans"]
     )
-    audit = AuditLogger(config.audit_log_path)
+    audit = AuditLogger(resolved_audit)
 
     approval_coordinator = None
     interaction_coordinator = None
@@ -209,6 +238,11 @@ def build_engine(
         event_bus=event_bus,
         plugin_registry=registry,
         middleware_chain=middleware_chain,
-        store=store,
+        store=session_store,
+        message_store=message_store,
         git_handler=git_handler,
+        audit_path_pinned=audit_is_pinned,
+        storage_path_pinned=storage_is_pinned,
+        audit_path_template=config.audit_log_path,
+        storage_path_template=config.storage_path,
     )

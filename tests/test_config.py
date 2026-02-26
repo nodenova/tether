@@ -6,14 +6,14 @@ from pathlib import Path
 
 import pytest
 
-from tether.core.config import TetherConfig, build_directory_names
+from tether.core.config import TetherConfig, build_directory_names, ensure_tether_dir
 
 
 class TestTetherConfig:
     def test_default_values(self, tmp_path):
         config = TetherConfig(approved_directories=[tmp_path])
         assert config.max_turns == 25
-        assert config.storage_backend == "memory"
+        assert config.storage_backend == "sqlite"
         assert config.approval_timeout_seconds == 300
         assert config.log_level == "INFO"
         assert config.system_prompt is None
@@ -194,9 +194,9 @@ class TestConfigValidationEdgeCases:
         config = TetherConfig(approved_directories=[tmp_path], storage_backend="redis")
         assert config.storage_backend == "redis"
 
-    def test_log_dir_defaults_to_none(self, tmp_path):
+    def test_log_dir_defaults_to_tether_logs(self, tmp_path):
         config = TetherConfig(approved_directories=[tmp_path])
-        assert config.log_dir is None
+        assert config.log_dir == Path(".tether/logs")
 
     def test_log_max_bytes_defaults_to_10mb(self, tmp_path):
         config = TetherConfig(approved_directories=[tmp_path])
@@ -239,3 +239,46 @@ class TestBuildDirectoryNames:
 
     def test_empty_list(self):
         assert build_directory_names([]) == {}
+
+
+class TestTetherDirDefaults:
+    def test_storage_path_defaults_to_tether_dir(self, tmp_path):
+        config = TetherConfig(approved_directories=[tmp_path])
+        assert config.storage_path == Path(".tether/tether.db")
+
+    def test_audit_log_path_defaults_to_tether_dir(self, tmp_path):
+        config = TetherConfig(approved_directories=[tmp_path])
+        assert config.audit_log_path == Path(".tether/audit.jsonl")
+
+    def test_log_dir_defaults_to_tether_dir(self, tmp_path):
+        config = TetherConfig(approved_directories=[tmp_path])
+        assert config.log_dir == Path(".tether/logs")
+
+
+class TestEnsureTetherDir:
+    def test_creates_directory(self, tmp_path):
+        result = ensure_tether_dir(tmp_path)
+        assert result == tmp_path / ".tether"
+        assert result.is_dir()
+
+    def test_creates_gitignore(self, tmp_path):
+        ensure_tether_dir(tmp_path)
+        gitignore = tmp_path / ".tether" / ".gitignore"
+        assert gitignore.is_file()
+        content = gitignore.read_text()
+        assert "!test.yaml" in content
+        assert "!.gitignore" in content
+
+    def test_does_not_overwrite_existing_gitignore(self, tmp_path):
+        tether_dir = tmp_path / ".tether"
+        tether_dir.mkdir()
+        gitignore = tether_dir / ".gitignore"
+        gitignore.write_text("custom content\n")
+
+        ensure_tether_dir(tmp_path)
+        assert gitignore.read_text() == "custom content\n"
+
+    def test_idempotent(self, tmp_path):
+        ensure_tether_dir(tmp_path)
+        ensure_tether_dir(tmp_path)
+        assert (tmp_path / ".tether").is_dir()

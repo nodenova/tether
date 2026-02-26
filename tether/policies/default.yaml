@@ -96,6 +96,9 @@ rules:
       - browser_select_option
       - browser_file_upload
       - browser_handle_dialog
+      - browser_fill_form
+      - browser_evaluate
+      - browser_tabs
       - browser_tab_new
       - browser_tab_select
       - browser_tab_close

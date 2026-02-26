@@ -4,7 +4,7 @@ How to set up any project for e2e testing with Tether's /test command and Playwr
 
 ## Overview
 
-Tether's /test command drives a 9-phase agent workflow that discovers your project, starts the dev server, runs tests, interacts with the live UI through a real browser, finds bugs, fixes them, and reports results. The browser automation is powered by Playwright MCP -- Claude Code controls a headless Chromium instance to navigate pages, click elements, fill forms, and verify state.
+Tether's /test command drives a 9-phase agent workflow that discovers your project, starts the dev server, runs tests, interacts with the live UI through a real browser, finds bugs, fixes them, and reports results. The browser automation is powered by Playwright MCP -- Claude Code controls a Chromium instance (headed by default) to navigate pages, click elements, fill forms, and verify state.
 
 This guide covers three tiers of setup, from zero-config to full AI-assisted test authoring.
 
@@ -19,7 +19,7 @@ The /test command works out of the box with any project. The agent uses Playwrig
 | Requirement | Why | Install |
 |---|---|---|
 | Node.js 18+ | Playwright MCP runs via npx | nodejs.org |
-| Chromium binary | Headless browser for page interaction | `npx playwright install chromium` (one-time) |
+| Chromium binary | Browser for page interaction | `npx playwright install chromium` (one-time) |
 
 The Chromium install prints a warning about missing project dependencies. Safe to ignore -- the binary installs successfully.
 
@@ -47,18 +47,18 @@ Tether's .mcp.json configures the Playwright MCP server automatically:
   "mcpServers": {
     "playwright": {
       "command": "npx",
-      "args": ["@playwright/mcp@0.0.41", "--headless"]
+      "args": ["@playwright/mcp@0.0.41"]
     }
   }
 }
 ```
 
-This spawns a headless Chromium instance managed by Claude Code's SDK. Your project needs no MCP configuration -- the browser navigates to URLs served by your dev server.
+This spawns a headed Chromium instance (visible browser window) managed by Claude Code's SDK. Your project needs no MCP configuration -- the browser navigates to URLs served by your dev server.
 
-For visual debugging, switch to headed mode:
+For CI or headless environments, add `--headless`:
 
 ```json
-"args": ["@playwright/mcp@0.0.41", "--headed"]
+"args": ["@playwright/mcp@0.0.41", "--headless"]
 ```
 
 ### Running /test
@@ -98,6 +98,109 @@ Flags combine: `/test --url http://localhost:3000 --unit checkout flow`
 
 By default, /test runs agentic E2E only (Phases 1-3, 6-9). Unit and backend phases are opt-in via `--unit` and `--backend`.
 
+### Project Test Config (`.tether/test.yaml`)
+
+Instead of passing `--url`, `--server`, and `--framework` flags every time, create a `.tether/test.yaml` file in your project's `.tether/` directory. The agent loads it automatically and merges values with any CLI flags you provide.
+
+#### Schema
+
+```yaml
+# .tether/test.yaml — project-level defaults for /test
+
+# Base URL the agent navigates to (overridden by --url)
+url: http://localhost:3000
+
+# Command to start the dev server (overridden by --server)
+server: npm run dev
+
+# Framework hint for discovery (overridden by --framework)
+framework: next.js
+
+# Test directory hint (overridden by --dir)
+directory: tests/e2e
+
+# Credentials seeded into the agent's context file
+# Not overridable via CLI — always included in the system prompt
+credentials:
+  admin_email: admin@example.com
+  admin_password: test-password-123
+  api_key: sk-test-key-abc
+
+# Steps the agent should verify before running tests
+# Not overridable via CLI — always included in the system prompt
+preconditions:
+  - Database must be seeded with test fixtures
+  - Redis must be running on port 6379
+
+# Areas the agent should prioritize during testing
+# Not overridable via CLI — always included in the system prompt
+focus_areas:
+  - Authentication and authorization flows
+  - Payment checkout process
+  - User profile CRUD operations
+
+# Environment variables injected into agent context
+# Not overridable via CLI — always included in the system prompt
+environment:
+  NODE_ENV: test
+  DATABASE_URL: postgres://localhost:5432/testdb
+```
+
+#### Merge Semantics
+
+CLI flags always override project defaults:
+
+| Field | CLI flag | Merge behavior |
+|---|---|---|
+| `url` | `--url` | CLI wins if provided |
+| `server` | `--server` | CLI wins if provided |
+| `framework` | `--framework` | CLI wins if provided |
+| `directory` | `--dir` | CLI wins if provided |
+| `credentials` | — | Always included in system prompt |
+| `preconditions` | — | Always included in system prompt |
+| `focus_areas` | — | Always included in system prompt |
+| `environment` | — | Always included in system prompt |
+
+The last four fields (`credentials`, `preconditions`, `focus_areas`, `environment`) have no CLI equivalents — they are additive context injected into the agent's system prompt every session.
+
+#### Minimal Example
+
+```yaml
+# .tether/test.yaml
+url: http://localhost:5173
+server: npm run dev
+```
+
+#### Full Example
+
+```yaml
+# .tether/test.yaml
+url: http://localhost:3000
+server: npm run dev
+framework: next.js
+directory: e2e
+credentials:
+  admin_email: admin@test.com
+  admin_password: secret123
+preconditions:
+  - Run `npm run db:seed` before testing
+focus_areas:
+  - User registration and login
+  - Dashboard data loading
+environment:
+  NEXT_PUBLIC_API_URL: http://localhost:3001/api
+```
+
+#### Notes
+
+- `.tether/test.yml` also works (YAML extension variant).
+- **Security**: This file may contain credentials. Add `.tether/` to `.gitignore` (covers both the test config and session files):
+
+```
+# .gitignore
+.tether/
+```
+
 ### The 9-Phase Workflow
 
 | Phase | Name | What happens |
@@ -108,8 +211,8 @@ By default, /test runs agentic E2E only (Phases 1-3, 6-9). Unit and backend phas
 | 4 | Unit and Integration | Opt-in (`--unit`). Runs existing suites (pytest, jest, vitest, go test, cargo test). Analyzes and fixes failures. |
 | 5 | Backend Verification | Opt-in (`--backend`). Hits API endpoints with curl. Checks responses, logs, error handling. |
 | 6 | Agentic E2E Testing | Agent executes test cases live via browser MCP tools (plan → execute → assert → verdict). Persistent .spec.ts generation is optional and secondary. |
-| 7 | Error Analysis | Compiles all errors. Categorizes as CRITICAL / HIGH / MEDIUM / LOW. |
-| 8 | Healing | Fixes bugs from previous phases. Re-runs affected tests. |
+| 7 | Error Analysis | Compiles all errors. Categorizes as CRITICAL / HIGH / MEDIUM / LOW. Writes structured issues to `.tether/test-session.md` with severity, file path, and reproduction steps. |
+| 8 | Healing | Fixes bugs from previous phases. Delegates complex multi-file fixes to sub-agents via Task tool. Re-runs affected tests. Updates `.tether/test-session.md` with fix status. |
 | 9 | Report | Summary: pass/fail counts, errors, fixes applied, remaining issues, health assessment. |
 
 Phases 2, 3, 6 skip with --no-e2e. Phase 4 requires --unit to enable. Phase 5 requires --backend to enable.
@@ -132,7 +235,7 @@ Persistent `.spec.ts` generation (via browser_generate_playwright_test) is avail
 
 When /test activates, the following tools are auto-approved (no human confirmation):
 
-All 25 browser tools -- readonly and mutation.
+All 28 browser tools -- readonly and mutation.
 
 Test-related bash commands:
 
@@ -150,9 +253,65 @@ cat, ls, head, tail, wc, grep, find
 
 File writes -- Write and Edit tools auto-approved for test file creation and source fixes.
 
+### Context Persistence (`.tether/test-session.md`)
+
+The agent maintains a structured markdown file at `.tether/test-session.md` as persistent working memory across sessions. This file survives agent restarts — the agent reads it at the start of every phase to recover context.
+
+**Lifecycle:**
+
+1. Created automatically at the start of Phase 1 (if it doesn't exist)
+2. Read at the start of each phase to recover previous progress
+3. Updated after each phase with findings, pass/fail status, and bugs found
+4. When context window grows large, completed phases are summarized into this file
+
+**Structure:**
+
+```markdown
+# Test Session
+
+## Configuration
+- URL: http://localhost:3000
+- Framework: next.js
+- Server: npm run dev
+
+## Credentials
+- admin_email: admin@test.com
+- admin_password: secret123
+
+## Test Plan
+1. Authentication flow (CRITICAL)
+2. Dashboard data loading (HIGH)
+3. User profile CRUD (HIGH)
+
+## Progress
+| Phase | Status | Summary |
+|-------|--------|---------|
+| 1 - Discovery | ✅ Complete | Next.js 14 app, 12 routes found |
+| 2 - Server Startup | ✅ Complete | Running on :3000 |
+| 3 - Smoke Test | ✅ Complete | Homepage loads, no JS errors |
+
+## Issues Found
+| # | Severity | File | Description | Status |
+|---|----------|------|-------------|--------|
+| 1 | CRITICAL | src/auth/login.tsx:42 | Form submit returns 500 | fixed |
+| 2 | MEDIUM | src/components/Nav.tsx:18 | Missing aria-label | open |
+
+## Fixes Applied
+- Fixed login form 500 error: missing `await` on auth API call (src/auth/login.tsx:42)
+```
+
+**Seeding from project config:** When `.tether/test.yaml` exists, the context file is seeded with project config values (URL, credentials, preconditions) so the agent starts with full context immediately.
+
+**`.gitignore` recommendation:** Add `.tether/` to your `.gitignore` — the context file contains session-specific data and potentially credentials:
+
+```
+# .gitignore
+.tether/
+```
+
 ### Browser Tools Reference
 
-The agent has 25 browser tools via Playwright MCP:
+The agent has 28 browser tools via Playwright MCP:
 
 Observation (7 tools, readonly):
 
@@ -166,7 +325,7 @@ Observation (7 tools, readonly):
 | browser_wait_for | Wait for text, element, or timeout |
 | browser_generate_playwright_test | Generate test from recorded actions |
 
-Interaction (18 tools, mutation):
+Interaction (21 tools, mutation):
 
 | Tool | What it does |
 |---|---|
@@ -179,6 +338,9 @@ Interaction (18 tools, mutation):
 | browser_select_option | Select a dropdown option |
 | browser_file_upload | Upload a file |
 | browser_handle_dialog | Accept or dismiss a dialog |
+| browser_fill_form | Fill multiple form fields at once |
+| browser_evaluate | Execute JavaScript on the page or element |
+| browser_tabs | List, create, close, or select browser tabs |
 | browser_navigate_back | Browser back button |
 | browser_navigate_forward | Browser forward button |
 | browser_tab_new | Open a new tab |
@@ -304,8 +466,8 @@ Phase 6 (Agentic E2E Testing) executes all test cases live through browser MCP t
 
 When Tier 2 is present (playwright.config.ts + e2e/ directory detected in Phase 1), the agent additionally:
 
-1. Runs existing `.spec.ts` tests with `npx playwright test` during Phase 4
-2. After live agentic execution in Phase 6, optionally saves tested flows as `.spec.ts` files via browser_generate_playwright_test (sub-phase 6d)
+1. Detects `playwright.config.ts` and `e2e/` directory in Phase 1 discovery
+2. After live agentic execution in Phase 6, optionally saves tested flows as `.spec.ts` files via browser_generate_playwright_test (sub-phase 6d) — only when `playwright.config.ts` and `e2e/` directory exist, or user explicitly requests it
 3. Analyzes and fixes broken persistent tests in Phase 8
 
 Without Tier 2, the agent tests everything via live browser interaction — no `.spec.ts` files are generated unless explicitly requested.
@@ -370,7 +532,7 @@ Outside test mode, browser tools are gated by safety policies:
 | strict | Require approval | Require approval |
 | permissive | Auto-allow | Auto-allow |
 
-In test mode (/test), all 25 browser tools are auto-approved regardless of policy. Test mode also auto-approves file writes for test creation and source fixes.
+In test mode (/test), all 28 browser tools are auto-approved regardless of policy. Test mode also auto-approves file writes for test creation and source fixes.
 
 Test mode scopes to the current chat session. Resets on /dir switch or new session.
 
@@ -400,18 +562,31 @@ The agent checks with lsof. Force a specific port:
 ```
 
 **Headless limitations** --
-OS file pickers, system notifications, and browser extensions need headed mode. Switch .mcp.json to --headed temporarily.
+The default is headed mode (visible browser window). If you've added `--headless` to `.mcp.json` for CI, note that OS file pickers, system notifications, and browser extensions don't work in headless mode. Remove `--headless` to restore headed mode for debugging.
 
 **Context window exhaustion** --
 Focus: `/test login page`. Unit and backend are off by default — no flags needed. The agent uses browser_snapshot over screenshots to conserve tokens.
 
 **Tests pass locally but fail via Tether** --
-Playwright MCP runs a separate headless Chromium. Viewport, fonts, and extensions may differ. Use browser_resize to match expected dimensions.
+Playwright MCP runs a separate Chromium instance. Viewport, fonts, and extensions may differ. Use browser_resize to match expected dimensions.
 
 **Chromium not installed** --
 ```bash
 npx playwright install chromium
 ```
+
+**Re-providing URLs and credentials across restarts** --
+Create a `.tether/test.yaml` in your project. The agent loads it automatically every session:
+```yaml
+url: http://localhost:3000
+server: npm run dev
+credentials:
+  admin_email: admin@test.com
+  admin_password: secret123
+```
+
+**Long sessions losing context** --
+The agent writes progress to `.tether/test-session.md` automatically. If a session crashes or the context window fills up, the agent reads this file at the start of each phase to recover. No manual action needed.
 
 ---
 
@@ -420,6 +595,10 @@ npx playwright install chromium
 ```bash
 # Machine setup (one-time)
 npx playwright install chromium
+
+# Project test config (saves URLs/credentials across sessions)
+# Create .tether/test.yaml in project, then just:
+/test
 
 # Basic testing (no repo changes)
 /test

@@ -10,7 +10,8 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 
-from tether.core.config import build_directory_names
+from tether.connectors.base import InlineButton
+from tether.core.config import build_directory_names, ensure_tether_dir
 from tether.core.events import (
     COMMAND_TEST,
     ENGINE_STARTED,
@@ -86,10 +87,20 @@ class _StreamingResponder:
         self._has_activity: bool = False
         self._tool_counts: dict[str, int] = {}
         self._display_offset: int = 0
+        self._all_message_ids: list[str] = []
 
     @property
     def buffer(self) -> str:
         return self._buffer
+
+    @property
+    def all_message_ids(self) -> list[str]:
+        return list(self._all_message_ids)
+
+    async def delete_all_messages(self) -> None:
+        for msg_id in self._all_message_ids:
+            await self._connector.delete_message(self._chat_id, msg_id)
+        self._all_message_ids.clear()
 
     def _build_display(self) -> str:
         text = self._buffer[
@@ -132,6 +143,7 @@ class _StreamingResponder:
                 self._active = False
                 return
             self._message_id = msg_id
+            self._all_message_ids.append(msg_id)
             self._last_edit = time.monotonic()
 
         if self._message_id is None:
@@ -141,6 +153,7 @@ class _StreamingResponder:
                 self._active = False
                 return
             self._message_id = msg_id
+            self._all_message_ids.append(msg_id)
             self._last_edit = time.monotonic()
             return
 
@@ -172,6 +185,7 @@ class _StreamingResponder:
         self._tool_counts = {}
         self._last_edit = 0.0
         self._display_offset = 0
+        self._all_message_ids.clear()
 
     async def deactivate(self) -> None:
         """Suppress all further streaming and clear any visible activity."""
@@ -222,7 +236,12 @@ class Engine:
         plugin_registry: PluginRegistry | None = None,
         middleware_chain: MiddlewareChain | None = None,
         store: SessionStore | None = None,
+        message_store: SqliteSessionStore | None = None,
         git_handler: GitCommandHandler | None = None,
+        audit_path_pinned: bool = True,
+        storage_path_pinned: bool = True,
+        audit_path_template: Path | None = None,
+        storage_path_template: Path | None = None,
     ) -> None:
         self.connector = connector
         self.agent = agent
@@ -242,8 +261,15 @@ class Engine:
         self.middleware_chain = middleware_chain
         self._store = store
         self._message_store: SqliteSessionStore | None = (
-            store if isinstance(store, SqliteSessionStore) else None
+            message_store
+            if message_store is not None
+            else (store if isinstance(store, SqliteSessionStore) else None)
         )
+
+        self._audit_path_pinned = audit_path_pinned
+        self._storage_path_pinned = storage_path_pinned
+        self._audit_path_template = audit_path_template or Path(".tether/audit.jsonl")
+        self._storage_path_template = storage_path_template or Path(".tether/tether.db")
 
         self._gatekeeper = ToolGatekeeper(
             sandbox=self.sandbox,
@@ -291,6 +317,7 @@ class Engine:
         session = await self.session_manager.get_or_create(
             user_id, chat_id, self._default_directory
         )
+        await self._realign_paths_for_session(session)
         await self._git_handler.handle_callback(
             user_id, chat_id, action, payload, session
         )
@@ -326,6 +353,8 @@ class Engine:
     async def startup(self) -> None:
         if self._store:
             await self._store.setup()
+        if self._message_store and self._message_store is not self._store:
+            await self._message_store.setup()
         if self.plugin_registry:
             from tether.plugins.base import PluginContext
 
@@ -338,6 +367,8 @@ class Engine:
         await self.event_bus.emit(Event(name=ENGINE_STOPPED))
         if self.plugin_registry:
             await self.plugin_registry.stop_all()
+        if self._message_store and self._message_store is not self._store:
+            await self._message_store.teardown()
         if self._store:
             await self._store.teardown()
         await self.agent.shutdown()
@@ -433,7 +464,12 @@ class Engine:
             err_str = str(e).lower()
             is_transient = any(
                 p in err_str
-                for p in ("temporarily unavailable", "interrupted", "timed out")
+                for p in (
+                    "temporarily unavailable",
+                    "interrupted",
+                    "timed out",
+                    "response was too large",
+                )
             )
             if chat_id not in self._interrupted_chats and not is_transient:
                 self._pending_messages.pop(chat_id, None)
@@ -488,6 +524,8 @@ class Engine:
         session = await self.session_manager.get_or_create(
             user_id, chat_id, self._default_directory
         )
+        await self._realign_paths_for_session(session)
+        self._ensure_session_tether_dir(session)
         self._executing_sessions[chat_id] = session.session_id
 
         responder = None
@@ -656,6 +694,8 @@ class Engine:
                     plan_content=fallback_content.strip() or None,
                 )
                 if isinstance(review, PlanReviewDecision):
+                    if responder:
+                        await responder.delete_all_messages()
                     return await self._exit_plan_mode(
                         session,
                         chat_id,
@@ -724,6 +764,17 @@ class Engine:
                 timeout=self.config.agent_timeout_seconds,
             )
             await self.agent.cancel(session.session_id)
+            if session.claude_session_id:
+                await self.session_manager.update_from_result(
+                    session,
+                    claude_session_id=session.claude_session_id,
+                    cost=0.0,
+                )
+                logger.info(
+                    "session_persisted_on_timeout",
+                    session_id=session.session_id,
+                    claude_session_id=session.claude_session_id,
+                )
             raise AgentError(
                 f"Agent timed out after {self.config.agent_timeout_seconds // 60} minutes. "
                 "Send your message again to continue."
@@ -743,6 +794,8 @@ class Engine:
                 "rate_limit",
                 "500",
                 "529",
+                "maximum buffer size",
+                "response was too large",
             )
         )
 
@@ -805,10 +858,15 @@ class Engine:
         session = await self.session_manager.get_or_create(
             user_id, chat_id, self._default_directory
         )
+        await self._realign_paths_for_session(session)
+        self._ensure_session_tether_dir(session)
 
         if command == "git":
             if not self._git_handler:
                 return "Git commands not available."
+            git_args = args.strip()
+            if git_args == "commit":
+                return await self._handle_smart_commit(session, chat_id, user_id)
             return await self._git_handler.handle_command(
                 user_id, args, chat_id, session
             )
@@ -828,6 +886,14 @@ class Engine:
                 from_mode=old_mode,
                 to_mode="plan",
             )
+            if args.strip():
+                if self.connector:
+                    await self.connector.send_message(
+                        chat_id,
+                        "Switched to plan mode. I'll create a plan before implementing.",
+                    )
+                await self.handle_message(user_id, args.strip(), chat_id)
+                return ""
             return "Switched to plan mode. I'll create a plan before implementing."
 
         if command == "test":
@@ -860,6 +926,14 @@ class Engine:
                 from_mode=old_mode,
                 to_mode="auto",
             )
+            if args.strip():
+                if self.connector:
+                    await self.connector.send_message(
+                        chat_id,
+                        "Accept edits on. I'll implement directly and auto-approve file edits.",
+                    )
+                await self.handle_message(user_id, args.strip(), chat_id)
+                return ""
             return (
                 "Accept edits on. I'll implement directly and auto-approve file edits."
             )
@@ -916,10 +990,44 @@ class Engine:
                 return name
         return wd.name
 
+    def _ensure_session_tether_dir(self, session: Session) -> None:
+        wd = Path(session.working_directory)
+        if wd.is_dir():
+            ensure_tether_dir(wd)
+
+    async def _realign_paths_for_session(self, session: Session) -> None:
+        """Switch audit/message paths to match the restored session's directory."""
+        if session.working_directory == self._default_directory:
+            return
+        target = Path(session.working_directory)
+        if not target.is_dir():
+            return
+        ensure_tether_dir(target)
+        if not self._audit_path_pinned:
+            self.audit.switch_path(target / self._audit_path_template)
+        if not self._storage_path_pinned and self._message_store is not None:
+            await self._message_store.switch_db(target / self._storage_path_template)
+
     async def _handle_dir_command(
         self, session: Session, args: str, chat_id: str
     ) -> str:
         if not args:
+            if self.connector and len(self._dir_names) > 1:
+                buttons: list[list[InlineButton]] = []
+                for name, path in self._dir_names.items():
+                    marker = " ✅" if str(path) == session.working_directory else ""
+                    buttons.append(
+                        [
+                            InlineButton(
+                                text=f"{name}{marker}",
+                                callback_data=f"dir:{name}",
+                            )
+                        ]
+                    )
+                await self.connector.send_message(
+                    chat_id, "Select directory:", buttons=buttons
+                )
+                return ""
             lines = []
             for name, path in self._dir_names.items():
                 marker = " ✅" if str(path) == session.working_directory else ""
@@ -938,7 +1046,19 @@ class Engine:
         session.working_directory = str(target_path)
         session.claude_session_id = None
         self._gatekeeper.disable_auto_approve(chat_id)
+
+        # Save session to the stable session store BEFORE switching message DB
         await self.session_manager.save(session)
+
+        ensure_tether_dir(target_path)
+
+        if not self._audit_path_pinned:
+            self.audit.switch_path(target_path / self._audit_path_template)
+
+        if not self._storage_path_pinned and self._message_store is not None:
+            await self._message_store.switch_db(
+                target_path / self._storage_path_template
+            )
         logger.info(
             "directory_switched",
             chat_id=chat_id,
@@ -946,6 +1066,32 @@ class Engine:
             name=target,
         )
         return f"Switched to {target} ({target_path})"
+
+    async def _handle_smart_commit(
+        self, session: Session, chat_id: str, user_id: str
+    ) -> str:
+        """Use Claude agent to generate a conventional commit message."""
+        for key in ("Bash::git diff", "Bash::git status", "Bash::git commit"):
+            self._gatekeeper.enable_tool_auto_approve(chat_id, key)
+
+        prompt = (
+            "I need you to create a git commit with a good conventional commit message. "
+            "Follow these steps:\n\n"
+            "1. Run `git diff --staged` to see what's staged\n"
+            "2. If nothing is staged, tell me and stop\n"
+            "3. Analyze the changes and generate a conventional commit message "
+            "(feat:, fix:, chore:, refactor:, docs:, test:, style:, etc.) — "
+            "keep it to 1-2 sentences max\n"
+            '4. Run `git commit -m "<your message>"`\n'
+            "5. Report the commit hash and message used\n\n"
+            f"Working directory: {session.working_directory}"
+        )
+        if self.connector:
+            await self.connector.send_message(
+                chat_id, "\U0001f50d Analyzing staged changes..."
+            )
+        await self.handle_message(user_id, prompt, chat_id)
+        return ""
 
     @staticmethod
     def _discover_plan_file(working_directory: str | None = None) -> str | None:
@@ -1032,9 +1178,17 @@ class Engine:
             self._gatekeeper.enable_tool_auto_approve(chat_id, "Write")
             self._gatekeeper.enable_tool_auto_approve(chat_id, "Edit")
         if clear_context and self.connector:
-            await self.connector.send_message(
+            ack_id = await self.connector.send_message_with_id(
                 chat_id, "Context cleared. Starting implementation..."
             )
+            if ack_id:
+                self.connector.schedule_message_cleanup(
+                    chat_id, ack_id, delay=_TRANSIENT_MESSAGE_DELAY
+                )
+            else:
+                await self.connector.send_message(
+                    chat_id, "Context cleared. Starting implementation..."
+                )
         return await self._execute_turn(
             user_id,
             self._build_implementation_prompt(plan_content),
@@ -1126,6 +1280,7 @@ class Engine:
                         self._gatekeeper.enable_tool_auto_approve(chat_id, "Write")
                         self._gatekeeper.enable_tool_auto_approve(chat_id, "Edit")
                     if responder:
+                        await responder.delete_all_messages()
                         responder.reset()
                         await responder.deactivate()
                     if result.clear_context:

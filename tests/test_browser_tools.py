@@ -25,13 +25,13 @@ from tether.plugins.builtin.browser_tools import (
 
 class TestBrowserToolConstants:
     def test_all_browser_tools_count(self):
-        assert len(ALL_BROWSER_TOOLS) == 25
+        assert len(ALL_BROWSER_TOOLS) == 28
 
     def test_readonly_count(self):
         assert len(BROWSER_READONLY_TOOLS) == 7
 
     def test_mutation_count(self):
-        assert len(BROWSER_MUTATION_TOOLS) == 18
+        assert len(BROWSER_MUTATION_TOOLS) == 21
 
     def test_no_overlap(self):
         assert frozenset() == BROWSER_READONLY_TOOLS & BROWSER_MUTATION_TOOLS
@@ -50,6 +50,18 @@ class TestBrowserToolConstants:
 
     def test_is_browser_tool_empty(self):
         assert is_browser_tool("") is False
+
+    def test_is_browser_tool_mcp_prefixed(self):
+        assert is_browser_tool("mcp__playwright__browser_navigate") is True
+        assert is_browser_tool("mcp__playwright__browser_snapshot") is True
+
+    def test_is_browser_tool_mcp_prefixed_negative(self):
+        assert is_browser_tool("mcp__playwright__some_other_tool") is False
+
+    def test_new_mutation_tools_present(self):
+        assert "browser_fill_form" in BROWSER_MUTATION_TOOLS
+        assert "browser_evaluate" in BROWSER_MUTATION_TOOLS
+        assert "browser_tabs" in BROWSER_MUTATION_TOOLS
 
 
 class TestBrowserToolsPlugin:

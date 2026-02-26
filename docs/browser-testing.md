@@ -21,7 +21,7 @@ The integration has three layers:
 
 1. **`.mcp.json`** at the project root tells Claude Code to spawn a Playwright MCP server. Claude Code's SDK handles the MCP server lifecycle — Tether's Python process never touches Playwright directly.
 
-2. **Policy rules** in each YAML preset classify the 25 browser tools. Tether's existing safety pipeline (sandbox → policy → approval) gates every browser tool call.
+2. **Policy rules** in each YAML preset classify the 28 browser tools. Tether's existing safety pipeline (sandbox → policy → approval) gates every browser tool call.
 
 3. **`BrowserToolsPlugin`** provides structured logging for browser tool events — which tools were invoked, whether they were allowed or denied, and whether they're mutations.
 
@@ -49,13 +49,13 @@ The `.mcp.json` is already committed to the repo:
   "mcpServers": {
     "playwright": {
       "command": "npx",
-      "args": ["@playwright/mcp@0.0.41", "--headless"]
+      "args": ["@playwright/mcp@0.0.41"]
     }
   }
 }
 ```
 
-After installing browser binaries, verify the MCP server is available by running `/mcp` in a Claude Code session. You should see `playwright` listed as a connected server with 25 tools.
+After installing browser binaries, verify the MCP server is available by running `/mcp` in a Claude Code session. You should see `playwright` listed as a connected server with 28 tools.
 
 ## Configuration Options
 
@@ -63,20 +63,19 @@ The `.mcp.json` args array accepts Playwright MCP flags:
 
 | Flag | Default | Description |
 |---|---|---|
-| `--headless` | *(set in .mcp.json)* | Run browser without a visible window |
-| `--headed` | — | Show the browser window (useful for debugging) |
+| `--headless` | — | Run browser without a visible window (for CI) |
 | `--browser` | `chromium` | Browser to use: `chromium`, `firefox`, or `webkit` |
 | `--cdp-endpoint` | — | Connect to an existing Chrome DevTools Protocol endpoint |
 | `--config` | — | Path to a Playwright config file |
 
-To switch to headed mode for debugging, edit `.mcp.json`:
+Headed mode (visible browser window) is the default. To switch to headless for CI, edit `.mcp.json`:
 
 ```json
 {
   "mcpServers": {
     "playwright": {
       "command": "npx",
-      "args": ["@playwright/mcp@0.0.41", "--headed"]
+      "args": ["@playwright/mcp@0.0.41", "--headless"]
     }
   }
 }
@@ -84,7 +83,7 @@ To switch to headed mode for debugging, edit `.mcp.json`:
 
 ## Browser Tools
 
-Playwright MCP exposes 25 tools, split into two categories:
+Playwright MCP exposes 28 tools, split into two categories:
 
 ### Readonly (7 tools)
 
@@ -100,7 +99,7 @@ These observe the page without changing it:
 | `browser_wait_for` | Wait for a condition (selector, text, timeout) |
 | `browser_generate_playwright_test` | Generate a Playwright test from recorded actions |
 
-### Mutation (18 tools)
+### Mutation (21 tools)
 
 These interact with or change the page:
 
@@ -117,6 +116,9 @@ These interact with or change the page:
 | `browser_select_option` | Select a dropdown option |
 | `browser_file_upload` | Upload a file |
 | `browser_handle_dialog` | Accept/dismiss dialogs |
+| `browser_fill_form` | Fill multiple form fields at once |
+| `browser_evaluate` | Execute JavaScript on the page or element |
+| `browser_tabs` | List, create, close, or select browser tabs |
 | `browser_tab_new` | Open a new tab |
 | `browser_tab_select` | Switch to a tab |
 | `browser_tab_close` | Close a tab |
@@ -141,7 +143,7 @@ See [Policies](policies.md) for the full rule matching algorithm and comparison 
 
 ## BrowserToolsPlugin
 
-The `BrowserToolsPlugin` (`plugins/builtin/browser_tools.py`) provides structured logging for all 25 browser tools. It subscribes to three events:
+The `BrowserToolsPlugin` (`plugins/builtin/browser_tools.py`) provides structured logging for all 28 browser tools. It subscribes to three events:
 
 | Event | Logged when |
 |---|---|
@@ -154,7 +156,7 @@ Each log entry includes the tool name, session ID, and an `is_mutation` flag ind
 The plugin also exports constants for use in custom code:
 
 - `BROWSER_READONLY_TOOLS` — frozenset of 7 readonly tool names
-- `BROWSER_MUTATION_TOOLS` — frozenset of 18 mutation tool names
+- `BROWSER_MUTATION_TOOLS` — frozenset of 21 mutation tool names
 - `ALL_BROWSER_TOOLS` — union of both sets
 - `is_browser_tool(tool_name)` — returns `True` if the tool is a Playwright browser tool
 
@@ -216,4 +218,4 @@ Use `browser_snapshot` for routine inspection and reserve `browser_take_screensh
 - **Windows Chrome conflict** — On Windows, if Chrome is already open, Playwright may fail to launch. Close existing Chrome instances or use `--cdp-endpoint` to connect to a running instance.
 - **Context window exhaustion** — Heavy use of `browser_take_screenshot` can fill the context window quickly. Use `browser_snapshot` (text-based) when possible.
 - **Dev server must be running** — Playwright navigates a real browser. Your app needs to be served locally (or remotely) for `browser_navigate` to work.
-- **Headless limitations** — Some UI interactions (file picker dialogs, OS-level notifications) don't work in headless mode. Switch to `--headed` for debugging these cases.
+- **Headless limitations** — Headed mode is the default. If you've added `--headless` to `.mcp.json` for CI, note that some UI interactions (file picker dialogs, OS-level notifications) don't work in headless mode. Remove `--headless` to restore headed mode.

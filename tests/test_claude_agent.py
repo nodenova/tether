@@ -77,6 +77,15 @@ def _make_assistant_message(blocks):
     return msg
 
 
+def _make_system_message(subtype="init", data=None):
+    from claude_agent_sdk import SystemMessage
+
+    msg = MagicMock(spec=SystemMessage)
+    msg.subtype = subtype
+    msg.data = data or {}
+    return msg
+
+
 def _make_result_message(
     result="done",
     session_id="sdk-session",
@@ -1196,6 +1205,11 @@ class TestIsRetryableError:
     def test_case_insensitive(self):
         assert _is_retryable_error("API_ERROR from upstream")
 
+    def test_buffer_overflow_is_retryable(self):
+        assert _is_retryable_error(
+            "JSON message exceeded maximum buffer size of 1048576 bytes"
+        )
+
 
 class TestRetryableApiErrors:
     @pytest.mark.asyncio
@@ -1344,6 +1358,81 @@ class TestExponentialBackoff:
         assert sleep_delays == [2, 4, 8]
 
 
+class TestBufferOverflowRetry:
+    """Tests for exception-level retry on buffer overflow during streaming."""
+
+    @pytest.mark.asyncio
+    async def test_buffer_overflow_retried_in_stream(self, agent, session):
+        """Exception in receive_response() triggers retry, 2nd attempt succeeds."""
+        success_result = _make_result_message(result="Recovered!", num_turns=2)
+
+        call_count = 0
+
+        class FakeCtx:
+            async def __aenter__(self):
+                nonlocal call_count
+                call_count += 1
+                client = MagicMock()
+                client.query = AsyncMock(return_value=None)
+                if call_count == 1:
+
+                    async def _explode():
+                        raise RuntimeError(
+                            "JSON message exceeded maximum buffer size of 1048576 bytes"
+                        )
+                        yield
+
+                    client.receive_response = MagicMock(return_value=_explode())
+                else:
+                    client.receive_response = MagicMock(
+                        return_value=AsyncIterHelper([success_result])
+                    )
+                return client
+
+            async def __aexit__(self, *args):
+                return False
+
+        with (
+            patch("tether.agents.claude_code._SafeSDKClient", return_value=FakeCtx()),
+            patch("asyncio.sleep", new_callable=AsyncMock),
+        ):
+            resp = await agent.execute("hello", session)
+
+        assert resp.content == "Recovered!"
+        assert resp.is_error is False
+        assert call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_buffer_overflow_exhausted_friendly(self, agent, session):
+        """All 3 retries fail with buffer overflow → is_error=True, friendly message."""
+
+        class FakeCtx:
+            async def __aenter__(self):
+                client = MagicMock()
+                client.query = AsyncMock(return_value=None)
+
+                async def _explode():
+                    raise RuntimeError(
+                        "JSON message exceeded maximum buffer size of 1048576 bytes"
+                    )
+                    yield
+
+                client.receive_response = MagicMock(return_value=_explode())
+                return client
+
+            async def __aexit__(self, *args):
+                return False
+
+        with (
+            patch("tether.agents.claude_code._SafeSDKClient", return_value=FakeCtx()),
+            patch("asyncio.sleep", new_callable=AsyncMock),
+        ):
+            resp = await agent.execute("hello", session)
+
+        assert resp.is_error is True
+        assert "response was too large" in resp.content.lower()
+
+
 class TestFriendlyErrors:
     def test_exit_code_minus_2(self):
         assert "interrupted" in _friendly_error("Process exit code -2").lower()
@@ -1357,6 +1446,12 @@ class TestFriendlyErrors:
     def test_retryable_api_error(self):
         msg = _friendly_error("API Error: 529 overloaded")
         assert "temporarily unavailable" in msg.lower()
+
+    def test_buffer_overflow_friendly(self):
+        msg = _friendly_error(
+            "JSON message exceeded maximum buffer size of 1048576 bytes"
+        )
+        assert "response was too large" in msg.lower()
 
     def test_unknown_error_truncated(self):
         raw = "x" * 300
@@ -1372,3 +1467,33 @@ class TestFriendlyErrors:
             mock_run.side_effect = RuntimeError("exit code -2 killed")
             with pytest.raises(AgentError, match="interrupted"):
                 await agent.execute("hello", session)
+
+
+class TestSystemMessageSessionCapture:
+    @pytest.mark.asyncio
+    async def test_system_message_sets_session_id(self, agent, session):
+        """SystemMessage with session_id in data eagerly sets session.claude_session_id."""
+        messages = [
+            _make_system_message(subtype="init", data={"session_id": "sdk-early-id"}),
+            _make_assistant_message([_make_text_block("hi")]),
+            _make_result_message(result="done", session_id="sdk-early-id"),
+        ]
+        ctx, _ = _patch_sdk_client(messages)
+        with ctx:
+            await agent.execute("hello", session)
+        assert session.claude_session_id == "sdk-early-id"
+
+    @pytest.mark.asyncio
+    async def test_system_message_without_session_id_no_change(self, agent, session):
+        """SystemMessage without session_id leaves session.claude_session_id unchanged."""
+        session.claude_session_id = None
+        messages = [
+            _make_system_message(subtype="init", data={"version": "1.0"}),
+            _make_assistant_message([_make_text_block("hi")]),
+            _make_result_message(result="done", session_id="sdk-session"),
+        ]
+        ctx, _ = _patch_sdk_client(messages)
+        with ctx:
+            await agent.execute("hello", session)
+        # session_id comes from ResultMessage, not SystemMessage
+        assert session.claude_session_id is None

@@ -1,5 +1,8 @@
 # Changelog
 
+## [0.4.0] - 2026-02-27
+- **added**: `/workspace` (alias `/ws`) — group related repos under named workspaces for multi-repo context. YAML config in `.tether/workspaces.yaml`, inline keyboard buttons, workspace-aware system prompt injection, and MCP server merging across workspace directories
+
 ## [0.3.0] - 2026-02-26
 
 ### Added
@@ -12,10 +15,14 @@
 - Auto-delete transient messages (interrupt prompts, ack messages, completion notices)
 
 ### Fixed
+- Git callback buttons now auto-delete after action completes instead of persisting as stale UI
+- Plan approval messages (content + buttons) now fully cleaned up after user decision, with brief ack for proceed actions
+- **fixed**: Comprehensive edge case tests for git callback and plan approval cleanup (8 tests: exception resilience, non-Message guards, missing handlers, empty/missing plan IDs, dedup, ack failures, expired interactions)
 - Agent resilience — exponential backoff on retries, auto-retry for transient API errors, 30-minute execution timeout, human-readable error messages
 - Session continuity — `claude_session_id` persisted on agent timeout so next message resumes
 - Pending messages no longer dropped on transient errors
 - Playwright MCP tools now available when agent works in repos without their own `.mcp.json`
+- **fixed**: Documentation audit — 30+ discrepancies corrected across README, config, plugins, engine, architecture, events, storage, and index docs (wrong defaults, missing features, stale counts, version mismatch)
 
 ## [0.2.1] - 2026-02-23
 - **added**: Network resilience for Telegram connector — exponential-backoff retries on `NetworkError`/`TimedOut` for startup and send operations
@@ -26,7 +33,7 @@
 - **added**: Hierarchical auto-approve matching — stored `Bash::uv run` covers `Bash::uv run pytest` with word-boundary safety
 
 
-## [0.2.0] — 2026-02-23
+## [0.2.0] - 2026-02-23
 
 ### Added
 - **Git integration** — full `/git` command suite accessible from Telegram with inline action buttons
@@ -46,6 +53,6 @@
 - **Connector base protocol** extended with `set_git_handler()` for registering git callbacks
 - **Telegram connector** routes `git:` prefix callbacks to the git handler
 
-## [0.1.0] — 2026-02-22
+## [0.1.0] - 2026-02-22
 
 - Initial release

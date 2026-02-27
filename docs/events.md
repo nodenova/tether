@@ -29,7 +29,7 @@ EventHandler = Callable[[Event], Coroutine[Any, Any, None]]
 | `unsubscribe(event_name, handler)` | Remove a handler |
 | `emit(event)` | Fire an event to all subscribed handlers |
 
-`emit()` calls all handlers concurrently via `asyncio.gather()`. If a handler raises an exception, it is logged but does not affect other handlers — error isolation is built in.
+`emit()` calls handlers sequentially in a `for` loop. If a handler raises an exception, it is logged but does not affect other handlers — error isolation is built in.
 
 ## Event Flow
 
@@ -39,6 +39,9 @@ flowchart LR
         engine["Engine"]
         gatekeeper["ToolGatekeeper"]
         interactions["InteractionCoordinator"]
+        testrunner["TestRunnerPlugin"]
+        mergeresolver["MergeResolverPlugin"]
+        githandler["GitCommandHandler"]
     end
 
     bus["EventBus"]
@@ -49,9 +52,12 @@ flowchart LR
         custom["Custom handlers"]
     end
 
-    engine -->|message.in, message.out, engine.*| bus
+    engine -->|message.in/out, engine.*, message.queued, command.test, execution.interrupted| bus
     gatekeeper -->|tool.gated, tool.allowed, tool.denied| bus
     interactions -->|interaction.*| bus
+    testrunner -->|test.started| bus
+    mergeresolver -->|merge.started| bus
+    githandler -->|command.merge| bus
     bus --> plugins
     bus --> audit
     bus --> custom
@@ -66,13 +72,16 @@ flowchart LR
 | `tool.denied` | `TOOL_DENIED` | `ToolGatekeeper` | `session_id`, `tool_name`, `reason`, `violation_type` | Tool was blocked. `violation_type` is `"sandbox"` for path violations |
 | `message.in` | `MESSAGE_IN` | `Engine` | `user_id`, `chat_id`, `text` | User message received |
 | `message.out` | `MESSAGE_OUT` | `Engine` | `user_id`, `chat_id`, `text` | Response sent to user |
-| `approval.requested` | `APPROVAL_REQUESTED` | — | — | Defined but not currently emitted via EventBus |
-| `approval.resolved` | `APPROVAL_RESOLVED` | — | — | Defined but not currently emitted via EventBus |
-| `safety.violation` | `SAFETY_VIOLATION` | — | — | Defined but not currently emitted via EventBus |
+| `message.queued` | `MESSAGE_QUEUED` | `Engine` | `user_id`, `chat_id`, `text` | Message queued while agent is executing |
 | `engine.started` | `ENGINE_STARTED` | `Engine` | *(empty)* | Engine startup complete |
 | `engine.stopped` | `ENGINE_STOPPED` | `Engine` | *(empty)* | Engine shutdown initiated |
+| `execution.interrupted` | `EXECUTION_INTERRUPTED` | `Engine` | `user_id`, `chat_id` | Agent execution interrupted by user |
 | `interaction.requested` | `INTERACTION_REQUESTED` | `InteractionCoordinator` | `chat_id`, `kind`, `interaction_id` | User interaction prompt sent |
 | `interaction.resolved` | `INTERACTION_RESOLVED` | `InteractionCoordinator` | `chat_id`, `kind`, `interaction_id` | User responded to interaction |
+| `command.test` | `COMMAND_TEST` | `Engine` | `chat_id`, `args` | `/test` command received |
+| `test.started` | `TEST_STARTED` | `TestRunnerPlugin` | `chat_id`, `config` | Test workflow started |
+| `command.merge` | `COMMAND_MERGE` | `GitCommandHandler` | `chat_id`, `branch` | `/git merge` command received |
+| `merge.started` | `MERGE_STARTED` | `MergeResolverPlugin` | `chat_id` | Merge conflict resolution started |
 
 ## Plugin Subscription Pattern
 

@@ -41,6 +41,27 @@ if TYPE_CHECKING:
 logger = structlog.get_logger()
 
 
+def switch_log_dir(new_dir: Path, config: TetherConfig) -> None:
+    """Move the rotating file log handler to a new directory."""
+    new_dir.mkdir(parents=True, exist_ok=True)
+    root = logging.getLogger()
+    for handler in root.handlers[:]:
+        if isinstance(handler, logging.handlers.RotatingFileHandler):
+            handler.close()
+            root.removeHandler(handler)
+    file_handler = logging.handlers.RotatingFileHandler(
+        new_dir / "tether.log",
+        maxBytes=config.log_max_bytes,
+        backupCount=config.log_backup_count,
+    )
+    file_handler.setFormatter(
+        structlog.stdlib.ProcessorFormatter(
+            processor=structlog.processors.JSONRenderer(),
+        )
+    )
+    root.addHandler(file_handler)
+
+
 def _resolve_against(path: Path, base: Path) -> Path:
     """Return *path* unchanged if absolute, otherwise resolve it against *base*."""
     return path if path.is_absolute() else base / path
@@ -121,6 +142,7 @@ def build_engine(
 
     audit_is_pinned = config.audit_log_path.is_absolute()
     storage_is_pinned = config.storage_path.is_absolute()
+    log_dir_is_pinned = config.log_dir is not None and config.log_dir.is_absolute()
 
     resolved_audit = _resolve_against(config.audit_log_path, project_base)
     resolved_storage = _resolve_against(config.storage_path, project_base)
@@ -136,6 +158,9 @@ def build_engine(
 
     tether_root = Path(__file__).resolve().parent.parent
     _load_default_mcp_servers(config, tether_root)
+
+    if config.workspace_config_root is None:
+        config.workspace_config_root = tether_root
 
     logger.info(
         "engine_building",
@@ -245,4 +270,6 @@ def build_engine(
         storage_path_pinned=storage_is_pinned,
         audit_path_template=config.audit_log_path,
         storage_path_template=config.storage_path,
+        log_dir_pinned=log_dir_is_pinned,
+        log_dir_template=config.log_dir,
     )

@@ -369,10 +369,10 @@ class TestCleanProceedAutoImplementation:
         assert streaming_msgs == []
 
     @pytest.mark.asyncio
-    async def test_clean_proceed_cancels_agent(
+    async def test_clean_proceed_does_not_cancel_agent(
         self, config, policy_engine, audit_logger, mock_connector
     ):
-        """After clean_edit, the agent cancel is scheduled."""
+        """After clean_edit, no background cancel is scheduled."""
         coordinator = InteractionCoordinator(mock_connector, config)
         cancel_calls: list[str] = []
 
@@ -416,10 +416,135 @@ class TestCleanProceedAutoImplementation:
             interaction_coordinator=coordinator,
         )
         await eng.handle_message("user1", "Make a plan", "chat1")
-        # Let the scheduled cancel task run
-        await asyncio.sleep(0.2)
+        await asyncio.sleep(0.3)
 
-        assert len(cancel_calls) >= 1
+        assert cancel_calls == []
+
+    @pytest.mark.asyncio
+    async def test_clean_proceed_suppresses_plan_agent_response(
+        self, config, policy_engine, audit_logger, mock_connector
+    ):
+        """Plan agent's response text is NOT sent when clean_proceed=True."""
+        coordinator = InteractionCoordinator(mock_connector, config)
+
+        class PlanAgent(BaseAgent):
+            def __init__(self):
+                self.last_can_use_tool = None
+
+            async def execute(self, prompt, session, *, can_use_tool=None, **kwargs):
+                self.last_can_use_tool = can_use_tool
+                if not prompt.startswith("Implement"):
+
+                    async def click_clean():
+                        await asyncio.sleep(0.05)
+                        req = mock_connector.plan_review_requests[0]
+                        await coordinator.resolve_option(
+                            req["interaction_id"], "clean_edit"
+                        )
+
+                    task = asyncio.create_task(click_clean())
+                    await can_use_tool("ExitPlanMode", {}, None)
+                    await task
+                    return AgentResponse(
+                        content="PLAN NARRATION",
+                        session_id="sid-123",
+                        cost=0.01,
+                    )
+                return AgentResponse(
+                    content="Implementation done",
+                    session_id="sid-456",
+                    cost=0.01,
+                )
+
+            async def cancel(self, session_id):
+                pass
+
+            async def shutdown(self):
+                pass
+
+        eng = Engine(
+            connector=mock_connector,
+            agent=PlanAgent(),
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+            interaction_coordinator=coordinator,
+        )
+        await eng.handle_message("user1", "Make a plan", "chat1")
+
+        narration_msgs = [
+            m
+            for m in mock_connector.sent_messages
+            if "PLAN NARRATION" in m.get("text", "")
+        ]
+        assert narration_msgs == []
+
+    @pytest.mark.asyncio
+    async def test_clean_proceed_suppresses_message_out_event(
+        self, config, policy_engine, audit_logger, mock_connector
+    ):
+        """message.out event is NOT emitted for plan agent response on clean_proceed."""
+        from tether.core.events import MESSAGE_OUT
+
+        coordinator = InteractionCoordinator(mock_connector, config)
+        message_out_events: list[dict] = []
+
+        class PlanAgent(BaseAgent):
+            def __init__(self):
+                self.last_can_use_tool = None
+
+            async def execute(self, prompt, session, *, can_use_tool=None, **kwargs):
+                self.last_can_use_tool = can_use_tool
+                if not prompt.startswith("Implement"):
+
+                    async def click_clean():
+                        await asyncio.sleep(0.05)
+                        req = mock_connector.plan_review_requests[0]
+                        await coordinator.resolve_option(
+                            req["interaction_id"], "clean_edit"
+                        )
+
+                    task = asyncio.create_task(click_clean())
+                    await can_use_tool("ExitPlanMode", {}, None)
+                    await task
+                    return AgentResponse(
+                        content="PLAN NARRATION",
+                        session_id="sid-123",
+                        cost=0.01,
+                    )
+                return AgentResponse(
+                    content="Implementation done",
+                    session_id="sid-456",
+                    cost=0.01,
+                )
+
+            async def cancel(self, session_id):
+                pass
+
+            async def shutdown(self):
+                pass
+
+        eng = Engine(
+            connector=mock_connector,
+            agent=PlanAgent(),
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+            interaction_coordinator=coordinator,
+        )
+
+        async def capture_event(event):
+            message_out_events.append(event.data)
+
+        eng.event_bus.subscribe(MESSAGE_OUT, capture_event)
+        await eng.handle_message("user1", "Make a plan", "chat1")
+
+        narration_events = [
+            e for e in message_out_events if "PLAN NARRATION" in e.get("content", "")
+        ]
+        assert narration_events == []
 
 
 class TestEngineApprovalTextRouting:

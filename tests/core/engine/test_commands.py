@@ -1,6 +1,6 @@
-"""Engine tests — /test, /dir, /commit, /plan, /edit commands."""
+"""Engine tests — /test, /dir, /commit, /plan, /edit, /clear commands."""
 
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -8,6 +8,8 @@ from tests.core.engine.conftest import FakeAgent, _make_git_handler_mock
 from tether.core.config import TetherConfig
 from tether.core.engine import Engine
 from tether.core.events import EventBus
+from tether.core.interactions import InteractionCoordinator, PendingInteraction
+from tether.core.safety.approvals import ApprovalCoordinator, PendingApproval
 from tether.core.session import SessionManager
 
 
@@ -456,8 +458,9 @@ class TestTestCommand:
 
         await eng.handle_command("user1", "test", "verify login", "chat1")
 
-        assert len(mock_connector.sent_messages) == 1
-        assert "verify login" in mock_connector.sent_messages[0]["text"]
+        assert len(mock_connector.sent_messages) == 2
+        assert "Test mode activated" in mock_connector.sent_messages[0]["text"]
+        assert "verify login" in mock_connector.sent_messages[1]["text"]
 
     @pytest.mark.asyncio
     async def test_test_command_routes_default_prompt(
@@ -469,8 +472,9 @@ class TestTestCommand:
 
         await eng.handle_command("user1", "test", "", "chat1")
 
-        assert len(mock_connector.sent_messages) == 1
-        assert "comprehensive tests" in mock_connector.sent_messages[0]["text"].lower()
+        assert len(mock_connector.sent_messages) == 2
+        assert "Test mode activated" in mock_connector.sent_messages[0]["text"]
+        assert "comprehensive tests" in mock_connector.sent_messages[1]["text"].lower()
 
     @pytest.mark.asyncio
     async def test_test_command_returns_empty(
@@ -505,6 +509,75 @@ class TestTestCommand:
         assert session.mode == "default"
         assert session.mode_instruction is None
         assert "chat1" not in eng._gatekeeper._auto_approved_tools
+
+    @pytest.mark.asyncio
+    async def test_no_plugin_sends_no_messages(
+        self, config, audit_logger, policy_engine, mock_connector
+    ):
+        agent = FakeAgent()
+        eng = Engine(
+            connector=mock_connector,
+            agent=agent,
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+            event_bus=EventBus(),
+        )
+
+        result = await eng.handle_command("user1", "test", "verify login", "chat1")
+
+        assert result == ""
+        assert len(mock_connector.sent_messages) == 0
+
+    @pytest.mark.asyncio
+    async def test_auto_approves_browser_readonly_tools(
+        self, config, audit_logger, policy_engine, mock_connector
+    ):
+        from tether.plugins.builtin.browser_tools import BROWSER_READONLY_TOOLS
+
+        eng, _ = await self._make_engine_with_plugin(
+            config, audit_logger, policy_engine, mock_connector
+        )
+
+        await eng.handle_command("user1", "test", "", "chat1")
+
+        auto_tools = eng._gatekeeper._auto_approved_tools.get("chat1", set())
+        for tool in BROWSER_READONLY_TOOLS:
+            assert tool in auto_tools
+
+    @pytest.mark.asyncio
+    async def test_auto_approves_write_edit(
+        self, config, audit_logger, policy_engine, mock_connector
+    ):
+        eng, _ = await self._make_engine_with_plugin(
+            config, audit_logger, policy_engine, mock_connector
+        )
+
+        await eng.handle_command("user1", "test", "", "chat1")
+
+        auto_tools = eng._gatekeeper._auto_approved_tools.get("chat1", set())
+        assert "Write" in auto_tools
+        assert "Edit" in auto_tools
+
+    @pytest.mark.asyncio
+    async def test_no_plugin_no_transient_sent(
+        self, config, audit_logger, policy_engine, mock_connector
+    ):
+        agent = FakeAgent()
+        eng = Engine(
+            connector=mock_connector,
+            agent=agent,
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+            event_bus=EventBus(),
+        )
+
+        await eng.handle_command("user1", "test", "", "chat1")
+
+        assert len(mock_connector.scheduled_cleanups) == 0
 
 
 class TestDirCommand:
@@ -1158,6 +1231,52 @@ class TestSmartCommit:
         assert len(agent_msgs) >= 1
 
 
+class TestGitCallbackRouting:
+    @pytest.mark.asyncio
+    async def test_git_callback_commit_prompt_routes_to_smart_commit(
+        self, config, audit_logger, policy_engine, mock_connector
+    ):
+        agent = FakeAgent()
+        git_handler = _make_git_handler_mock()
+        eng = Engine(
+            connector=mock_connector,
+            agent=agent,
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+            git_handler=git_handler,
+        )
+
+        await eng._handle_git_callback("user1", "chat1", "commit_prompt", "")
+
+        auto_tools = eng._gatekeeper._auto_approved_tools.get("chat1", set())
+        assert "Bash::git diff" in auto_tools
+        assert "Bash::git commit" in auto_tools
+        git_handler.handle_callback.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_git_callback_other_actions_route_to_handler(
+        self, config, audit_logger, policy_engine, mock_connector
+    ):
+        agent = FakeAgent()
+        git_handler = _make_git_handler_mock()
+        git_handler.pop_pending_merge_event = MagicMock(return_value=None)
+        eng = Engine(
+            connector=mock_connector,
+            agent=agent,
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+            git_handler=git_handler,
+        )
+
+        await eng._handle_git_callback("user1", "chat1", "status", "")
+
+        git_handler.handle_callback.assert_awaited_once()
+
+
 class TestPlanWithArgs:
     @pytest.mark.asyncio
     async def test_plan_with_args_forwards_to_agent(
@@ -1341,3 +1460,175 @@ class TestEditWithArgs:
         result = await eng.handle_command("user1", "edit", "   ", "chat1")
 
         assert "accept edits" in result.lower() or "auto-approve" in result.lower()
+
+    # --- /clear cancellation tests ---
+
+    @pytest.mark.asyncio
+    async def test_clear_cancels_pending_approvals(
+        self, config, audit_logger, policy_engine, mock_connector
+    ):
+        agent = FakeAgent()
+        ac = ApprovalCoordinator(mock_connector, config)
+        eng = Engine(
+            connector=mock_connector,
+            agent=agent,
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+            approval_coordinator=ac,
+        )
+
+        pending = PendingApproval(
+            approval_id="ap-1",
+            chat_id="chat1",
+            tool_name="Bash",
+            tool_input={"command": "rm -rf /"},
+        )
+        ac.pending["ap-1"] = pending
+
+        result = await eng.handle_command("user1", "clear", "", "chat1")
+
+        assert "cleared" in result.lower()
+        assert pending.decision is False
+        assert pending.event.is_set()
+
+    @pytest.mark.asyncio
+    async def test_clear_cancels_pending_interactions(
+        self, config, audit_logger, policy_engine, mock_connector, event_bus
+    ):
+        agent = FakeAgent()
+        ic = InteractionCoordinator(mock_connector, config, event_bus)
+        eng = Engine(
+            connector=mock_connector,
+            agent=agent,
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+            interaction_coordinator=ic,
+        )
+
+        pending = PendingInteraction(
+            interaction_id="int-1", chat_id="chat1", kind="question"
+        )
+        ic.pending["int-1"] = pending
+        ic._chat_index["chat1"] = "int-1"
+
+        await eng.handle_command("user1", "clear", "", "chat1")
+
+        assert "int-1" not in ic.pending
+        assert "chat1" not in ic._chat_index
+        assert pending.event.is_set()
+
+    @pytest.mark.asyncio
+    async def test_clear_cancels_running_agent(
+        self, config, audit_logger, policy_engine, mock_connector
+    ):
+        agent = AsyncMock()
+        agent.cancel = AsyncMock()
+        eng = Engine(
+            connector=mock_connector,
+            agent=agent,
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+        )
+
+        eng._executing_sessions["chat1"] = "sess-42"
+
+        await eng.handle_command("user1", "clear", "", "chat1")
+
+        agent.cancel.assert_awaited_once_with("sess-42")
+
+    @pytest.mark.asyncio
+    async def test_clear_cleans_up_interrupt_ui(
+        self, config, audit_logger, policy_engine, mock_connector
+    ):
+        agent = FakeAgent()
+        eng = Engine(
+            connector=mock_connector,
+            agent=agent,
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+        )
+
+        eng._pending_interrupts["chat1"] = "irpt-1"
+        eng._interrupt_to_chat["irpt-1"] = "chat1"
+        eng._interrupt_message_ids["chat1"] = "msg-99"
+
+        await eng.handle_command("user1", "clear", "", "chat1")
+
+        assert "chat1" not in eng._pending_interrupts
+        assert "irpt-1" not in eng._interrupt_to_chat
+        assert "chat1" not in eng._interrupt_message_ids
+        assert any(
+            d["chat_id"] == "chat1" and d["message_id"] == "msg-99"
+            for d in mock_connector.deleted_messages
+        )
+
+    @pytest.mark.asyncio
+    async def test_clear_does_not_affect_other_chats(
+        self, config, audit_logger, policy_engine, mock_connector, event_bus
+    ):
+        agent = FakeAgent()
+        ac = ApprovalCoordinator(mock_connector, config)
+        ic = InteractionCoordinator(mock_connector, config, event_bus)
+        eng = Engine(
+            connector=mock_connector,
+            agent=agent,
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+            approval_coordinator=ac,
+            interaction_coordinator=ic,
+        )
+
+        other_approval = PendingApproval(
+            approval_id="ap-other",
+            chat_id="chat2",
+            tool_name="Bash",
+            tool_input={"command": "ls"},
+        )
+        ac.pending["ap-other"] = other_approval
+
+        other_interaction = PendingInteraction(
+            interaction_id="int-other", chat_id="chat2", kind="question"
+        )
+        ic.pending["int-other"] = other_interaction
+        ic._chat_index["chat2"] = "int-other"
+
+        eng._pending_interrupts["chat2"] = "irpt-2"
+        eng._interrupt_to_chat["irpt-2"] = "chat2"
+
+        await eng.handle_command("user1", "clear", "", "chat1")
+
+        assert other_approval.decision is None
+        assert not other_approval.event.is_set()
+        assert "int-other" in ic.pending
+        assert "chat2" in ic._chat_index
+        assert "chat2" in eng._pending_interrupts
+
+    @pytest.mark.asyncio
+    async def test_clear_without_coordinators(
+        self, config, audit_logger, policy_engine, mock_connector
+    ):
+        agent = FakeAgent()
+        eng = Engine(
+            connector=mock_connector,
+            agent=agent,
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+        )
+        assert eng.approval_coordinator is None
+        assert eng.interaction_coordinator is None
+
+        result = await eng.handle_command("user1", "clear", "", "chat1")
+
+        assert "cleared" in result.lower()

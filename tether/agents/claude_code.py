@@ -85,6 +85,19 @@ _AUTO_MODE_INSTRUCTION = (
 )
 
 
+def _build_workspace_context(name: str, directories: list[str], cwd: str) -> str:
+    lines = [f"WORKSPACE: '{name}' — you are working across multiple repositories:"]
+    for d in directories:
+        short = Path(d).name
+        marker = " (primary, cwd)" if d == cwd else ""
+        lines.append(f"  - {short}: {d}{marker}")
+    lines.append(
+        "When the task involves changes across repos, work across all relevant "
+        "directories. Use absolute paths when working outside the cwd."
+    )
+    return "\n".join(lines)
+
+
 def _friendly_error(raw: str) -> str:
     lowered = raw.lower()
     for pattern, message in _ERROR_MESSAGES.items():
@@ -164,6 +177,12 @@ def _describe_tool(name: str, tool_input: dict[str, Any]) -> str:
         return f"#{tool_input.get('taskId', '')}"
     if name == "TaskList":
         return "all tasks"
+    if name == "ExitPlanMode":
+        return "Presenting plan for review"
+    if name == "EnterPlanMode":
+        return "Entering plan mode"
+    if name == "AskUserQuestion":
+        return "Asking a question"
     # Unknown tool — show first string value
     for v in tool_input.values():
         if isinstance(v, str) and v:
@@ -261,6 +280,13 @@ class ClaudeCodeAgent(BaseAgent):
             system_prompt = _prepend_instruction(
                 session.mode_instruction, system_prompt
             )
+        if session.workspace_directories:
+            ws_ctx = _build_workspace_context(
+                session.workspace_name or "workspace",
+                session.workspace_directories,
+                session.working_directory,
+            )
+            system_prompt = _prepend_instruction(ws_ctx, system_prompt)
         if system_prompt:
             opts.system_prompt = system_prompt
         if self._config.allowed_tools:
@@ -271,9 +297,24 @@ class ClaudeCodeAgent(BaseAgent):
             opts.resume = session.claude_session_id
 
         local_servers = self._read_local_mcp_servers(session.working_directory)
+
+        workspace_servers: dict[str, Any] = {}
+        for ws_dir in session.workspace_directories:
+            if ws_dir != session.working_directory:
+                ws_servers = self._read_local_mcp_servers(ws_dir)
+                for k, v in ws_servers.items():
+                    if k in workspace_servers:
+                        logger.warning(
+                            "workspace_mcp_server_collision",
+                            server_name=k,
+                            skipped_dir=ws_dir,
+                        )
+                    else:
+                        workspace_servers[k] = v
+
         tether_servers = self._config.mcp_servers
-        if local_servers or tether_servers:
-            opts.mcp_servers = {**local_servers, **tether_servers}
+        if workspace_servers or local_servers or tether_servers:
+            opts.mcp_servers = {**workspace_servers, **local_servers, **tether_servers}
             logger.debug(
                 "agent_mcp_servers",
                 session_id=session.session_id,
@@ -343,105 +384,117 @@ class ClaudeCodeAgent(BaseAgent):
             tools_used: list[str] = []
             text_parts: list[str] = []
 
-            async with _SafeSDKClient(options) as client:
-                self._active_clients[session.session_id] = client
+            try:
+                async with _SafeSDKClient(options) as client:
+                    self._active_clients[session.session_id] = client
+                    try:
+                        await client.query(prompt)
+                        async for message in client.receive_response():
+                            if isinstance(message, AssistantMessage):
+                                await self._process_content_blocks(
+                                    message.content,
+                                    text_parts,
+                                    tools_used,
+                                    on_text_chunk,
+                                    on_tool_activity,
+                                )
 
-                try:
-                    await client.query(prompt)
-                    async for message in client.receive_response():
-                        if isinstance(message, AssistantMessage):
-                            await self._process_content_blocks(
-                                message.content,
-                                text_parts,
-                                tools_used,
-                                on_text_chunk,
-                                on_tool_activity,
-                            )
+                            elif isinstance(message, SystemMessage):
+                                sid = message.data.get("session_id")
+                                if sid and isinstance(sid, str):
+                                    session.claude_session_id = sid
 
-                        elif isinstance(message, SystemMessage):
-                            sid = message.data.get("session_id")
-                            if sid and isinstance(sid, str):
-                                session.claude_session_id = sid
+                            elif isinstance(message, ResultMessage):
+                                duration = int((time.monotonic() - start) * 1000)
 
-                        elif isinstance(message, ResultMessage):
-                            duration = int((time.monotonic() - start) * 1000)
+                                if message.num_turns == 0 and options.resume:
+                                    logger.info(
+                                        "resume_zero_turns_retry",
+                                        session=session.session_id,
+                                    )
+                                    options.resume = None
+                                    session.claude_session_id = None
+                                    break
 
-                            if message.num_turns == 0 and options.resume:
+                                content = message.result or "\n".join(text_parts)
+
+                                if message.is_error and _is_retryable_error(content):
+                                    logger.warning(
+                                        "retryable_api_error",
+                                        session_id=session.session_id,
+                                        error_preview=content[
+                                            :_ERROR_TRUNCATION_LENGTH
+                                        ],
+                                    )
+                                    last_error = AgentResponse(
+                                        content=content,
+                                        session_id=message.session_id,
+                                        cost=message.total_cost_usd or 0.0,
+                                        duration_ms=duration,
+                                        num_turns=message.num_turns,
+                                        tools_used=tools_used,
+                                        is_error=True,
+                                    )
+                                    delay = _backoff_delay(_attempt)
+                                    logger.info(
+                                        "agent_retry_backoff",
+                                        attempt=_attempt + 1,
+                                        delay=delay,
+                                        session_id=session.session_id,
+                                    )
+                                    await asyncio.sleep(delay)
+                                    break
                                 logger.info(
-                                    "resume_zero_turns_retry",
-                                    session=session.session_id,
-                                )
-                                options.resume = None
-                                session.claude_session_id = None
-                                break
-
-                            content = message.result or "\n".join(text_parts)
-
-                            if message.is_error and _is_retryable_error(content):
-                                logger.warning(
-                                    "retryable_api_error",
+                                    "agent_execute_completed",
                                     session_id=session.session_id,
-                                    error_preview=content[:_ERROR_TRUNCATION_LENGTH],
+                                    duration_ms=duration,
+                                    num_turns=message.num_turns,
+                                    cost_usd=message.total_cost_usd or 0.0,
+                                    tools_used_count=len(tools_used),
+                                    content_length=len(content),
+                                    is_error=message.is_error,
                                 )
-                                last_error = AgentResponse(
+                                return AgentResponse(
                                     content=content,
                                     session_id=message.session_id,
                                     cost=message.total_cost_usd or 0.0,
                                     duration_ms=duration,
                                     num_turns=message.num_turns,
                                     tools_used=tools_used,
-                                    is_error=True,
+                                    is_error=message.is_error,
                                 )
-                                delay = _backoff_delay(_attempt)
-                                logger.info(
-                                    "agent_retry_backoff",
-                                    attempt=_attempt + 1,
-                                    delay=delay,
-                                    session_id=session.session_id,
-                                )
-                                await asyncio.sleep(delay)
-                                break
-                            logger.info(
-                                "agent_execute_completed",
-                                session_id=session.session_id,
-                                duration_ms=duration,
-                                num_turns=message.num_turns,
-                                cost_usd=message.total_cost_usd or 0.0,
-                                tools_used_count=len(tools_used),
-                                content_length=len(content),
-                                is_error=message.is_error,
-                            )
-                            return AgentResponse(
-                                content=content,
-                                session_id=message.session_id,
-                                cost=message.total_cost_usd or 0.0,
-                                duration_ms=duration,
-                                num_turns=message.num_turns,
-                                tools_used=tools_used,
-                                is_error=message.is_error,
-                            )
-                except Exception as exc:
-                    if _is_retryable_error(str(exc)):
-                        logger.warning(
-                            "retryable_stream_error",
-                            session_id=session.session_id,
-                            error_preview=str(exc)[:_ERROR_TRUNCATION_LENGTH],
-                            attempt=_attempt + 1,
-                        )
-                        last_error = AgentResponse(
-                            content=str(exc),
-                            session_id=session.claude_session_id,
-                            cost=0.0,
-                            duration_ms=int((time.monotonic() - start) * 1000),
-                            num_turns=0,
-                            tools_used=tools_used,
-                            is_error=True,
-                        )
-                        await asyncio.sleep(_backoff_delay(_attempt))
-                        continue
-                    raise
-                finally:
-                    self._active_clients.pop(session.session_id, None)
+                    finally:
+                        self._active_clients.pop(session.session_id, None)
+            except Exception as exc:
+                if options.resume:
+                    logger.warning(
+                        "resume_failed_retry_fresh",
+                        session_id=session.session_id,
+                        error_preview=str(exc)[:_ERROR_TRUNCATION_LENGTH],
+                    )
+                    options.resume = None
+                    session.claude_session_id = None
+                    continue
+
+                if _is_retryable_error(str(exc)):
+                    logger.warning(
+                        "retryable_stream_error",
+                        session_id=session.session_id,
+                        error_preview=str(exc)[:_ERROR_TRUNCATION_LENGTH],
+                        attempt=_attempt + 1,
+                    )
+                    last_error = AgentResponse(
+                        content=str(exc),
+                        session_id=session.claude_session_id,
+                        cost=0.0,
+                        duration_ms=int((time.monotonic() - start) * 1000),
+                        num_turns=0,
+                        tools_used=tools_used,
+                        is_error=True,
+                    )
+                    await asyncio.sleep(_backoff_delay(_attempt))
+                    continue
+                raise
 
         if last_error:
             return last_error

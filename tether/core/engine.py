@@ -28,6 +28,7 @@ from tether.core.safety.audit import AuditLogger
 from tether.core.safety.gatekeeper import ToolGatekeeper
 from tether.core.safety.policy import PolicyEngine
 from tether.core.safety.sandbox import SandboxEnforcer
+from tether.core.workspace import load_workspaces
 from tether.exceptions import AgentError
 from tether.middleware.base import MessageContext
 from tether.storage.base import MessageStore
@@ -243,6 +244,8 @@ class Engine:
         storage_path_pinned: bool = True,
         audit_path_template: Path | None = None,
         storage_path_template: Path | None = None,
+        log_dir_pinned: bool = True,
+        log_dir_template: Path | None = None,
     ) -> None:
         self.connector = connector
         self.agent = agent
@@ -254,6 +257,8 @@ class Engine:
         )
         self._dir_names = build_directory_names(config.approved_directories)
         self._default_directory = str(config.approved_directories[0])
+        ws_root = config.workspace_config_root or config.approved_directories[0]
+        self._workspaces = load_workspaces(ws_root, config.approved_directories)
         self.audit = audit or AuditLogger(config.audit_log_path)
         self.approval_coordinator = approval_coordinator
         self.interaction_coordinator = interaction_coordinator
@@ -272,6 +277,8 @@ class Engine:
         self._storage_path_pinned = storage_path_pinned
         self._audit_path_template = audit_path_template or Path(".tether/audit.jsonl")
         self._storage_path_template = storage_path_template or Path(".tether/tether.db")
+        self._log_dir_pinned = log_dir_pinned
+        self._log_dir_template = log_dir_template or Path(".tether/logs")
 
         self._gatekeeper = ToolGatekeeper(
             sandbox=self.sandbox,
@@ -320,6 +327,11 @@ class Engine:
             user_id, chat_id, self._default_directory
         )
         await self._realign_paths_for_session(session)
+
+        if action == "commit_prompt":
+            await self._handle_smart_commit(session, chat_id, user_id)
+            return
+
         await self._git_handler.handle_callback(
             user_id, chat_id, action, payload, session
         )
@@ -543,6 +555,7 @@ class Engine:
             on_tool_activity = responder.on_activity
 
         can_use_tool, tool_state = self._build_can_use_tool(session, chat_id, responder)
+        pre_exec_claude_id = session.claude_session_id
 
         try:
             response = await self._execute_agent_with_timeout(
@@ -571,12 +584,9 @@ class Engine:
                     chat_id,
                 )
 
-            await self.session_manager.update_from_result(
-                session,
-                claude_session_id=response.session_id,
-                cost=response.cost,
-            )
-
+            # Check interrupt BEFORE persisting session — /clear may have
+            # already reset the session, and writing the old agent's
+            # session_id back would corrupt the fresh session state.
             if chat_id in self._interrupted_chats:
                 self._interrupted_chats.discard(chat_id)
                 if responder:
@@ -602,6 +612,12 @@ class Engine:
                 )
                 return ""
 
+            await self.session_manager.update_from_result(
+                session,
+                claude_session_id=response.session_id,
+                cost=response.cost,
+            )
+
             duration_ms = round((time.monotonic() - start) * 1000)
             await self._log_message(
                 user_id=user_id,
@@ -613,22 +629,23 @@ class Engine:
                 session_id=response.session_id,
             )
 
-            streamed = False
-            if responder:
-                try:
-                    streamed = await responder.finalize(response.content)
-                except Exception:
-                    logger.exception("streaming_finalize_failed")
+            if not tool_state.clean_proceed:
+                streamed = False
+                if responder:
+                    try:
+                        streamed = await responder.finalize(response.content)
+                    except Exception:
+                        logger.exception("streaming_finalize_failed")
 
-            if not streamed and self.connector:
-                await self.connector.send_message(chat_id, response.content)
+                if not streamed and self.connector:
+                    await self.connector.send_message(chat_id, response.content)
 
-            await self.event_bus.emit(
-                Event(
-                    name=MESSAGE_OUT,
-                    data={"chat_id": chat_id, "content": response.content},
+                await self.event_bus.emit(
+                    Event(
+                        name=MESSAGE_OUT,
+                        data={"chat_id": chat_id, "content": response.content},
+                    )
                 )
-            )
 
             logger.info(
                 "request_completed",
@@ -728,9 +745,20 @@ class Engine:
                 duration_ms=duration_ms,
             )
             if self.approval_coordinator:
-                self.approval_coordinator.cancel_pending(chat_id)
+                await self.approval_coordinator.cancel_pending(chat_id)
             if self.interaction_coordinator:
                 self.interaction_coordinator.cancel_pending(chat_id)
+            if (
+                session.claude_session_id
+                and session.claude_session_id == pre_exec_claude_id
+            ):
+                session.claude_session_id = None
+                logger.info(
+                    "stale_session_cleared_on_error",
+                    session_id=session.session_id,
+                    stale_claude_id=pre_exec_claude_id,
+                )
+            await self.session_manager.save(session)
             error_msg = f"Error: {e}"
             if self.connector:
                 await self.connector.send_message(chat_id, error_msg)
@@ -745,6 +773,7 @@ class Engine:
         on_tool_activity: Any,
         chat_id: str,
     ) -> AgentResponse:
+        pre_exec_claude_id = session.claude_session_id
         try:
             return await asyncio.wait_for(
                 self.agent.execute(
@@ -763,7 +792,10 @@ class Engine:
                 timeout=self.config.agent_timeout_seconds,
             )
             await self.agent.cancel(session.session_id)
-            if session.claude_session_id:
+            if (
+                session.claude_session_id
+                and session.claude_session_id != pre_exec_claude_id
+            ):
                 await self.session_manager.update_from_result(
                     session,
                     claude_session_id=session.claude_session_id,
@@ -773,6 +805,13 @@ class Engine:
                     "session_persisted_on_timeout",
                     session_id=session.session_id,
                     claude_session_id=session.claude_session_id,
+                )
+            elif pre_exec_claude_id:
+                session.claude_session_id = None
+                logger.info(
+                    "stale_session_cleared_on_timeout",
+                    session_id=session.session_id,
+                    stale_claude_id=pre_exec_claude_id,
                 )
             raise AgentError(
                 f"Agent timed out after {self.config.agent_timeout_seconds // 60} minutes. "
@@ -873,6 +912,9 @@ class Engine:
         if command == "dir":
             return await self._handle_dir_command(session, args, chat_id)
 
+        if command in ("workspace", "ws"):
+            return await self._handle_workspace_command(session, args, chat_id)
+
         if command == "plan":
             old_mode = session.mode
             session.mode = "plan"
@@ -908,6 +950,9 @@ class Engine:
             await self.event_bus.emit(event)
             prompt = event.data.get("prompt", "")
             if prompt:
+                await self._send_transient(
+                    chat_id, "Test mode activated. Running test workflow..."
+                )
                 await self.handle_message(user_id, prompt, chat_id)
             return ""
 
@@ -950,6 +995,22 @@ class Engine:
             return "Default mode. All file writes require per-call approval."
 
         if command == "clear":
+            if self.approval_coordinator:
+                await self.approval_coordinator.cancel_pending(chat_id)
+            if self.interaction_coordinator:
+                self.interaction_coordinator.cancel_pending(chat_id)
+            session_id = self._executing_sessions.get(chat_id)
+            if session_id:
+                # Mark as interrupted BEFORE cancelling so _execute_turn skips
+                # update_from_result and doesn't overwrite the reset session.
+                self._interrupted_chats.add(chat_id)
+                await self.agent.cancel(session_id)
+            old_iid = self._pending_interrupts.pop(chat_id, None)
+            if old_iid:
+                self._interrupt_to_chat.pop(old_iid, None)
+                mid = self._interrupt_message_ids.pop(chat_id, None)
+                if mid and self.connector:
+                    await self.connector.delete_message(chat_id, mid)
             await self.session_manager.reset(user_id, chat_id)
             self._gatekeeper.disable_auto_approve(chat_id)
             self._pending_messages.pop(chat_id, None)
@@ -967,13 +1028,20 @@ class Engine:
             else:
                 auto_str = "off"
             active_name = self._active_dir_name(session)
-            return (
-                f"Mode: {mode}\n"
-                f"Directory: {active_name}\n"
-                f"Messages: {session.message_count}\n"
-                f"Total cost: {cost}\n"
-                f"Auto-approve: {auto_str}"
+            lines = [
+                f"Mode: {mode}",
+                f"Directory: {active_name}",
+            ]
+            if session.workspace_name:
+                lines.append(f"Workspace: {session.workspace_name}")
+            lines.extend(
+                [
+                    f"Messages: {session.message_count}",
+                    f"Total cost: {cost}",
+                    f"Auto-approve: {auto_str}",
+                ]
             )
+            return "\n".join(lines)
 
         logger.warning(
             "unknown_command", user_id=user_id, chat_id=chat_id, command=command
@@ -992,18 +1060,39 @@ class Engine:
         if wd.is_dir():
             ensure_tether_dir(wd)
 
-    async def _realign_paths_for_session(self, session: Session) -> None:
-        """Switch audit/message paths to match the restored session's directory."""
-        if session.working_directory == self._default_directory:
-            return
-        target = Path(session.working_directory)
-        if not target.is_dir():
-            return
+    async def _switch_paths(self, target: Path) -> None:
+        """Switch audit, message-store, and log paths to a new directory."""
         ensure_tether_dir(target)
         if not self._audit_path_pinned:
             self.audit.switch_path(target / self._audit_path_template)
         if not self._storage_path_pinned and self._message_store is not None:
             await self._message_store.switch_db(target / self._storage_path_template)
+        if not self._log_dir_pinned:
+            from tether.app import switch_log_dir
+
+            switch_log_dir(target / self._log_dir_template, self.config)
+
+    async def _realign_paths_for_session(self, session: Session) -> None:
+        """Switch audit/message paths to match the restored session's directory.
+
+        workspace_directories is NOT persisted in SQLite (only workspace_name
+        is stored). On restore we repopulate from the live workspace config so
+        the session always reflects the current .tether/workspaces.yaml state.
+        If the workspace was removed between restarts, the name is cleared.
+        """
+        if session.workspace_name and not session.workspace_directories:
+            ws = self._workspaces.get(session.workspace_name)
+            if ws:
+                session.workspace_directories = [str(d) for d in ws.directories]
+            else:
+                session.workspace_name = None
+
+        if session.working_directory == self._default_directory:
+            return
+        target = Path(session.working_directory)
+        if not target.is_dir():
+            return
+        await self._switch_paths(target)
 
     async def _handle_dir_command(
         self, session: Session, args: str, chat_id: str
@@ -1042,27 +1131,94 @@ class Engine:
 
         session.working_directory = str(target_path)
         session.claude_session_id = None
+        old_workspace = session.workspace_name
+        session.workspace_name = None
+        session.workspace_directories = []
         self._gatekeeper.disable_auto_approve(chat_id)
 
         # Save session to the stable session store BEFORE switching message DB
         await self.session_manager.save(session)
+        await self._switch_paths(target_path)
 
-        ensure_tether_dir(target_path)
-
-        if not self._audit_path_pinned:
-            self.audit.switch_path(target_path / self._audit_path_template)
-
-        if not self._storage_path_pinned and self._message_store is not None:
-            await self._message_store.switch_db(
-                target_path / self._storage_path_template
-            )
         logger.info(
             "directory_switched",
             chat_id=chat_id,
             directory=str(target_path),
             name=target,
         )
-        return f"Switched to {target} ({target_path})"
+        suffix = f" (workspace '{old_workspace}' deactivated)" if old_workspace else ""
+        return f"Switched to {target} ({target_path}){suffix}"
+
+    async def _handle_workspace_command(
+        self, session: Session, args: str, chat_id: str
+    ) -> str:
+        if not self._workspaces:
+            return "No workspaces defined. Add .tether/workspaces.yaml to configure."
+
+        target = args.strip()
+
+        if not target:
+            tree = ["Workspaces:"]
+            for name, ws in self._workspaces.items():
+                marker = " \u2705" if name == session.workspace_name else ""
+                tree.append("")
+                tree.append(f"{name}{marker}")
+                for i, d in enumerate(ws.directories):
+                    prefix = "\u2514" if i == len(ws.directories) - 1 else "\u251c"
+                    tree.append(f"{prefix} {d.name}")
+            text = "\n".join(tree)
+
+            if self.connector:
+                buttons: list[list[InlineButton]] = []
+                for name in self._workspaces:
+                    marker = " \u2705" if name == session.workspace_name else ""
+                    buttons.append(
+                        [
+                            InlineButton(
+                                text=f"{name}{marker}",
+                                callback_data=f"ws:{name}",
+                            )
+                        ]
+                    )
+                await self.connector.send_message(chat_id, text, buttons=buttons)
+                return ""
+            return text
+
+        if target == "exit":
+            if not session.workspace_name:
+                return "No workspace active."
+            old_name = session.workspace_name
+            session.workspace_name = None
+            session.workspace_directories = []
+            await self.session_manager.save(session)
+            logger.info("workspace_deactivated", chat_id=chat_id, workspace=old_name)
+            return f"Exited workspace '{old_name}'. Back to single-directory mode."
+
+        if target not in self._workspaces:
+            available = ", ".join(self._workspaces)
+            return f"Unknown workspace: {target}\nAvailable: {available}"
+
+        ws = self._workspaces[target]
+        primary = ws.primary_directory
+
+        session.workspace_name = ws.name
+        session.workspace_directories = [str(d) for d in ws.directories]
+        session.working_directory = str(primary)
+        session.claude_session_id = None
+        self._gatekeeper.disable_auto_approve(chat_id)
+
+        await self.session_manager.save(session)
+        await self._switch_paths(primary)
+
+        dir_list = ", ".join(d.name for d in ws.directories)
+        logger.info(
+            "workspace_activated",
+            chat_id=chat_id,
+            workspace=ws.name,
+            primary=str(primary),
+            directories=[str(d) for d in ws.directories],
+        )
+        return f"Workspace '{ws.name}' active \u2014 {dir_list}\nPrimary: {primary}"
 
     async def _send_transient(self, chat_id: str, text: str) -> None:
         """Send a status message that auto-deletes after a short delay."""
@@ -1279,16 +1435,6 @@ class Engine:
                         await responder.delete_all_messages()
                         responder.reset()
                         await responder.deactivate()
-                    if result.clear_context:
-                        _bg: set[asyncio.Task[None]] = set()
-
-                        async def _cancel_agent() -> None:
-                            await asyncio.sleep(0.1)
-                            await self.agent.cancel(session.session_id)
-
-                        t = asyncio.create_task(_cancel_agent())
-                        _bg.add(t)
-                        t.add_done_callback(_bg.discard)
                     return result.permission
                 return result
 

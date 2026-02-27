@@ -61,15 +61,19 @@ sequenceDiagram
 
 `handle_message_ctx(ctx: MessageContext)` is an adapter that unpacks a `MessageContext` and delegates to `handle_message()`. This allows the middleware chain to work with its `MessageContext` model while the engine keeps its simpler signature.
 
-## Plan Mode
+## Agent Modes
 
-Tether supports two agent modes per session: **plan** and **auto**.
+Tether supports three agent modes per session: **default**, **plan**, and **auto** (plus special **test** and **merge** modes activated by plugins).
 
-In **plan** mode, the agent receives a system prompt instruction (`_PLAN_MODE_INSTRUCTION`) that tells it to explore and plan before implementing. When the agent calls `ExitPlanMode`, the user reviews the plan and decides how to proceed.
+- **default** — balanced mode; the agent decides whether to plan or implement directly
+- **plan** — the agent receives a system prompt instruction (`_PLAN_MODE_INSTRUCTION`) that tells it to explore and plan before implementing. When the agent calls `ExitPlanMode`, the user reviews the plan and decides how to proceed.
+- **auto** — the agent implements directly, with auto-approve enabled for Write and Edit
 
 ```mermaid
 stateDiagram-v2
-    [*] --> plan: Session created (default)
+    [*] --> default: Session created
+    default --> plan: /plan command
+    default --> auto: /edit command
     plan --> plan_review: Agent calls ExitPlanMode
     plan_review --> auto: User approves (proceed/clean_proceed)
     plan_review --> plan: User selects "adjust"
@@ -77,8 +81,12 @@ stateDiagram-v2
     auto --> plan: /plan command
     plan --> auto: /edit command
     auto --> auto: /edit command
+    plan --> default: /default command
+    auto --> default: /default command
+    default --> default: /default command
     plan --> [*]: /clear command
     auto --> [*]: /clear command
+    default --> [*]: /clear command
 ```
 
 ### Plan Review Flow
@@ -105,12 +113,16 @@ class _ToolCallbackState:
 
 ## Slash Commands
 
-The engine handles four commands via `handle_command()`:
+The engine handles eight commands via `handle_command()`:
 
 | Command | Effect |
 |---|---|
-| `/plan` | Sets `session.mode = "plan"`, disables auto-approve |
-| `/edit` | Sets `session.mode = "auto"`, enables auto-approve for Write and Edit |
+| `/dir` | Switch working directory with inline keyboard buttons |
+| `/plan [text]` | Sets `session.mode = "plan"`, disables auto-approve. With text, starts agent immediately. |
+| `/edit [text]` | Sets `session.mode = "auto"`, enables auto-approve for Write and Edit. With text, starts agent immediately. |
+| `/default` | Sets `session.mode = "default"`, disables auto-approve |
+| `/git <subcommand>` | Routes to `GitCommandHandler` for git operations with inline action buttons |
+| `/test [flags]` | Emits `COMMAND_TEST` event, activating `TestRunnerPlugin`'s 9-phase test workflow |
 | `/clear` | Deactivates session (forces new session next message), disables auto-approve |
 | `/status` | Returns current mode, message count, total cost, auto-approve status |
 

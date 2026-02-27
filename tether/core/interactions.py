@@ -70,7 +70,7 @@ class InteractionCoordinator:
         logger.info("question_started", chat_id=chat_id, question_count=len(questions))
 
         answers: dict[str, str] = {}
-        timeout = self.config.approval_timeout_seconds
+        timeout = self.config.interaction_timeout_seconds
 
         for q in questions:
             question_text = q.get("question", "")
@@ -177,7 +177,7 @@ class InteractionCoordinator:
         try:
             await asyncio.wait_for(
                 pending.event.wait(),
-                timeout=self.config.approval_timeout_seconds,
+                timeout=self.config.interaction_timeout_seconds,
             )
         except TimeoutError:
             logger.warning(

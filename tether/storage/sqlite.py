@@ -60,6 +60,15 @@ class SqliteSessionStore:
             await self._db.execute(_CREATE_TABLE)
             await self._db.execute(_CREATE_MESSAGES_TABLE)
             await self._db.execute(_CREATE_MESSAGES_INDEX)
+
+            # Idempotent migrations for columns added after initial schema
+            cursor = await self._db.execute("PRAGMA table_info(sessions)")
+            existing = {row[1] for row in await cursor.fetchall()}
+            if "workspace_name" not in existing:
+                await self._db.execute(
+                    "ALTER TABLE sessions ADD COLUMN workspace_name TEXT"
+                )
+
             await self._db.commit()
             logger.info("sqlite_store_initialized", db_path=self._db_path)
         except Exception as e:
@@ -93,8 +102,9 @@ class SqliteSessionStore:
             """INSERT OR REPLACE INTO sessions
                (user_id, chat_id, session_id, working_directory,
                 claude_session_id, created_at, last_used,
-                total_cost, message_count, is_active)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                total_cost, message_count, is_active,
+                workspace_name)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 session.user_id,
                 session.chat_id,
@@ -106,6 +116,7 @@ class SqliteSessionStore:
                 session.total_cost,
                 session.message_count,
                 int(session.is_active),
+                session.workspace_name,
             ),
         )
         await self._db.commit()
@@ -145,6 +156,7 @@ class SqliteSessionStore:
             total_cost=row["total_cost"],
             message_count=row["message_count"],
             is_active=bool(row["is_active"]),
+            workspace_name=row["workspace_name"],
         )
 
     async def save_message(

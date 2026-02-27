@@ -70,7 +70,9 @@ class TestApprovalCoordinator:
         assert result.reason is None
 
     @pytest.mark.asyncio
-    async def test_approval_timeout_denies(self, approval_coordinator, classification):
+    async def test_approval_timeout_denies(
+        self, approval_coordinator, mock_connector, classification
+    ):
         result = await approval_coordinator.request_approval(
             chat_id="test_chat",
             tool_name="Write",
@@ -81,6 +83,11 @@ class TestApprovalCoordinator:
         assert result.approved is False
         assert result.reason is None
         assert approval_coordinator.pending_count == 0
+        # Expired approval message should be deleted
+        approval_msg_id = mock_connector.approval_requests[0]["message_id"]
+        assert {"chat_id": "test_chat", "message_id": approval_msg_id} in (
+            mock_connector.deleted_messages
+        )
 
     @pytest.mark.asyncio
     async def test_resolve_unknown_approval(self, approval_coordinator):
@@ -359,7 +366,7 @@ class TestApprovalCancellation:
     ):
         async def cancel_soon():
             await asyncio.sleep(0.05)
-            cancelled = approval_coordinator.cancel_pending("chat1")
+            cancelled = await approval_coordinator.cancel_pending("chat1")
             assert len(cancelled) == 1
 
         task = asyncio.create_task(cancel_soon())
@@ -372,6 +379,11 @@ class TestApprovalCancellation:
         )
         await task
         assert result.approved is False
+        # Approval message should be deleted on cancel
+        approval_msg_id = mock_connector.approval_requests[0]["message_id"]
+        assert {"chat_id": "chat1", "message_id": approval_msg_id} in (
+            mock_connector.deleted_messages
+        )
 
     @pytest.mark.asyncio
     async def test_cancel_pending_only_affects_matching_chat(
@@ -379,7 +391,7 @@ class TestApprovalCancellation:
     ):
         async def cancel_chat1():
             await asyncio.sleep(0.05)
-            cancelled = approval_coordinator.cancel_pending("chat1")
+            cancelled = await approval_coordinator.cancel_pending("chat1")
             assert len(cancelled) == 1
             # Approve chat2 so it doesn't hang
             for req in mock_connector.approval_requests:
@@ -411,7 +423,7 @@ class TestApprovalCancellation:
 
     @pytest.mark.asyncio
     async def test_cancel_no_pending_returns_empty(self, approval_coordinator):
-        cancelled = approval_coordinator.cancel_pending("nonexistent")
+        cancelled = await approval_coordinator.cancel_pending("nonexistent")
         assert cancelled == []
 
 

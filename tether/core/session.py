@@ -29,6 +29,8 @@ class Session(BaseModel):
     mode: Literal["default", "plan", "auto", "test", "merge"] = "default"
     mode_instruction: str | None = None
     is_active: bool = True
+    workspace_name: str | None = None
+    workspace_directories: list[str] = Field(default_factory=list)
 
 
 class SessionManager:
@@ -132,6 +134,8 @@ class SessionManager:
         session.created_at = datetime.now(UTC)
         session.last_used = datetime.now(UTC)
         session.is_active = True
+        session.workspace_name = None
+        session.workspace_directories = []
         if self._store:
             await self._store.save(session)
         logger.info(

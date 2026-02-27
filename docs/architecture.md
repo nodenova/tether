@@ -32,6 +32,14 @@
 | Plugin protocol | `TetherPlugin` | `plugins/base.py` |
 | Plugin registry | `PluginRegistry` | `plugins/registry.py` |
 | Audit plugin | `AuditPlugin` | `plugins/builtin/audit_plugin.py` |
+| Browser tools plugin | `BrowserToolsPlugin` | `plugins/builtin/browser_tools.py` |
+| Test runner plugin | `TestRunnerPlugin` | `plugins/builtin/test_runner.py` |
+| Merge resolver plugin | `MergeResolverPlugin` | `plugins/builtin/merge_resolver.py` |
+| Test config loader plugin | `TestConfigLoaderPlugin` | `plugins/builtin/test_config_loader.py` |
+| Git service | `GitService` | `git/service.py` |
+| Git command handler | `GitCommandHandler` | `git/handler.py` |
+| Git formatter | `GitFormatter` | `git/formatter.py` |
+| Git models | `GitStatusResult`, `BranchInfo`, `GitLogEntry`, `GitResult` | `git/models.py` |
 | Session store protocol | `SessionStore` | `storage/base.py` |
 | Memory store | `MemorySessionStore` | `storage/memory.py` |
 | SQLite store | `SqliteSessionStore` | `storage/sqlite.py` |
@@ -69,6 +77,7 @@ flowchart TB
         middleware["MiddlewareChain"]
         plugins["PluginRegistry"]
         store["SessionStore"]
+        git["GitCommandHandler"]
     end
 
     main --> app
@@ -84,6 +93,7 @@ flowchart TB
     app --> interactions
     app --> plugins
     app --> middleware
+    app --> git
     app --> engine
 
     engine --> gatekeeper
@@ -92,6 +102,7 @@ flowchart TB
     engine --> middleware
     engine --> events
     engine --> connector
+    engine --> git
 
     gatekeeper --> sandbox
     gatekeeper --> policy

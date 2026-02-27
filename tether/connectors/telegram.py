@@ -43,6 +43,7 @@ _INTERACTION_CLEANUP_DELAY = (
 )
 _GIT_PREFIX = "git:"
 _DIR_PREFIX = "dir:"
+_WS_PREFIX = "ws:"
 _INTERRUPT_PREFIX = "interrupt:"
 
 _STARTUP_MAX_RETRIES = 5
@@ -129,7 +130,18 @@ class TelegramConnector(BaseConnector):
         )
         self._app.add_handler(
             CommandHandler(
-                ["plan", "edit", "default", "status", "clear", "dir", "git", "test"],
+                [
+                    "plan",
+                    "edit",
+                    "default",
+                    "status",
+                    "clear",
+                    "dir",
+                    "git",
+                    "test",
+                    "workspace",
+                    "ws",
+                ],
                 self._on_command,
             )
         )
@@ -639,6 +651,10 @@ class TelegramConnector(BaseConnector):
             await self._handle_dir_callback(query, data)
             return
 
+        if data.startswith(_WS_PREFIX):
+            await self._handle_ws_callback(query, data)
+            return
+
         if data.startswith(_INTERACTION_PREFIX):
             await self._handle_interaction_callback(query, data)
             return
@@ -710,10 +726,9 @@ class TelegramConnector(BaseConnector):
         try:
             raw = f"{query.message.text}\n\n{status}"
             await query.edit_message_text(raw)
-            if resolved:
-                chat_id = str(query.message.chat_id)
-                msg_id = str(query.message.message_id)
-                self.schedule_message_cleanup(chat_id, msg_id)
+            chat_id = str(query.message.chat_id)
+            msg_id = str(query.message.message_id)
+            self.schedule_message_cleanup(chat_id, msg_id)
         except Exception:
             logger.exception("telegram_edit_approval_message_failed")
 
@@ -760,8 +775,19 @@ class TelegramConnector(BaseConnector):
         is_plan_review = answer in ("clean_edit", "edit", "default", "adjust")
         if is_plan_review:
             plan_ids = self._plan_message_ids.pop(chat_id, [])
-            if plan_ids:
-                await self.delete_messages(chat_id, plan_ids)
+            button_msg_id = str(query.message.message_id)
+
+            for pid in plan_ids:
+                if pid != button_msg_id:
+                    await self.delete_message(chat_id, pid)
+
+            await self.delete_message(chat_id, button_msg_id)
+
+            if answer != "adjust":
+                ack = "\u2713 Proceeding with implementation..."
+                ack_id = await self.send_message_with_id(chat_id, ack)
+                if ack_id:
+                    self.schedule_message_cleanup(chat_id, ack_id)
         else:
             msg_id = self._question_message_ids.pop(chat_id, None)
             if msg_id:
@@ -834,6 +860,10 @@ class TelegramConnector(BaseConnector):
         if not user_id or not chat_id:
             return
 
+        if isinstance(query.message, Message):
+            msg_id = str(query.message.message_id)
+            await self.delete_message(chat_id, msg_id)
+
         try:
             await self._git_handler(user_id, chat_id, action, payload)
         except Exception:
@@ -857,10 +887,29 @@ class TelegramConnector(BaseConnector):
             result = await self._command_handler(user_id, "dir", dir_name, chat_id)
             if isinstance(query.message, Message) and result:
                 await query.edit_message_text(result)
-                msg_id = str(query.message.message_id)
-                self.schedule_message_cleanup(chat_id, msg_id)
         except Exception:
             logger.exception("telegram_dir_callback_error", chat_id=chat_id)
+
+    async def _handle_ws_callback(self, query: CallbackQuery, data: str) -> None:
+        """Route workspace switch button callbacks to the command handler."""
+        ws_name = data[len(_WS_PREFIX) :]
+        if not ws_name or not self._command_handler:
+            return
+
+        user_id = str(query.from_user.id) if query.from_user else ""
+        chat_id = (
+            str(query.message.chat_id) if isinstance(query.message, Message) else ""
+        )
+
+        if not user_id or not chat_id:
+            return
+
+        try:
+            result = await self._command_handler(user_id, "workspace", ws_name, chat_id)
+            if isinstance(query.message, Message) and result:
+                await query.edit_message_text(result)
+        except Exception:
+            logger.exception("telegram_ws_callback_error", chat_id=chat_id)
 
     async def _on_error(
         self, update: object, context: ContextTypes.DEFAULT_TYPE

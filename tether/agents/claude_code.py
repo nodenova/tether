@@ -21,6 +21,9 @@ from claude_agent_sdk import (
     ToolResultBlock,
     ToolUseBlock,
 )
+
+# Private SDK imports (claude-agent-sdk ~0.x): parse_message lets us gracefully
+# skip unknown message types instead of crashing on new SDK additions.
 from claude_agent_sdk._errors import MessageParseError
 from claude_agent_sdk._internal.message_parser import parse_message
 

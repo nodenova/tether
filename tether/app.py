@@ -106,6 +106,11 @@ def _configure_logging(config: TetherConfig, *, log_dir: Path | None = None) -> 
         )
         root_logger.addHandler(file_handler)
 
+    # Silence noisy third-party loggers (httpx, telegram, etc.) — they flood
+    # the log with low-value HTTP transport chatter at INFO/DEBUG.
+    for noisy_logger in ("httpx", "httpcore", "hpack", "telegram", "telegram.ext"):
+        logging.getLogger(noisy_logger).setLevel(logging.WARNING)
+
     structlog.configure(
         processors=shared_processors,
         wrapper_class=structlog.stdlib.BoundLogger,

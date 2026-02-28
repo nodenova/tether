@@ -5,6 +5,7 @@ import time
 from unittest.mock import patch
 
 import pytest
+from claude_agent_sdk.types import PermissionResultDeny
 
 from tests.core.engine.conftest import FakeAgent
 from tether.agents.base import AgentResponse, BaseAgent
@@ -1626,8 +1627,11 @@ class TestPlanModeRegression:
             {"file_path": "/home/user/.claude/plans/plan.md", "content": "the plan"},
             None,
         )
-        # Should NOT be denied — goes through to gatekeeper
-        assert result != {"behavior": "deny"}
+        # Should NOT be the plan-mode deny — may still be denied by sandbox/policy
+        assert not (
+            isinstance(result, PermissionResultDeny)
+            and "plan mode" in result.message.lower()
+        )
 
     @pytest.mark.asyncio
     async def test_dot_plan_file_allowed_in_plan_mode(
@@ -1653,7 +1657,11 @@ class TestPlanModeRegression:
             {"file_path": "/tmp/project/feature.plan", "content": "plan"},
             None,
         )
-        assert result != {"behavior": "deny"}
+        # Should NOT be the plan-mode deny — may still be denied by sandbox/policy
+        assert not (
+            isinstance(result, PermissionResultDeny)
+            and "plan mode" in result.message.lower()
+        )
 
     @pytest.mark.asyncio
     async def test_write_allowed_outside_plan_mode(
@@ -1680,7 +1688,10 @@ class TestPlanModeRegression:
             None,
         )
         # Should NOT be the plan-mode deny — goes through to gatekeeper instead
-        assert not (isinstance(result, dict) and result.get("behavior") == "deny")
+        assert not (
+            isinstance(result, PermissionResultDeny)
+            and "plan mode" in result.message.lower()
+        )
 
 
 class TestModeGuards:
@@ -1690,8 +1701,6 @@ class TestModeGuards:
     async def test_exit_plan_mode_denied_in_auto_mode(
         self, config, audit_logger, policy_engine
     ):
-        from claude_agent_sdk.types import PermissionResultDeny
-
         from tests.conftest import MockConnector
 
         connector = MockConnector(support_streaming=True)
@@ -1723,8 +1732,6 @@ class TestModeGuards:
     async def test_exit_plan_mode_denied_in_edit_mode(
         self, config, audit_logger, policy_engine
     ):
-        from claude_agent_sdk.types import PermissionResultDeny
-
         from tests.conftest import MockConnector
 
         connector = MockConnector(support_streaming=True)
@@ -1755,8 +1762,6 @@ class TestModeGuards:
     async def test_enter_plan_mode_denied_in_auto_mode(
         self, config, audit_logger, policy_engine
     ):
-        from claude_agent_sdk.types import PermissionResultDeny
-
         agent = FakeAgent()
         eng = Engine(
             connector=None,
@@ -1776,6 +1781,60 @@ class TestModeGuards:
 
         assert isinstance(result, PermissionResultDeny)
         assert "accept-edits mode" in result.message.lower()
+
+    @pytest.mark.asyncio
+    async def test_exit_plan_mode_denied_in_default_mode(
+        self, config, audit_logger, policy_engine
+    ):
+        from tests.conftest import MockConnector
+
+        connector = MockConnector(support_streaming=True)
+        coordinator = InteractionCoordinator(connector, config)
+
+        agent = FakeAgent()
+        eng = Engine(
+            connector=connector,
+            agent=agent,
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+            interaction_coordinator=coordinator,
+        )
+
+        await eng.handle_message("user1", "hello", "chat1")
+        session = eng.session_manager.get("user1", "chat1")
+        assert session.mode == "default"
+
+        hook = agent.last_can_use_tool
+        result = await hook("ExitPlanMode", {}, None)
+
+        assert isinstance(result, PermissionResultDeny)
+        assert "implementation mode" in result.message.lower()
+
+    @pytest.mark.asyncio
+    async def test_enter_plan_mode_allowed_in_default_mode(
+        self, config, audit_logger, policy_engine
+    ):
+        agent = FakeAgent()
+        eng = Engine(
+            connector=None,
+            agent=agent,
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+        )
+
+        await eng.handle_message("user1", "hello", "chat1")
+        session = eng.session_manager.get("user1", "chat1")
+        assert session.mode == "default"
+
+        hook = agent.last_can_use_tool
+        result = await hook("EnterPlanMode", {}, None)
+
+        # Should NOT be denied — goes through to gatekeeper
+        assert not isinstance(result, PermissionResultDeny)
 
 
 class TestResolvePlanContentFallbacks:
@@ -2440,3 +2499,92 @@ class TestPlanApprovalBehavior:
         auto_tools = eng._gatekeeper._auto_approved_tools.get("chat1", set())
         assert "Write" not in auto_tools
         assert "Edit" not in auto_tools
+
+    @pytest.mark.asyncio
+    async def test_bash_still_gated_after_edit_approval(
+        self, config, policy_engine, audit_logger
+    ):
+        """Security regression: edit approval auto-approves Write/Edit but Bash
+        must still flow through the gatekeeper (not auto-approved)."""
+        from claude_agent_sdk.types import PermissionResultAllow
+
+        from tests.conftest import MockConnector
+
+        approved_dir = str(config.approved_directories[0])
+        streaming_connector = MockConnector(support_streaming=True)
+        coordinator = InteractionCoordinator(streaming_connector, config)
+        config.streaming_enabled = True
+
+        bash_results: list = []
+        write_results: list = []
+
+        class EditThenBashAgent(BaseAgent):
+            async def execute(
+                self,
+                prompt,
+                session,
+                *,
+                can_use_tool=None,
+                on_text_chunk=None,
+                **kwargs,
+            ):
+                session.mode = "plan"
+                await can_use_tool(
+                    "Write",
+                    {
+                        "file_path": f"{approved_dir}/.claude/plans/my.plan",
+                        "content": "Step 1: Implement feature",
+                    },
+                    None,
+                )
+
+                async def click():
+                    await asyncio.sleep(0.05)
+                    req = streaming_connector.plan_review_requests[0]
+                    await coordinator.resolve_option(req["interaction_id"], "edit")
+
+                task = asyncio.create_task(click())
+                await can_use_tool("ExitPlanMode", {}, None)
+                await task
+
+                # Write should be auto-approved after edit approval
+                w_result = await can_use_tool(
+                    "Write",
+                    {"file_path": f"{approved_dir}/src/app.py", "content": "# app"},
+                    None,
+                )
+                write_results.append(w_result)
+
+                # Bash should NOT be auto-approved — must go through gatekeeper
+                b_result = await can_use_tool(
+                    "Bash",
+                    {"command": "curl http://example.com"},
+                    None,
+                )
+                bash_results.append(b_result)
+
+                return AgentResponse(content="Done.", session_id="sid", cost=0.01)
+
+            async def cancel(self, session_id):
+                pass
+
+            async def shutdown(self):
+                pass
+
+        eng = Engine(
+            connector=streaming_connector,
+            agent=EditThenBashAgent(),
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+            interaction_coordinator=coordinator,
+        )
+
+        await eng.handle_message("user1", "Plan something", "chat1")
+
+        assert len(write_results) == 1
+        assert isinstance(write_results[0], PermissionResultAllow)
+        # Bash goes through gatekeeper — should NOT be auto-approved
+        assert len(bash_results) == 1
+        assert not isinstance(bash_results[0], PermissionResultAllow)

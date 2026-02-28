@@ -1,7 +1,7 @@
 # Changelog
 
 ## [0.4.0] - 2026-02-27
-- **added**: `/workspace` (alias `/ws`) — group related repos under named workspaces for multi-repo context. YAML config in `.tether/workspaces.yaml`, inline keyboard buttons, workspace-aware system prompt injection, and MCP server merging across workspace directories
+- **added**: `/workspace` (alias `/ws`) — group related repos under named workspaces for multi-repo context. YAML config in `.tether/workspaces.yaml`, inline keyboard buttons, and workspace-aware system prompt injection
 - **added**: Behavioral integration tests for plan approval flow — verify Write/Edit actually succeed after clean_edit, edit, and default approvals (closes coverage gap that let `_cancel_agent()` deletion slip through)
 
 ## [0.3.0] - 2026-02-26

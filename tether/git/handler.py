@@ -77,6 +77,13 @@ class GitCommandHandler:
         subcommand = parts[0] if parts else ""
         sub_args = parts[1] if len(parts) > 1 else ""
 
+        logger.info(
+            "git_command",
+            subcommand=subcommand or "status",
+            chat_id=chat_id,
+            cwd=str(cwd),
+        )
+
         match subcommand:
             case "" | "status":
                 return await self._status(cwd, chat_id)

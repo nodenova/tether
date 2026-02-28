@@ -198,6 +198,7 @@ class _StreamingResponder:
     async def deactivate(self) -> None:
         """Suppress all further streaming and clear any visible activity."""
         self._active = False
+        self._has_activity = False
         await self._connector.clear_activity(self._chat_id)
 
     async def finalize(self, final_text: str) -> bool:
@@ -518,6 +519,11 @@ class Engine:
         return "\n\n".join(text for _, text in messages)
 
     async def _execute_turn(self, user_id: str, text: str, chat_id: str) -> str:
+        structlog.contextvars.clear_contextvars()
+        structlog.contextvars.bind_contextvars(
+            request_id=uuid.uuid4().hex[:8], chat_id=chat_id
+        )
+
         start = time.monotonic()
         logger.info(
             "request_started",
@@ -1404,10 +1410,8 @@ class Engine:
                         "using Edit and Write tools — do not call ExitPlanMode again."
                     )
                 state.plan_review_shown = True
-                if self.connector:
-                    await self.connector.clear_activity(chat_id)
                 if responder:
-                    responder._has_activity = False
+                    await responder.on_activity(None)
                 if not state.plan_file_path:
                     discovered = self._discover_plan_file(session.working_directory)
                     if discovered:
@@ -1455,11 +1459,18 @@ class Engine:
                         state.clean_proceed = True
                         if responder:
                             await responder.deactivate()
+                        # prevent GC of fire-and-forget task
                         _bg: set[asyncio.Task[None]] = set()
 
                         async def _cancel_agent() -> None:
-                            await asyncio.sleep(0.1)
-                            await self.agent.cancel(session.session_id)
+                            try:
+                                await asyncio.sleep(0.1)
+                                await self.agent.cancel(session.session_id)
+                            except Exception:
+                                logger.debug(
+                                    "cancel_agent_failed",
+                                    session_id=session.session_id,
+                                )
 
                         t = asyncio.create_task(_cancel_agent())
                         _bg.add(t)

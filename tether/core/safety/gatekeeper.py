@@ -159,7 +159,7 @@ class ToolGatekeeper:
         classification = self._policy_engine.classify(normalized, tool_input)
         decision = self._policy_engine.evaluate(classification)
 
-        logger.debug(
+        logger.info(
             "policy_evaluated",
             session_id=session_id,
             tool_name=tool_name,

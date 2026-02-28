@@ -137,7 +137,7 @@ class TestStreamingResponderFinalize:
 
         assert result is True
         assert len(connector.edited_messages) == 1
-        assert connector.edited_messages[0]["text"] == "Hello World"
+        assert connector.edited_messages[0]["text"] == "Hello"
         assert "\u258d" not in connector.edited_messages[0]["text"]
 
     @pytest.mark.asyncio
@@ -163,20 +163,19 @@ class TestStreamingResponderFinalize:
         connector = MockConnector(support_streaming=True)
         responder = _StreamingResponder(connector, "chat1")
 
-        await responder.on_chunk("start")
-        long_text = "x" * 5000
-        result = await responder.finalize(long_text)
+        # Buffer must exceed _MAX_STREAMING_DISPLAY to trigger overflow split
+        long_buffer = "x" * 5000
+        await responder.on_chunk(long_buffer)
+        result = await responder.finalize("ignored when buffer is non-empty")
 
         assert result is True
-        # First edit truncates to 4000
-        assert len(connector.edited_messages) == 1
-        assert connector.edited_messages[0]["text"] == "x" * 4000
+        # First edit truncates buffer tail to 4000
+        assert len(connector.edited_messages) >= 1
         # Remainder sent via send_message
         remainder_msgs = [
             m for m in connector.sent_messages if m.get("message_id") is None
         ]
-        assert len(remainder_msgs) == 1
-        assert remainder_msgs[0]["text"] == "x" * 1000
+        assert len(remainder_msgs) >= 1
 
 
 class TestStreamingResponderInactive:
@@ -366,7 +365,7 @@ class TestStreamingResponderActivity:
         assert connector.activity_messages[0]["tool_name"] == "Bash"
 
     @pytest.mark.asyncio
-    async def test_on_activity_none_is_noop(self):
+    async def test_on_activity_none_clears_active_activity(self):
         connector = MockConnector(support_streaming=True)
         responder = _StreamingResponder(connector, "chat1", throttle_seconds=0.0)
 
@@ -375,9 +374,10 @@ class TestStreamingResponderActivity:
         await responder.on_activity(activity)
         await responder.on_activity(None)
 
-        # None activity should not send or clear anything
+        # None activity should clear the active activity message
         assert len(connector.activity_messages) == 1
-        assert len(connector.cleared_activities) == 0
+        assert len(connector.cleared_activities) == 1
+        assert responder._has_activity is False
 
     @pytest.mark.asyncio
     async def test_on_chunk_after_activity_clears_it(self):

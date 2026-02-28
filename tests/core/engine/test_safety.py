@@ -165,6 +165,8 @@ class TestAutoApproveWritesAfterProceed:
             interaction_coordinator=coordinator,
         )
         await eng.handle_message("user1", "hello", "chat1")
+        session = eng.session_manager.get("user1", "chat1")
+        session.mode = "plan"
         hook = fake_agent.last_can_use_tool
 
         async def click_proceed():
@@ -267,6 +269,8 @@ class TestDefaultButtonNoAutoApprove:
             interaction_coordinator=coordinator,
         )
         await eng.handle_message("user1", "hello", "chat1")
+        session = eng.session_manager.get("user1", "chat1")
+        session.mode = "plan"
         hook = fake_agent.last_can_use_tool
 
         async def click_default():
@@ -380,6 +384,7 @@ class TestDefaultButtonSessionMode:
             async def execute(self, prompt, session, *, can_use_tool=None, **kwargs):
                 self.last_can_use_tool = can_use_tool
                 if not prompt.startswith("Implement"):
+                    session.mode = "plan"
 
                     async def click_clean():
                         await asyncio.sleep(0.05)

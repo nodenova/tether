@@ -796,6 +796,7 @@ class TestSessionPersistenceOnDirSwitch:
         class PlanAgent(BaseAgent):
             async def execute(self, prompt, session, *, can_use_tool=None, **kwargs):
                 if not prompt.startswith("Implement"):
+                    session.mode = "plan"
 
                     async def click():
                         await asyncio.sleep(0.05)

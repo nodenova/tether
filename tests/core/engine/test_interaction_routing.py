@@ -68,6 +68,8 @@ class TestEngineInteractionRouting:
             interaction_coordinator=coordinator,
         )
         await eng.handle_message("user1", "hello", "chat1")
+        session = eng.session_manager.get("user1", "chat1")
+        session.mode = "plan"
         hook = fake_agent.last_can_use_tool
 
         async def click_proceed():
@@ -188,6 +190,7 @@ class TestEngineInteractionRouting:
         await eng.handle_message("user1", "hello", "chat1")
         session = eng.session_manager.get("user1", "chat1")
         session.claude_session_id = "existing-session-123"
+        session.mode = "plan"
         hook = fake_agent.last_can_use_tool
 
         async def click_clean():
@@ -224,6 +227,7 @@ class TestCleanProceedAutoImplementation:
                 prompts_seen.append(prompt)
                 session_ids_at_start.append(session.claude_session_id)
                 if not prompt.startswith("Implement"):
+                    session.mode = "plan"
 
                     async def click_clean():
                         await asyncio.sleep(0.05)
@@ -288,6 +292,8 @@ class TestCleanProceedAutoImplementation:
             interaction_coordinator=coordinator,
         )
         await eng.handle_message("user1", "hello", "chat1")
+        session = eng.session_manager.get("user1", "chat1")
+        session.mode = "plan"
         hook = fake_agent.last_can_use_tool
 
         async def click_proceed():
@@ -320,6 +326,7 @@ class TestCleanProceedAutoImplementation:
                 self.last_can_use_tool = can_use_tool
                 on_chunk = kwargs.get("on_text_chunk")
                 if not prompt.startswith("Implement"):
+                    session.mode = "plan"
                     if on_chunk:
                         await on_chunk("before exit ")
 
@@ -369,10 +376,10 @@ class TestCleanProceedAutoImplementation:
         assert streaming_msgs == []
 
     @pytest.mark.asyncio
-    async def test_clean_proceed_does_not_cancel_agent(
+    async def test_clean_proceed_cancels_agent(
         self, config, policy_engine, audit_logger, mock_connector
     ):
-        """After clean_edit, no background cancel is scheduled."""
+        """After clean_edit, a background cancel is scheduled to stop the agent."""
         coordinator = InteractionCoordinator(mock_connector, config)
         cancel_calls: list[str] = []
 
@@ -383,6 +390,7 @@ class TestCleanProceedAutoImplementation:
             async def execute(self, prompt, session, *, can_use_tool=None, **kwargs):
                 self.last_can_use_tool = can_use_tool
                 if not prompt.startswith("Implement"):
+                    session.mode = "plan"
 
                     async def click_clean():
                         await asyncio.sleep(0.05)
@@ -418,7 +426,7 @@ class TestCleanProceedAutoImplementation:
         await eng.handle_message("user1", "Make a plan", "chat1")
         await asyncio.sleep(0.3)
 
-        assert cancel_calls == []
+        assert len(cancel_calls) == 1
 
     @pytest.mark.asyncio
     async def test_clean_proceed_suppresses_plan_agent_response(
@@ -434,6 +442,7 @@ class TestCleanProceedAutoImplementation:
             async def execute(self, prompt, session, *, can_use_tool=None, **kwargs):
                 self.last_can_use_tool = can_use_tool
                 if not prompt.startswith("Implement"):
+                    session.mode = "plan"
 
                     async def click_clean():
                         await asyncio.sleep(0.05)
@@ -497,6 +506,7 @@ class TestCleanProceedAutoImplementation:
             async def execute(self, prompt, session, *, can_use_tool=None, **kwargs):
                 self.last_can_use_tool = can_use_tool
                 if not prompt.startswith("Implement"):
+                    session.mode = "plan"
 
                     async def click_clean():
                         await asyncio.sleep(0.05)

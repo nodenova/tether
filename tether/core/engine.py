@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import structlog
+from claude_agent_sdk.types import PermissionResultDeny
 
 from tether.connectors.base import InlineButton
 from tether.core.config import build_directory_names, ensure_tether_dir
@@ -55,6 +56,7 @@ _TRANSIENT_MESSAGE_DELAY = 5.0  # seconds before auto-deleting status messages (
 class _ToolCallbackState:
     __slots__ = (
         "clean_proceed",
+        "plan_approved",
         "plan_file_content",
         "plan_file_path",
         "plan_review_shown",
@@ -63,6 +65,7 @@ class _ToolCallbackState:
 
     def __init__(self) -> None:
         self.clean_proceed = False
+        self.plan_approved = False
         self.plan_review_shown = False
         self.plan_file_content: str | None = None
         self.plan_file_path: str | None = None
@@ -170,6 +173,9 @@ class _StreamingResponder:
             return
 
         if activity is None:
+            if self._has_activity:
+                await self._connector.clear_activity(self._chat_id)
+                self._has_activity = False
             return
 
         self._tool_counts[activity.tool_name] = (
@@ -198,11 +204,10 @@ class _StreamingResponder:
         if not self._active or self._message_id is None:
             return False
 
-        tail = (
-            self._buffer[self._display_offset :]
-            if self._display_offset > 0
-            else final_text
-        )
+        if self._has_activity:
+            await self._connector.clear_activity(self._chat_id)
+            self._has_activity = False
+        tail = self._buffer[self._display_offset :] if self._buffer else final_text
 
         summary = self._build_tools_summary()
         if summary:
@@ -1383,13 +1388,26 @@ class Engine:
                     if tool_name == "Write":
                         state.plan_file_content = tool_input.get("content")
                 elif session.mode == "plan":
-                    return {
-                        "behavior": "deny",
-                        "message": "In plan mode — create a plan first, then call ExitPlanMode.",
-                    }
+                    return PermissionResultDeny(
+                        message="In plan mode — create a plan first, then call ExitPlanMode."
+                    )
 
             if self.interaction_coordinator and tool_name == "ExitPlanMode":
+                if session.mode != "plan":
+                    return PermissionResultDeny(
+                        message="You are in implementation mode. Implement changes directly "
+                        "using Edit and Write tools — do not call ExitPlanMode."
+                    )
+                if state.plan_approved:
+                    return PermissionResultDeny(
+                        message="Plan already approved. Implement changes directly "
+                        "using Edit and Write tools — do not call ExitPlanMode again."
+                    )
                 state.plan_review_shown = True
+                if self.connector:
+                    await self.connector.clear_activity(chat_id)
+                if responder:
+                    responder._has_activity = False
                 if not state.plan_file_path:
                     discovered = self._discover_plan_file(session.working_directory)
                     if discovered:
@@ -1424,9 +1442,7 @@ class Engine:
                     chat_id, tool_input, plan_content=plan_content
                 )
                 if isinstance(result, PlanReviewDecision):
-                    if result.clear_context:
-                        session.claude_session_id = None
-                        state.clean_proceed = True
+                    state.plan_approved = True
                     state.target_mode = result.target_mode
                     if result.target_mode == "edit":
                         self._gatekeeper.enable_tool_auto_approve(chat_id, "Write")
@@ -1434,9 +1450,32 @@ class Engine:
                     if responder:
                         await responder.delete_all_messages()
                         responder.reset()
-                        await responder.deactivate()
+                    if result.clear_context:
+                        session.claude_session_id = None
+                        state.clean_proceed = True
+                        if responder:
+                            await responder.deactivate()
+                        _bg: set[asyncio.Task[None]] = set()
+
+                        async def _cancel_agent() -> None:
+                            await asyncio.sleep(0.1)
+                            await self.agent.cancel(session.session_id)
+
+                        t = asyncio.create_task(_cancel_agent())
+                        _bg.add(t)
+                        t.add_done_callback(_bg.discard)
+                    else:
+                        session.mode = (
+                            "auto" if result.target_mode == "edit" else "default"
+                        )
                     return result.permission
                 return result
+
+            if tool_name == "EnterPlanMode" and session.mode == "auto":
+                return PermissionResultDeny(
+                    message="You are in accept-edits mode. Implement changes directly "
+                    "— do not enter plan mode."
+                )
 
             return await self._gatekeeper.check(
                 tool_name, tool_input, session.session_id, chat_id

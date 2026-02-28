@@ -80,8 +80,9 @@ _PLAN_MODE_INSTRUCTION = (
 _AUTO_MODE_INSTRUCTION = (
     "You are in accept-edits mode. Implement changes directly — do not create "
     "plans or call EnterPlanMode/ExitPlanMode. File writes and edits are "
-    "auto-approved. Treat follow-up messages as continuations of the current "
-    "implementation task."
+    "auto-approved. Always use the Edit and Write tools for file modifications "
+    "— never use Bash or python scripts to read/write files. Treat follow-up "
+    "messages as continuations of the current implementation task."
 )
 
 
@@ -297,24 +298,9 @@ class ClaudeCodeAgent(BaseAgent):
             opts.resume = session.claude_session_id
 
         local_servers = self._read_local_mcp_servers(session.working_directory)
-
-        workspace_servers: dict[str, Any] = {}
-        for ws_dir in session.workspace_directories:
-            if ws_dir != session.working_directory:
-                ws_servers = self._read_local_mcp_servers(ws_dir)
-                for k, v in ws_servers.items():
-                    if k in workspace_servers:
-                        logger.warning(
-                            "workspace_mcp_server_collision",
-                            server_name=k,
-                            skipped_dir=ws_dir,
-                        )
-                    else:
-                        workspace_servers[k] = v
-
         tether_servers = self._config.mcp_servers
-        if workspace_servers or local_servers or tether_servers:
-            opts.mcp_servers = {**workspace_servers, **local_servers, **tether_servers}
+        if local_servers or tether_servers:
+            opts.mcp_servers = {**local_servers, **tether_servers}
             logger.debug(
                 "agent_mcp_servers",
                 session_id=session.session_id,

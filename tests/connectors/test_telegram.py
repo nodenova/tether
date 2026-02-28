@@ -1249,6 +1249,95 @@ class TestSendPlanReviewLongContent:
         assert "123" in connector._plan_message_ids
         assert len(connector._plan_message_ids["123"]) >= 2  # plan msg + review msg
 
+    @pytest.mark.asyncio
+    async def test_fallback_inline_plan_when_send_plan_messages_fails(self, connector):
+        mock_app = _make_mock_app()
+        connector._app = mock_app
+
+        button_msg = MagicMock()
+        button_msg.message_id = 99
+
+        # Patch send_plan_messages to return empty (simulates network failure)
+        connector.send_plan_messages = AsyncMock(return_value=[])
+        mock_app.bot.send_message.return_value = button_msg
+
+        await connector.send_plan_review("123", "abc-123", "My plan content")
+
+        # Button message should include the plan content as fallback
+        last_call = mock_app.bot.send_message.await_args_list[-1]
+        text = last_call.kwargs.get("text", "")
+        assert "My plan content" in text
+        assert "Proceed with implementation?" in text
+
+    @pytest.mark.asyncio
+    async def test_clears_activity_before_sending_plan(self, connector):
+        mock_app = _make_mock_app()
+        connector._app = mock_app
+        mock_msg = MagicMock()
+        mock_msg.message_id = 1
+        mock_app.bot.send_message.return_value = mock_msg
+
+        # Simulate existing activity message with numeric ID
+        connector._activity_message_id["123"] = "42"
+        connector._activity_last_text["123"] = "old"
+
+        await connector.send_plan_review("123", "abc-123", "Plan")
+
+        # Activity should be cleared (delete_message called for activity msg)
+        mock_app.bot.delete_message.assert_awaited_once_with(chat_id=123, message_id=42)
+        assert "123" not in connector._activity_message_id
+
+    @pytest.mark.asyncio
+    async def test_empty_description_uses_generic_header(self, connector):
+        mock_app = _make_mock_app()
+        connector._app = mock_app
+        mock_msg = MagicMock()
+        mock_msg.message_id = 1
+        mock_app.bot.send_message.return_value = mock_msg
+
+        await connector.send_plan_review("123", "abc-123", "")
+
+        last_call = mock_app.bot.send_message.await_args_list[-1]
+        text = last_call.kwargs.get("text", "")
+        assert "Proceed with implementation?" in text
+        assert last_call.kwargs["reply_markup"] is not None
+
+    @pytest.mark.asyncio
+    async def test_inline_fallback_exact_boundary_no_truncation(self, connector):
+        mock_app = _make_mock_app()
+        connector._app = mock_app
+        button_msg = MagicMock()
+        button_msg.message_id = 99
+        connector.send_plan_messages = AsyncMock(return_value=[])
+        mock_app.bot.send_message.return_value = button_msg
+
+        desc = "x" * (_MAX_MESSAGE_LENGTH - 200)  # exactly 3800
+        await connector.send_plan_review("123", "abc-123", desc)
+
+        last_call = mock_app.bot.send_message.await_args_list[-1]
+        text = last_call.kwargs.get("text", "")
+        assert "... (truncated)" not in text
+        assert "Proceed with implementation?" in text
+
+    @pytest.mark.asyncio
+    async def test_inline_fallback_over_boundary_adds_truncation_marker(
+        self, connector
+    ):
+        mock_app = _make_mock_app()
+        connector._app = mock_app
+        button_msg = MagicMock()
+        button_msg.message_id = 99
+        connector.send_plan_messages = AsyncMock(return_value=[])
+        mock_app.bot.send_message.return_value = button_msg
+
+        desc = "x" * (_MAX_MESSAGE_LENGTH - 200 + 1)  # 3801
+        await connector.send_plan_review("123", "abc-123", desc)
+
+        last_call = mock_app.bot.send_message.await_args_list[-1]
+        text = last_call.kwargs.get("text", "")
+        assert "... (truncated)" in text
+        assert "Proceed with implementation?" in text
+
 
 # --- Retry helper tests ---
 
@@ -1652,19 +1741,19 @@ class TestSendActivity:
         mock_app = _make_mock_app()
         connector._app = mock_app
         connector._activity_message_id["123"] = "50"
-        connector._activity_last_text["123"] = "\u23f3 Running: Old task"
+        connector._activity_last_text["123"] = "⏳ Running: Old task"
 
         msg_id = await connector.send_activity("123", "Write", "New task")
         assert msg_id == "50"
         mock_app.bot.edit_message_text.assert_awaited_once()
-        assert connector._activity_last_text["123"] == "\u23f3 Running: New task"
+        assert connector._activity_last_text["123"] == "✏️ Editing: New task"
 
     @pytest.mark.asyncio
     async def test_skips_edit_when_text_unchanged(self, connector):
         mock_app = _make_mock_app()
         connector._app = mock_app
         connector._activity_message_id["123"] = "50"
-        connector._activity_last_text["123"] = "\u23f3 Running: Same task"
+        connector._activity_last_text["123"] = "🔍 Searching: Same task"
 
         msg_id = await connector.send_activity("123", "Read", "Same task")
         assert msg_id == "50"
@@ -1676,6 +1765,37 @@ class TestSendActivity:
         result = await connector.send_activity("123", "Read", "desc")
         assert result is None
 
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("tool_name", "description", "expected_prefix"),
+        [
+            ("Bash", "npm install", "⚡ Running:"),
+            ("Bash", "ls -la /project", "🔍 Searching:"),
+            ("Bash", "find /project -name '*.py'", "🔍 Searching:"),
+            ("Bash", "git log --oneline -20", "🔍 Searching:"),
+            ("Bash", "git status", "🔍 Searching:"),
+            ("Bash", "cat file.py", "🔍 Searching:"),
+            ("Bash", "tree /project -L 2", "🔍 Searching:"),
+            ("Read", "/path/to/file", "🔍 Searching:"),
+            ("Write", "/path/to/file", "✏️ Editing:"),
+            ("EnterPlanMode", "Entering plan mode", "🧠 Thinking:"),
+            ("mcp__playwright__browser_click", "Click button", "🌐 Browsing:"),
+            ("Agent", "Explore project structure", "🔍 Searching:"),
+            ("Agent", "Design implementation plan", "🧠 Thinking:"),
+            ("UnknownTool", "something", "⏳ Running:"),
+        ],
+    )
+    async def test_activity_label_per_tool_category(
+        self, connector, tool_name, description, expected_prefix
+    ):
+        mock_app = _make_mock_app()
+        mock_app.bot.send_message = AsyncMock(return_value=MagicMock(message_id=99))
+        connector._app = mock_app
+
+        await connector.send_activity("123", tool_name, description)
+        sent_text = mock_app.bot.send_message.call_args[1]["text"]
+        assert sent_text.startswith(expected_prefix)
+
 
 class TestClearActivity:
     @pytest.mark.asyncio
@@ -1683,7 +1803,7 @@ class TestClearActivity:
         mock_app = _make_mock_app()
         connector._app = mock_app
         connector._activity_message_id["123"] = "50"
-        connector._activity_last_text["123"] = "\u23f3 Running: task"
+        connector._activity_last_text["123"] = "⏳ Running: task"
 
         await connector.clear_activity("123")
         assert "123" not in connector._activity_message_id
@@ -1697,6 +1817,22 @@ class TestClearActivity:
 
         await connector.clear_activity("123")
         mock_app.bot.delete_message.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_double_clear_is_safe(self, connector):
+        mock_app = _make_mock_app()
+        connector._app = mock_app
+        connector._activity_message_id["123"] = "50"
+        connector._activity_last_text["123"] = "⏳ Running: task"
+
+        # First clear — pops msg_id "50", calls delete_message
+        await connector.clear_activity("123")
+        assert "123" not in connector._activity_message_id
+        mock_app.bot.delete_message.assert_awaited_once()
+
+        # Second clear — pop returns None, delete_message NOT called again
+        await connector.clear_activity("123")
+        assert mock_app.bot.delete_message.await_count == 1
 
 
 # --- B3: Question messages ---

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from collections.abc import Callable, Coroutine
 from datetime import timedelta
 from pathlib import Path
@@ -52,6 +53,53 @@ _STARTUP_MAX_DELAY = 60.0
 _SEND_MAX_RETRIES = 3
 _SEND_BASE_DELAY = 1.0
 _SEND_MAX_DELAY = 10.0
+
+
+_SEARCH_TOOLS = frozenset(
+    {"Read", "Glob", "Grep", "WebFetch", "WebSearch", "TaskGet", "TaskList"}
+)
+_EDIT_TOOLS = frozenset({"Write", "Edit", "NotebookEdit"})
+_THINK_TOOLS = frozenset(
+    {
+        "EnterPlanMode",
+        "ExitPlanMode",
+        "plan",
+        "AskUserQuestion",
+        "TodoWrite",
+        "TaskCreate",
+        "TaskUpdate",
+    }
+)
+
+
+_BASH_SEARCH_RE = re.compile(
+    r"^(ls|cat|head|tail|find|grep|rg|wc|du|df|pwd|echo|date|whoami|which|type|file|stat|tree)\b"
+)
+_BASH_GIT_READ_RE = re.compile(
+    r"^git\s+(.+\s+)?(status|log|diff|show|branch|remote|tag)\b"
+)
+
+
+def _activity_label(tool_name: str, description: str = "") -> tuple[str, str]:
+    """Return (emoji, verb) for a tool's activity message."""
+    if tool_name == "Bash":
+        if _BASH_SEARCH_RE.search(description) or _BASH_GIT_READ_RE.search(description):
+            return ("🔍", "Searching")
+        return ("⚡", "Running")
+    if tool_name in _EDIT_TOOLS:
+        return ("✏️", "Editing")
+    if tool_name in _SEARCH_TOOLS:
+        return ("🔍", "Searching")
+    if tool_name in _THINK_TOOLS:
+        return ("🧠", "Thinking")
+    if tool_name.startswith(("mcp__playwright__", "browser_")):
+        return ("🌐", "Browsing")
+    if tool_name == "Agent":
+        lowered = description.lower()
+        if any(w in lowered for w in ("plan", "design", "architect")):
+            return ("🧠", "Thinking")
+        return ("🔍", "Searching")
+    return ("⏳", "Running")
 
 
 def _truncate_callback_data(data: str) -> str:
@@ -287,12 +335,13 @@ class TelegramConnector(BaseConnector):
     async def send_activity(
         self,
         chat_id: str,
-        tool_name: str,  # noqa: ARG002
+        tool_name: str,
         description: str,
     ) -> str | None:
         if self._app is None:
             return None
-        text = f"\u23f3 Running: {description}"
+        emoji, verb = _activity_label(tool_name, description)
+        text = f"{emoji} {verb}: {description}"
         existing = self._activity_message_id.get(chat_id)
         if existing:
             if self._activity_last_text.get(chat_id) == text:
@@ -525,7 +574,17 @@ class TelegramConnector(BaseConnector):
             description_length=len(description),
             will_split=len(description) > _MAX_MESSAGE_LENGTH,
         )
+        await self.clear_activity(chat_id)
         plan_ids = await self.send_plan_messages(chat_id, description)
+
+        if not plan_ids and description:
+            max_inline = _MAX_MESSAGE_LENGTH - 200
+            truncated = description[:max_inline]
+            if len(description) > max_inline:
+                truncated += "\n\n... (truncated)"
+            review_header = f"{truncated}\n\n---\nProceed with implementation?"
+        else:
+            review_header = "Claude has written up a plan. Proceed with implementation?"
 
         buttons = [
             [
@@ -561,7 +620,6 @@ class TelegramConnector(BaseConnector):
                 ),
             ],
         ]
-        review_header = "Claude has written up a plan. Proceed with implementation?"
         review_msg_id = await self._send_message_with_id_and_buttons(
             chat_id, review_header, buttons
         )

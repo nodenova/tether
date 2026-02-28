@@ -76,7 +76,7 @@ The system follows a three-layer safety pipeline: **Sandbox → Policy → Appro
 
 **Session management** (`core/session.py`): `SessionManager` handles session lifecycle — creation, lookup by user+chat pair, working directory switching, and delegation to the storage backend.
 
-**Workspaces** (`core/workspace.py`): Groups related repos under a named workspace so the agent gets multi-repo context. `Workspace` is a frozen Pydantic model; `load_workspaces()` reads `.tether/workspaces.yaml`, validates dirs against `TETHER_APPROVED_DIRECTORIES`. `/workspace` (alias `/ws`) command activates a workspace — sets cwd to primary dir, injects multi-repo context into system prompt, merges MCP servers from all workspace dirs.
+**Workspaces** (`core/workspace.py`): Groups related repos under a named workspace so the agent gets multi-repo context. `Workspace` is a frozen Pydantic model; `load_workspaces()` reads `.tether/workspaces.yaml`, validates dirs against `TETHER_APPROVED_DIRECTORIES`. `/workspace` (alias `/ws`) command activates a workspace — sets cwd to primary dir, injects multi-repo context into system prompt. MCP servers are **not** copied from workspace directories; the agent only uses MCP from the working directory and TetherConfig.
 
 **Git integration** (`git/`): Full `/git` command suite accessible from Telegram with inline action buttons.
 - `GitService` (`service.py`) — async wrapper around git CLI with 30s timeout and input validation

@@ -793,7 +793,7 @@ class TestDirSwitchDataPaths:
         d2.mkdir()
         from tether.storage.sqlite import SqliteSessionStore
 
-        db_path = d1 / ".tether" / "tether.db"
+        db_path = d1 / ".tether" / "messages.db"
         db_path.parent.mkdir(parents=True, exist_ok=True)
         store = SqliteSessionStore(db_path)
         await store.setup()
@@ -812,7 +812,7 @@ class TestDirSwitchDataPaths:
         await eng.handle_message("user1", "hello", "chat1")
         await eng.handle_command("user1", "dir", "proj2", "chat1")
 
-        expected = str(d2 / ".tether" / "tether.db")
+        expected = str(d2 / ".tether" / "messages.db")
         assert eng._message_store._db_path == expected
         await store.teardown()
 
@@ -1229,6 +1229,34 @@ class TestSmartCommit:
             or "echo:" in m.get("text", "").lower()
         ]
         assert len(agent_msgs) >= 1
+
+    @pytest.mark.asyncio
+    async def test_smart_commit_prompt_forbids_coauthor_attribution(
+        self, config, audit_logger, policy_engine, mock_connector
+    ):
+        agent = FakeAgent()
+        git_handler = _make_git_handler_mock()
+        eng = Engine(
+            connector=mock_connector,
+            agent=agent,
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+            git_handler=git_handler,
+        )
+
+        await eng.handle_command("user1", "git", "commit", "chat1")
+
+        echoed = [
+            m["text"]
+            for m in mock_connector.sent_messages
+            if "echo:" in m.get("text", "").lower()
+        ]
+        assert len(echoed) >= 1
+        prompt_text = echoed[0].lower()
+        assert "co-authored-by" in prompt_text
+        assert "do not" in prompt_text
 
 
 class TestGitCallbackRouting:

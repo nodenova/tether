@@ -894,7 +894,7 @@ class TestDirectoryPersistenceAcrossRestart:
             audit_log_path=tmp_path / "audit.jsonl",
         )
         session_db = tmp_path / "sessions.db"
-        msg_db_1 = d1 / ".tether" / "tether.db"
+        msg_db_1 = d1 / ".tether" / "messages.db"
         msg_db_1.parent.mkdir(parents=True, exist_ok=True)
 
         # Engine 1: switch to api
@@ -921,7 +921,7 @@ class TestDirectoryPersistenceAcrossRestart:
 
         # Engine 2: fresh stores on same session DB — simulates restart
         session_store_2 = SqliteSessionStore(session_db)
-        msg_db_default = d1 / ".tether" / "tether.db"
+        msg_db_default = d1 / ".tether" / "messages.db"
         message_store_2 = SqliteSessionStore(msg_db_default)
         await session_store_2.setup()
         await message_store_2.setup()
@@ -971,7 +971,7 @@ class TestDirectoryPersistenceAcrossRestart:
             )
         )
 
-        msg_db = d1 / ".tether" / "tether.db"
+        msg_db = d1 / ".tether" / "messages.db"
         msg_db.parent.mkdir(parents=True, exist_ok=True)
         message_store = SqliteSessionStore(msg_db)
         await message_store.setup()
@@ -990,8 +990,8 @@ class TestDirectoryPersistenceAcrossRestart:
         )
         await eng.handle_message("user1", "hello", "chat1")
 
-        # Message store should have been realigned to api's tether.db
-        expected_path = str(d2.resolve() / ".tether" / "tether.db")
+        # Message store should have been realigned to api's messages.db
+        expected_path = str(d2.resolve() / ".tether" / "messages.db")
         assert message_store._db_path == expected_path
         await session_store.teardown()
         await message_store.teardown()
@@ -1011,7 +1011,7 @@ class TestDirectoryPersistenceAcrossRestart:
             audit_log_path=tmp_path / "audit.jsonl",
         )
         session_db = tmp_path / "sessions.db"
-        msg_db = d1 / ".tether" / "tether.db"
+        msg_db = d1 / ".tether" / "messages.db"
         msg_db.parent.mkdir(parents=True, exist_ok=True)
 
         session_store = SqliteSessionStore(session_db)

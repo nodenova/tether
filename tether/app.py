@@ -50,7 +50,7 @@ def switch_log_dir(new_dir: Path, config: TetherConfig) -> None:
             handler.close()
             root.removeHandler(handler)
     file_handler = logging.handlers.RotatingFileHandler(
-        new_dir / "tether.log",
+        new_dir / "app.log",
         maxBytes=config.log_max_bytes,
         backupCount=config.log_backup_count,
     )
@@ -95,7 +95,7 @@ def _configure_logging(config: TetherConfig, *, log_dir: Path | None = None) -> 
     if log_dir is not None:
         log_dir.mkdir(parents=True, exist_ok=True)
         file_handler = logging.handlers.RotatingFileHandler(
-            log_dir / "tether.log",
+            log_dir / "app.log",
             maxBytes=config.log_max_bytes,
             backupCount=config.log_backup_count,
         )

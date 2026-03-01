@@ -282,7 +282,9 @@ class Engine:
         self._audit_path_pinned = audit_path_pinned
         self._storage_path_pinned = storage_path_pinned
         self._audit_path_template = audit_path_template or Path(".tether/audit.jsonl")
-        self._storage_path_template = storage_path_template or Path(".tether/tether.db")
+        self._storage_path_template = storage_path_template or Path(
+            ".tether/messages.db"
+        )
         self._log_dir_pinned = log_dir_pinned
         self._log_dir_template = log_dir_template or Path(".tether/logs")
 
@@ -552,6 +554,7 @@ class Engine:
         await self._realign_paths_for_session(session)
         self._ensure_session_tether_dir(session)
         self._executing_sessions[chat_id] = session.session_id
+        structlog.contextvars.bind_contextvars(session_id=session.session_id)
 
         responder = None
         on_text_chunk = None
@@ -1258,7 +1261,8 @@ class Engine:
             "3. Analyze the changes and generate a conventional commit message "
             "(feat:, fix:, chore:, refactor:, docs:, test:, style:, etc.) — "
             "keep it to 1-2 sentences max\n"
-            '4. Run `git commit -m "<your message>"`\n'
+            '4. Run `git commit -m "<your message>"` — do NOT add any '
+            "Co-Authored-By trailers or author attribution to the message\n"
             "5. Report the commit hash and message used\n\n"
             f"Working directory: {session.working_directory}"
         )

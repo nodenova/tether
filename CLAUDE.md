@@ -129,6 +129,28 @@ Tether integrates with Playwright MCP for browser automation. The `.mcp.json` at
 - Rule of Three: don't abstract until third duplication
 - Test behavior, not implementation details
 
+## Logging & Observability
+
+Tether produces three data surfaces per project, all under `{project}/.tether/`:
+
+| Surface | Path | Format | Purpose |
+|---------|------|--------|---------|
+| App logs | `logs/app.log` | JSON lines (rotating, 10 MB × 5 backups) | Structured application events from structlog |
+| Audit log | `audit.jsonl` | JSON lines (append-only) | Tool-gating decisions, approvals, security violations |
+| Message store | `messages.db` | SQLite | Conversation history (user/assistant messages, cost, duration) |
+
+Session metadata lives in a separate fixed-location store at `{tether_root}/.tether/sessions.db`.
+
+**Context variable auto-propagation** (`core/engine.py`): The engine binds `request_id`, `chat_id`, and `session_id` to structlog contextvars at the start of each turn. These fields automatically appear in every log entry during that turn without explicit passing. `request_id` is ephemeral (8-char hex, fresh per turn); `session_id` persists across the conversation.
+
+**Correlation keys across surfaces**:
+- `session_id` — present in all three surfaces; primary join key
+- `request_id` — app logs only; isolates a single turn's log entries
+- `user_id` + `chat_id` — session store, message store, and app logs
+- `working_directory` — links session store to the correct project's per-project files
+
+**Logging env vars**: `TETHER_LOG_LEVEL` (default `INFO`), `TETHER_LOG_DIR` (default `.tether/logs`), `TETHER_LOG_MAX_BYTES` (default 10 MB), `TETHER_LOG_BACKUP_COUNT` (default 5), `TETHER_AUDIT_LOG_PATH` (default `.tether/audit.jsonl`).
+
 ## Changelog
 
 After completing each feature, bug fix, or notable change, add a concise entry to `CHANGELOG.md` under the **current (latest) version heading**. All new entries accumulate under that version until a new version is explicitly introduced (e.g., bumping from `0.2.1` to `0.2.2` or `0.3.0`).

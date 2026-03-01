@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from tether.git.service import GitService, _porcelain_to_status
+from tether.git.service import GitService, _porcelain_to_status, _strip_claude_coauthor
 
 
 @pytest.fixture
@@ -595,6 +595,56 @@ class TestCommit:
             result = await service.commit(cwd, "msg")
         assert result.success is False
         assert "error in stdout" in result.details
+
+
+class TestStripClaudeCoauthor:
+    def test_removes_claude_coauthor_trailer(self):
+        msg = "feat: add feature\n\nCo-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>"
+        assert _strip_claude_coauthor(msg) == "feat: add feature"
+
+    def test_removes_case_insensitive(self):
+        msg = "fix: bug\n\nco-authored-by: claude <noreply@anthropic.com>"
+        result = _strip_claude_coauthor(msg)
+        assert "co-authored-by" not in result.lower()
+        assert result == "fix: bug"
+
+    def test_preserves_human_coauthor(self):
+        msg = "feat: add feature\n\nCo-Authored-By: Jane Doe <jane@example.com>"
+        assert "Jane Doe" in _strip_claude_coauthor(msg)
+
+    def test_removes_claude_but_preserves_human(self):
+        msg = (
+            "feat: add feature\n\n"
+            "Co-Authored-By: Jane Doe <jane@example.com>\n"
+            "Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>"
+        )
+        result = _strip_claude_coauthor(msg)
+        assert "Jane Doe" in result
+        assert "Claude" not in result
+        assert "anthropic" not in result
+
+    def test_no_trailer_unchanged(self):
+        assert _strip_claude_coauthor("chore: update deps") == "chore: update deps"
+
+    def test_matches_anthropic_email_without_claude_name(self):
+        msg = "fix: bug\n\nCo-Authored-By: AI <noreply@anthropic.com>"
+        result = _strip_claude_coauthor(msg)
+        assert "anthropic" not in result
+
+    def test_matches_claude_without_anthropic_email(self):
+        msg = "fix: bug\n\nCo-Authored-By: Claude Opus 4.6 <other@email.com>"
+        result = _strip_claude_coauthor(msg)
+        assert "Claude" not in result
+
+    async def test_commit_strips_coauthor(self, service, cwd):
+        proc = _make_proc(stdout="[main abc] msg\n")
+        msg = "feat: thing\n\nCo-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>"
+        with _patch_subprocess(proc) as mock_exec:
+            await service.commit(cwd, msg)
+        args = mock_exec.call_args[0]
+        commit_msg = args[args.index("-m") + 1]
+        assert "Claude" not in commit_msg
+        assert "feat: thing" in commit_msg
 
 
 class TestPush:

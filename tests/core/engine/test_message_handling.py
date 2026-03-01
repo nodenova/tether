@@ -5,6 +5,7 @@ import time
 from unittest.mock import AsyncMock, patch
 
 import pytest
+import structlog.contextvars
 
 from tests.core.engine.conftest import FakeAgent
 from tether.agents.base import AgentResponse, BaseAgent
@@ -509,3 +510,46 @@ class TestEngineResilience:
         result = await eng.handle_message("u1", "trigger", "c1")
         assert "Error:" in result
         assert eng._pending_messages.get("c1") == [("u1", "queued msg")]
+
+
+class TestContextVarBinding:
+    """Verify structlog contextvars include session_id during a turn."""
+
+    @pytest.mark.asyncio
+    async def test_session_id_bound_to_contextvars_during_turn(
+        self, config, audit_logger, policy_engine
+    ):
+        captured_vars: dict = {}
+
+        class CapturingAgent(BaseAgent):
+            async def execute(self, prompt, session, **kwargs):
+                captured_vars.update(structlog.contextvars.get_contextvars())
+                return AgentResponse(
+                    content=f"Echo: {prompt}",
+                    session_id="cap-session-123",
+                    cost=0.01,
+                )
+
+            async def cancel(self, session_id):
+                pass
+
+            async def shutdown(self):
+                pass
+
+        eng = Engine(
+            connector=None,
+            agent=CapturingAgent(),
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+        )
+
+        await eng.handle_message("user1", "hello", "chat1")
+
+        assert "request_id" in captured_vars
+        assert "chat_id" in captured_vars
+        assert captured_vars["chat_id"] == "chat1"
+        assert "session_id" in captured_vars
+        assert isinstance(captured_vars["session_id"], str)
+        assert len(captured_vars["session_id"]) > 0

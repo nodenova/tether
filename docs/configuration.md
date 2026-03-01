@@ -66,7 +66,7 @@ Environment variables override `.env` file values. Validators run after loading 
 | Variable | Type | Default | Description |
 |---|---|---|---|
 | `TETHER_STORAGE_BACKEND` | `str` | `"sqlite"` | Storage backend: `"sqlite"` (persistent, default) or `"memory"` |
-| `TETHER_STORAGE_PATH` | `Path` | `.tether/tether.db` | Path to SQLite database file (only used when backend is `"sqlite"`) |
+| `TETHER_STORAGE_PATH` | `Path` | `.tether/messages.db` | Path to SQLite database file (only used when backend is `"sqlite"`) |
 
 ### Agent Mode
 
@@ -177,7 +177,7 @@ TETHER_TELEGRAM_BOT_TOKEN=your-bot-token-here
 
 # Storage
 TETHER_STORAGE_BACKEND=sqlite
-TETHER_STORAGE_PATH=.tether/tether.db
+TETHER_STORAGE_PATH=.tether/messages.db
 
 # Streaming
 TETHER_STREAMING_ENABLED=true

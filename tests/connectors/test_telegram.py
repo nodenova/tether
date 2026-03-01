@@ -1834,6 +1834,57 @@ class TestClearActivity:
         await connector.clear_activity("123")
         assert mock_app.bot.delete_message.await_count == 1
 
+    @pytest.mark.asyncio
+    async def test_clear_activity_retries_delete(self, connector):
+        mock_app = _make_mock_app()
+        connector._app = mock_app
+        connector._activity_message_id["123"] = "50"
+        connector._activity_last_text["123"] = "⏳ Running: task"
+
+        # First call fails with NetworkError, second succeeds
+        mock_app.bot.delete_message = AsyncMock(
+            side_effect=[NetworkError("timeout"), None]
+        )
+
+        await connector.clear_activity("123")
+        assert "123" not in connector._activity_message_id
+        assert "123" not in connector._activity_last_text
+        assert mock_app.bot.delete_message.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_clear_activity_pops_state_on_delete_failure(self, connector):
+        mock_app = _make_mock_app()
+        connector._app = mock_app
+        connector._activity_message_id["123"] = "50"
+        connector._activity_last_text["123"] = "⏳ Running: task"
+
+        # All retries fail — state should still be cleaned up
+        mock_app.bot.delete_message = AsyncMock(side_effect=BadRequest("not found"))
+
+        await connector.clear_activity("123")
+        assert "123" not in connector._activity_message_id
+        assert "123" not in connector._activity_last_text
+
+
+class TestSendActivityRecovery:
+    @pytest.mark.asyncio
+    async def test_send_activity_recovers_from_stale_message_id(self, connector):
+        mock_app = _make_mock_app()
+        connector._app = mock_app
+        connector._activity_message_id["123"] = "50"
+        connector._activity_last_text["123"] = "🔍 Searching: Old task"
+
+        # edit fails (stale msg), then send creates new message
+        mock_app.bot.edit_message_text = AsyncMock(
+            side_effect=BadRequest("message not found")
+        )
+        mock_app.bot.send_message = AsyncMock(return_value=MagicMock(message_id=99))
+
+        msg_id = await connector.send_activity("123", "Read", "New task")
+        assert msg_id == "99"
+        assert connector._activity_message_id["123"] == "99"
+        mock_app.bot.send_message.assert_awaited_once()
+
 
 # --- B3: Question messages ---
 

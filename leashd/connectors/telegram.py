@@ -346,20 +346,82 @@ class TelegramConnector(BaseConnector):
         if existing:
             if self._activity_last_text.get(chat_id) == text:
                 return existing
-            await self.edit_message(chat_id, existing, text)
-            self._activity_last_text[chat_id] = text
-            return existing
+            edited = await self._try_edit_message(chat_id, existing, text)
+            if edited:
+                self._activity_last_text[chat_id] = text
+                return existing
+            # Edit failed — message is gone, clear stale state and create new
+            self._activity_message_id.pop(chat_id, None)
+            self._activity_last_text.pop(chat_id, None)
         msg_id = await self.send_message_with_id(chat_id, text)
         if msg_id:
             self._activity_message_id[chat_id] = msg_id
             self._activity_last_text[chat_id] = text
         return msg_id
 
+    async def _try_delete_message(self, chat_id: str, message_id: str) -> bool:
+        """Delete a message with retry on transient errors. Returns True on success."""
+        if self._app is None:
+            return False
+        app = self._app
+        try:
+            await _retry_on_network_error(
+                lambda: app.bot.delete_message(
+                    chat_id=int(chat_id), message_id=int(message_id)
+                ),
+                max_retries=_SEND_MAX_RETRIES,
+                base_delay=_SEND_BASE_DELAY,
+                max_delay=_SEND_MAX_DELAY,
+                operation="delete_activity",
+            )
+            return True
+        except Exception:
+            logger.debug(
+                "telegram_delete_message_failed",
+                chat_id=chat_id,
+                message_id=message_id,
+            )
+            return False
+
+    async def _try_edit_message(self, chat_id: str, message_id: str, text: str) -> bool:
+        """Edit a message with retry. Returns True on success."""
+        if self._app is None:
+            return False
+        app = self._app
+        truncated = text[:_MAX_MESSAGE_LENGTH]
+        try:
+            await _retry_on_network_error(
+                lambda: app.bot.edit_message_text(
+                    chat_id=int(chat_id),
+                    message_id=int(message_id),
+                    text=truncated,
+                ),
+                max_retries=_SEND_MAX_RETRIES,
+                base_delay=_SEND_BASE_DELAY,
+                max_delay=_SEND_MAX_DELAY,
+                operation="edit_activity",
+            )
+            return True
+        except Exception:
+            logger.debug(
+                "telegram_edit_message_failed",
+                chat_id=chat_id,
+                message_id=message_id,
+            )
+            return False
+
     async def clear_activity(self, chat_id: str) -> None:
-        msg_id = self._activity_message_id.pop(chat_id, None)
+        msg_id = self._activity_message_id.get(chat_id)
+        if not msg_id:
+            self._activity_last_text.pop(chat_id, None)
+            return
+        deleted = await self._try_delete_message(chat_id, msg_id)
+        self._activity_message_id.pop(chat_id, None)
         self._activity_last_text.pop(chat_id, None)
-        if msg_id:
-            await self.delete_message(chat_id, msg_id)
+        if not deleted:
+            logger.warning(
+                "activity_message_orphaned", chat_id=chat_id, message_id=msg_id
+            )
 
     async def send_plan_messages(
         self,

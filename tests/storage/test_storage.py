@@ -584,8 +584,8 @@ class TestSqliteConcurrentAccess:
 class TestSqliteSwitchDb:
     @pytest.mark.asyncio
     async def test_switch_db_opens_new_database(self, tmp_path):
-        db1 = tmp_path / "db1" / "tether.db"
-        db2 = tmp_path / "db2" / "tether.db"
+        db1 = tmp_path / "db1" / "messages.db"
+        db2 = tmp_path / "db2" / "messages.db"
         db1.parent.mkdir(parents=True)
         store = SqliteSessionStore(db1)
         await store.setup()
@@ -605,7 +605,7 @@ class TestSqliteSwitchDb:
 
     @pytest.mark.asyncio
     async def test_switch_db_noop_for_same_path(self, tmp_path):
-        db = tmp_path / "tether.db"
+        db = tmp_path / "messages.db"
         store = SqliteSessionStore(db)
         await store.setup()
         try:
@@ -618,8 +618,8 @@ class TestSqliteSwitchDb:
 
     @pytest.mark.asyncio
     async def test_switch_db_creates_parent_dirs(self, tmp_path):
-        db1 = tmp_path / "tether.db"
-        db2 = tmp_path / "deep" / "nested" / "tether.db"
+        db1 = tmp_path / "messages.db"
+        db2 = tmp_path / "deep" / "nested" / "messages.db"
         store = SqliteSessionStore(db1)
         await store.setup()
         try:
@@ -634,8 +634,8 @@ class TestSeparateStores:
     async def test_separate_stores_independent_after_switch(self, tmp_path):
         """Two SqliteSessionStore instances stay independent after switch_db on one."""
         db_session = tmp_path / "sessions.db"
-        db_msg1 = tmp_path / "proj1" / "tether.db"
-        db_msg2 = tmp_path / "proj2" / "tether.db"
+        db_msg1 = tmp_path / "proj1" / "messages.db"
+        db_msg2 = tmp_path / "proj2" / "messages.db"
         db_msg1.parent.mkdir(parents=True)
 
         session_store = SqliteSessionStore(db_session)

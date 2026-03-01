@@ -245,7 +245,7 @@ class TestBuildDirectoryNames:
 class TestTetherDirDefaults:
     def test_storage_path_defaults_to_tether_dir(self, tmp_path):
         config = TetherConfig(approved_directories=[tmp_path])
-        assert config.storage_path == Path(".tether/tether.db")
+        assert config.storage_path == Path(".tether/messages.db")
 
     def test_audit_log_path_defaults_to_tether_dir(self, tmp_path):
         config = TetherConfig(approved_directories=[tmp_path])

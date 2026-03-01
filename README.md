@@ -142,7 +142,7 @@ The three essential variables are covered in [Quick Start](#4-configure). Here's
 | `TETHER_RATE_LIMIT_RPM` | `0` *(off)* | Max requests per minute per user. |
 | `TETHER_RATE_LIMIT_BURST` | `5` | Burst capacity for the rate limiter. |
 | `TETHER_STORAGE_BACKEND` | `sqlite` | `sqlite` (persistent, default) or `memory` (sessions lost on restart). |
-| `TETHER_STORAGE_PATH` | `.tether/tether.db` | SQLite database path. Only used when backend is `sqlite`. |
+| `TETHER_STORAGE_PATH` | `.tether/messages.db` | SQLite database path. Only used when backend is `sqlite`. |
 | `TETHER_LOG_LEVEL` | `INFO` | `DEBUG`, `INFO`, `WARNING`, or `ERROR`. |
 | `TETHER_AUDIT_LOG_PATH` | `.tether/audit.jsonl` | Path for the append-only audit log of all tool decisions. |
 | `TETHER_ALLOWED_TOOLS` | *(all)* | Allowlist of Claude tool names. Empty = all tools allowed. |
@@ -152,7 +152,7 @@ The three essential variables are covered in [Quick Start](#4-configure). Here's
 | `TETHER_AGENT_TIMEOUT_SECONDS` | `1800` | Agent execution timeout (30 minutes). |
 | `TETHER_DEFAULT_MODE` | `default` | Default session mode: `"default"`, `"plan"`, or `"auto"`. |
 | `TETHER_MCP_SERVERS` | `{}` | JSON dict of MCP server configurations. |
-| `TETHER_LOG_DIR` | `.tether/logs` | Directory for rotating JSON file logging (`{dir}/tether.log`). |
+| `TETHER_LOG_DIR` | `.tether/logs` | Directory for rotating JSON file logging (`{dir}/app.log`). |
 | `TETHER_LOG_MAX_BYTES` | `10485760` | Max log file size before rotation. Used with `LOG_DIR`. |
 | `TETHER_LOG_BACKUP_COUNT` | `5` | Rotated log backups to keep. Used with `LOG_DIR`. |
 
@@ -213,7 +213,7 @@ TETHER_POLICY_FILES=policies/default.yaml,policies/my-overrides.yaml
 
 ## Session Persistence
 
-By default, sessions are stored in SQLite (`.tether/tether.db`) and persist across restarts — Claude remembers your conversation context between sessions. Tether also logs every message (user and assistant) with cost, duration, and session metadata — giving you a queryable conversation history.
+By default, sessions are stored in SQLite (`.tether/messages.db`) and persist across restarts — Claude remembers your conversation context between sessions. Tether also logs every message (user and assistant) with cost, duration, and session metadata — giving you a queryable conversation history.
 
 For development or testing, you can opt into in-memory storage (sessions lost on restart):
 
@@ -275,7 +275,7 @@ By default, logs go only to the console. To also write JSON logs to a rotating f
 TETHER_LOG_DIR=logs
 ```
 
-This creates `logs/tether.log` with automatic rotation. You can tune rotation with `TETHER_LOG_MAX_BYTES` (default: 10 MB) and `TETHER_LOG_BACKUP_COUNT` (default: 5 backups).
+This creates `logs/app.log` with automatic rotation. You can tune rotation with `TETHER_LOG_MAX_BYTES` (default: 10 MB) and `TETHER_LOG_BACKUP_COUNT` (default: 5 backups).
 
 ### Key log events
 

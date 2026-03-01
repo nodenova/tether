@@ -83,7 +83,7 @@ class TetherConfig(BaseSettings):
 
     # Storage
     storage_backend: str = "sqlite"
-    storage_path: Path = Path(".tether/tether.db")
+    storage_path: Path = Path(".tether/messages.db")
 
     # Agent mode
     default_mode: Literal["default", "plan", "auto"] = "default"

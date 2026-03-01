@@ -23,6 +23,18 @@ _BRANCH_NAME_RE = re.compile(r"^[a-zA-Z0-9._/\-]+$")
 _DEFAULT_TIMEOUT = 30
 _LOG_DELIMITER = "||"
 
+_CLAUDE_COAUTHOR_RE = re.compile(
+    r"^\s*Co-Authored-By:.*(?:Claude|noreply@anthropic\.com).*$",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+
+def _strip_claude_coauthor(message: str) -> str:
+    """Remove Co-Authored-By trailers that reference Claude/Anthropic."""
+    cleaned = _CLAUDE_COAUTHOR_RE.sub("", message)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    return cleaned.strip()
+
 
 class GitService:
     """Async wrapper for git CLI operations."""
@@ -279,6 +291,7 @@ class GitService:
 
     async def commit(self, cwd: Path, message: str) -> GitResult:
         """Commit staged changes with message."""
+        message = _strip_claude_coauthor(message)
         code, stdout, stderr = await self._run("commit", "-m", message, cwd=cwd)
         if code == 0:
             # Extract short hash from output like "[main abc1234] message"

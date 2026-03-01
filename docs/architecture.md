@@ -5,7 +5,7 @@
 - **Safety as architecture** — Safety is not a bolt-on. The three-layer pipeline (sandbox, policy, approval) is wired into the core and cannot be bypassed.
 - **Composition over inheritance** — Small collaborating objects connected via protocols. No deep class hierarchies.
 - **Async-first** — All I/O operations use asyncio. Blocking calls are never made on the event loop.
-- **Protocol-based extensibility** — `BaseAgent`, `BaseConnector`, `Middleware`, `TetherPlugin`, and `SessionStore` are all abstract protocols. Swap any implementation without touching the core.
+- **Protocol-based extensibility** — `BaseAgent`, `BaseConnector`, `Middleware`, `LeashdPlugin`, and `SessionStore` are all abstract protocols. Swap any implementation without touching the core.
 - **Declarative rules** — Safety policies are defined in YAML, not code. Readable, version-controlled, swappable at startup.
 
 ## Component Inventory
@@ -13,7 +13,7 @@
 | Component | Class | Module |
 |---|---|---|
 | Engine | `Engine` | `core/engine.py` |
-| Configuration | `TetherConfig` | `core/config.py` |
+| Configuration | `LeashdConfig` | `core/config.py` |
 | Event bus | `EventBus` | `core/events.py` |
 | Session manager | `SessionManager` | `core/session.py` |
 | Gatekeeper | `ToolGatekeeper` | `core/safety/gatekeeper.py` |
@@ -29,7 +29,7 @@
 | Middleware chain | `MiddlewareChain` | `middleware/base.py` |
 | Auth middleware | `AuthMiddleware` | `middleware/auth.py` |
 | Rate limiter | `RateLimitMiddleware` | `middleware/rate_limit.py` |
-| Plugin protocol | `TetherPlugin` | `plugins/base.py` |
+| Plugin protocol | `LeashdPlugin` | `plugins/base.py` |
 | Plugin registry | `PluginRegistry` | `plugins/registry.py` |
 | Audit plugin | `AuditPlugin` | `plugins/builtin/audit_plugin.py` |
 | Browser tools plugin | `BrowserToolsPlugin` | `plugins/builtin/browser_tools.py` |
@@ -57,7 +57,7 @@ flowchart TB
 
     subgraph Core["Core"]
         engine["Engine"]
-        config["TetherConfig"]
+        config["LeashdConfig"]
         events["EventBus"]
         session["SessionManager"]
         interactions["InteractionCoordinator"]
@@ -141,24 +141,24 @@ Shutdown reverses the order: `ENGINE_STOPPED` event, then plugins stop (LIFO), s
 
 ```mermaid
 flowchart TD
-    TetherError --> ConfigError
-    TetherError --> AgentError
-    TetherError --> SafetyError
-    TetherError --> ApprovalTimeoutError
-    TetherError --> SessionError
-    TetherError --> StorageError
-    TetherError --> PluginError
-    TetherError --> InteractionTimeoutError
+    LeashdError --> ConfigError
+    LeashdError --> AgentError
+    LeashdError --> SafetyError
+    LeashdError --> ApprovalTimeoutError
+    LeashdError --> SessionError
+    LeashdError --> StorageError
+    LeashdError --> PluginError
+    LeashdError --> InteractionTimeoutError
 ```
 
-All exceptions inherit from `TetherError` (defined in `exceptions.py`). Each maps to a specific subsystem failure, allowing callers to catch at the right granularity.
+All exceptions inherit from `LeashdError` (defined in `exceptions.py`). Each maps to a specific subsystem failure, allowing callers to catch at the right granularity.
 
 ## Logging Architecture
 
-Tether uses `structlog` with keyword arguments (no string interpolation).
+leashd uses `structlog` with keyword arguments (no string interpolation).
 
 - **Console handler** — Colored, developer-friendly output. Always active.
-- **File handler** — JSON lines with rotating files. Activated when `TETHER_LOG_DIR` is set. Controlled by `TETHER_LOG_MAX_BYTES` (default 10 MB) and `TETHER_LOG_BACKUP_COUNT` (default 5).
-- **Audit log** — Separate append-only JSONL file via `AuditLogger`. Path controlled by `TETHER_AUDIT_LOG_PATH`.
+- **File handler** — JSON lines with rotating files. Activated when `LEASHD_LOG_DIR` is set. Controlled by `LEASHD_LOG_MAX_BYTES` (default 10 MB) and `LEASHD_LOG_BACKUP_COUNT` (default 5).
+- **Audit log** — Separate append-only JSONL file via `AuditLogger`. Path controlled by `LEASHD_AUDIT_LOG_PATH`.
 
 Logging is configured by `_configure_logging()` in `app.py`, called at the start of `build_engine()`.

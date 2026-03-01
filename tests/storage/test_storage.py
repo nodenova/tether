@@ -2,11 +2,11 @@
 
 import pytest
 
-from tether.core.session import Session, SessionManager
-from tether.exceptions import StorageError
-from tether.storage.base import MessageStore, SessionStore
-from tether.storage.memory import MemorySessionStore
-from tether.storage.sqlite import SqliteSessionStore
+from leashd.core.session import Session, SessionManager
+from leashd.exceptions import StorageError
+from leashd.storage.base import MessageStore, SessionStore
+from leashd.storage.memory import MemorySessionStore
+from leashd.storage.sqlite import SqliteSessionStore
 
 
 class TestProtocolConformance:

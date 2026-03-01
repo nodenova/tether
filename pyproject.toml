@@ -1,9 +1,23 @@
 [project]
-name = "tether"
+name = "leashd"
 version = "0.4.0"
-description = "Remote AI-assisted development with safety constraints. Work from anywhere, keep AI tethered."
+description = "Remote AI-assisted development with safety constraints. Work from anywhere, keep AI on a leash."
 readme = "README.md"
 requires-python = ">=3.13"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [{name = "NodeNova"}]
+keywords = ["ai", "development", "remote", "safety", "claude", "telegram", "agent"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development",
+    "Framework :: AsyncIO",
+    "Environment :: Console",
+]
 dependencies = [
     "claude-agent-sdk>=0.1.39",
     "pydantic>=2.12.5",
@@ -16,11 +30,35 @@ dependencies = [
 ]
 
 [project.scripts]
-tether = "tether.main:run"
+leashd = "leashd.main:run"
+
+[project.urls]
+Homepage = "https://github.com/nodenova/leashd"
+Repository = "https://github.com/nodenova/leashd"
+Documentation = "https://github.com/nodenova/leashd/tree/main/docs"
+Changelog = "https://github.com/nodenova/leashd/blob/main/CHANGELOG.md"
+"Bug Tracker" = "https://github.com/nodenova/leashd/issues"
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.sdist]
+exclude = [
+    "tests/",
+    ".claude/",
+    ".vscode/",
+    ".leashd/",
+    ".env",
+    ".env.example",
+    ".mcp.json",
+    "specs/",
+    "docs/",
+    "Makefile",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["leashd"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -60,7 +98,7 @@ ignore = ["E501"]  # line too long, handled by formatter
 "tests/**" = ["S101", "S105", "S106", "S108", "ARG"]  # assert, test tokens, /tmp paths, unused args all fine in tests
 
 [tool.ruff.lint.isort]
-known-first-party = ["tether"]
+known-first-party = ["leashd"]
 
 [tool.mypy]
 python_version = "3.13"
@@ -76,7 +114,7 @@ module = "tests.*"
 disallow_untyped_defs = false
 
 [tool.coverage.run]
-source = ["tether"]
+source = ["leashd"]
 branch = true
 
 [tool.coverage.report]

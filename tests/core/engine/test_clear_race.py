@@ -10,9 +10,9 @@ import asyncio
 
 import pytest
 
-from tether.agents.base import AgentResponse, BaseAgent
-from tether.core.engine import Engine
-from tether.core.session import SessionManager
+from leashd.agents.base import AgentResponse, BaseAgent
+from leashd.core.engine import Engine
+from leashd.core.session import SessionManager
 
 
 class SlowAgent(BaseAgent):

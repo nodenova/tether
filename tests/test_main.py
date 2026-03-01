@@ -1,12 +1,12 @@
-"""Tests for tether.main — CLI entry point logic."""
+"""Tests for leashd.main — CLI entry point logic."""
 
 import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from tether.exceptions import ConnectorError
-from tether.main import main, run
+from leashd.exceptions import ConnectorError
+from leashd.main import main, run
 
 
 @pytest.fixture
@@ -29,7 +29,7 @@ def mock_config(tmp_path):
 class TestMain:
     @pytest.mark.asyncio
     async def test_config_error_exits(self):
-        with patch("tether.main.TetherConfig", side_effect=ValueError("bad config")):
+        with patch("leashd.main.LeashdConfig", side_effect=ValueError("bad config")):
             with pytest.raises(SystemExit) as exc_info:
                 await main()
             assert exc_info.value.code == 1
@@ -37,8 +37,8 @@ class TestMain:
     @pytest.mark.asyncio
     async def test_successful_startup(self, mock_engine, mock_config):
         with (
-            patch("tether.main.TetherConfig", return_value=mock_config),
-            patch("tether.main.build_engine", return_value=mock_engine),
+            patch("leashd.main.LeashdConfig", return_value=mock_config),
+            patch("leashd.main.build_engine", return_value=mock_engine),
             patch("builtins.input", side_effect=EOFError),
         ):
             await main()
@@ -48,8 +48,8 @@ class TestMain:
     @pytest.mark.asyncio
     async def test_eof_triggers_shutdown(self, mock_engine, mock_config):
         with (
-            patch("tether.main.TetherConfig", return_value=mock_config),
-            patch("tether.main.build_engine", return_value=mock_engine),
+            patch("leashd.main.LeashdConfig", return_value=mock_config),
+            patch("leashd.main.build_engine", return_value=mock_engine),
             patch("builtins.input", side_effect=EOFError),
         ):
             await main()
@@ -59,8 +59,8 @@ class TestMain:
     @pytest.mark.asyncio
     async def test_keyboard_interrupt_shutdown(self, mock_engine, mock_config):
         with (
-            patch("tether.main.TetherConfig", return_value=mock_config),
-            patch("tether.main.build_engine", return_value=mock_engine),
+            patch("leashd.main.LeashdConfig", return_value=mock_config),
+            patch("leashd.main.build_engine", return_value=mock_engine),
             patch("builtins.input", side_effect=KeyboardInterrupt),
         ):
             await main()
@@ -70,8 +70,8 @@ class TestMain:
     @pytest.mark.asyncio
     async def test_empty_input_skipped(self, mock_engine, mock_config):
         with (
-            patch("tether.main.TetherConfig", return_value=mock_config),
-            patch("tether.main.build_engine", return_value=mock_engine),
+            patch("leashd.main.LeashdConfig", return_value=mock_config),
+            patch("leashd.main.build_engine", return_value=mock_engine),
             patch("builtins.input", side_effect=["   ", EOFError]),
         ):
             await main()
@@ -81,8 +81,8 @@ class TestMain:
     @pytest.mark.asyncio
     async def test_valid_input_dispatched(self, mock_engine, mock_config):
         with (
-            patch("tether.main.TetherConfig", return_value=mock_config),
-            patch("tether.main.build_engine", return_value=mock_engine),
+            patch("leashd.main.LeashdConfig", return_value=mock_config),
+            patch("leashd.main.build_engine", return_value=mock_engine),
             patch("builtins.input", side_effect=["hello", EOFError]),
         ):
             await main()
@@ -96,8 +96,8 @@ class TestMain:
     @pytest.mark.asyncio
     async def test_response_printed(self, mock_engine, mock_config, capsys):
         with (
-            patch("tether.main.TetherConfig", return_value=mock_config),
-            patch("tether.main.build_engine", return_value=mock_engine),
+            patch("leashd.main.LeashdConfig", return_value=mock_config),
+            patch("leashd.main.build_engine", return_value=mock_engine),
             patch("builtins.input", side_effect=["hello", EOFError]),
         ):
             await main()
@@ -108,8 +108,8 @@ class TestMain:
     @pytest.mark.asyncio
     async def test_multiple_messages_dispatched(self, mock_engine, mock_config):
         with (
-            patch("tether.main.TetherConfig", return_value=mock_config),
-            patch("tether.main.build_engine", return_value=mock_engine),
+            patch("leashd.main.LeashdConfig", return_value=mock_config),
+            patch("leashd.main.build_engine", return_value=mock_engine),
             patch("builtins.input", side_effect=["first", "second", EOFError]),
         ):
             await main()
@@ -120,7 +120,7 @@ class TestMain:
         assert calls[1].kwargs["text"] == "second"
 
     def test_run_calls_main(self):
-        with patch("tether.main.asyncio.run") as mock_run:
+        with patch("leashd.main.asyncio.run") as mock_run:
             run()
             mock_run.assert_called_once()
 
@@ -139,14 +139,14 @@ class TestTelegramMode:
         stop_event.set()
 
         with (
-            patch("tether.main.TetherConfig", return_value=cfg),
-            patch("tether.main.build_engine", return_value=mock_engine),
+            patch("leashd.main.LeashdConfig", return_value=cfg),
+            patch("leashd.main.build_engine", return_value=mock_engine),
             patch(
-                "tether.connectors.telegram.TelegramConnector",
+                "leashd.connectors.telegram.TelegramConnector",
                 return_value=mock_connector,
             ),
-            patch("tether.main.asyncio.Event", return_value=stop_event),
-            patch("tether.main.asyncio.get_running_loop") as mock_loop,
+            patch("leashd.main.asyncio.Event", return_value=stop_event),
+            patch("leashd.main.asyncio.get_running_loop") as mock_loop,
         ):
             mock_loop.return_value.add_signal_handler = MagicMock()
             await main()
@@ -166,10 +166,10 @@ class TestTelegramMode:
         mock_connector.start.side_effect = ConnectorError("network down")
 
         with (
-            patch("tether.main.TetherConfig", return_value=cfg),
-            patch("tether.main.build_engine", return_value=mock_engine),
+            patch("leashd.main.LeashdConfig", return_value=cfg),
+            patch("leashd.main.build_engine", return_value=mock_engine),
             patch(
-                "tether.connectors.telegram.TelegramConnector",
+                "leashd.connectors.telegram.TelegramConnector",
                 return_value=mock_connector,
             ),
         ):
@@ -192,10 +192,10 @@ class TestTelegramMode:
         )
 
         with (
-            patch("tether.main.TetherConfig", return_value=cfg),
-            patch("tether.main.build_engine", return_value=mock_engine),
+            patch("leashd.main.LeashdConfig", return_value=cfg),
+            patch("leashd.main.build_engine", return_value=mock_engine),
             patch(
-                "tether.connectors.telegram.TelegramConnector",
+                "leashd.connectors.telegram.TelegramConnector",
                 return_value=mock_connector,
             ),
         ):

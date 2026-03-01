@@ -2,5 +2,5 @@
 
 check:
 	uv run ruff check --fix . && uv run ruff format .
-	uv run mypy tether/ --explicit-package-bases || true
+	uv run mypy leashd/ --explicit-package-bases || true
 	uv run pytest

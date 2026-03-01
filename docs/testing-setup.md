@@ -1,10 +1,10 @@
 # Testing Setup Guide
 
-How to set up any project for e2e testing with Tether's /test command and Playwright browser tools.
+How to set up any project for e2e testing with leashd's /test command and Playwright browser tools.
 
 ## Overview
 
-Tether's /test command drives a 9-phase agent workflow that discovers your project, starts the dev server, runs tests, interacts with the live UI through a real browser, finds bugs, fixes them, and reports results. The browser automation is powered by Playwright MCP -- Claude Code controls a Chromium instance (headed by default) to navigate pages, click elements, fill forms, and verify state.
+leashd's /test command drives a 9-phase agent workflow that discovers your project, starts the dev server, runs tests, interacts with the live UI through a real browser, finds bugs, fixes them, and reports results. The browser automation is powered by Playwright MCP -- Claude Code controls a Chromium instance (headed by default) to navigate pages, click elements, fill forms, and verify state.
 
 This guide covers three tiers of setup, from zero-config to full AI-assisted test authoring.
 
@@ -23,12 +23,12 @@ The /test command works out of the box with any project. The agent uses Playwrig
 
 The Chromium install prints a warning about missing project dependencies. Safe to ignore -- the binary installs successfully.
 
-### Tether Configuration
+### leashd Configuration
 
 Your project directory must be in the approved directories list:
 
 ```bash
-TETHER_APPROVED_DIRECTORIES=/path/to/your/project,/path/to/other/project
+LEASHD_APPROVED_DIRECTORIES=/path/to/your/project,/path/to/other/project
 ```
 
 Switch between projects with /dir:
@@ -40,7 +40,7 @@ Switch between projects with /dir:
 
 ### MCP Server
 
-Tether's .mcp.json configures the Playwright MCP server automatically:
+leashd's .mcp.json configures the Playwright MCP server automatically:
 
 ```json
 {
@@ -98,14 +98,14 @@ Flags combine: `/test --url http://localhost:3000 --unit checkout flow`
 
 By default, /test runs agentic E2E only (Phases 1-3, 6-9). Unit and backend phases are opt-in via `--unit` and `--backend`.
 
-### Project Test Config (`.tether/test.yaml`)
+### Project Test Config (`.leashd/test.yaml`)
 
-Instead of passing `--url`, `--server`, and `--framework` flags every time, create a `.tether/test.yaml` file in your project's `.tether/` directory. The agent loads it automatically and merges values with any CLI flags you provide.
+Instead of passing `--url`, `--server`, and `--framework` flags every time, create a `.leashd/test.yaml` file in your project's `.leashd/` directory. The agent loads it automatically and merges values with any CLI flags you provide.
 
 #### Schema
 
 ```yaml
-# .tether/test.yaml — project-level defaults for /test
+# .leashd/test.yaml — project-level defaults for /test
 
 # Base URL the agent navigates to (overridden by --url)
 url: http://localhost:3000
@@ -166,7 +166,7 @@ The last four fields (`credentials`, `preconditions`, `focus_areas`, `environmen
 #### Minimal Example
 
 ```yaml
-# .tether/test.yaml
+# .leashd/test.yaml
 url: http://localhost:5173
 server: npm run dev
 ```
@@ -174,7 +174,7 @@ server: npm run dev
 #### Full Example
 
 ```yaml
-# .tether/test.yaml
+# .leashd/test.yaml
 url: http://localhost:3000
 server: npm run dev
 framework: next.js
@@ -193,12 +193,12 @@ environment:
 
 #### Notes
 
-- `.tether/test.yml` also works (YAML extension variant).
-- **Security**: This file may contain credentials. Add `.tether/` to `.gitignore` (covers both the test config and session files):
+- `.leashd/test.yml` also works (YAML extension variant).
+- **Security**: This file may contain credentials. Add `.leashd/` to `.gitignore` (covers both the test config and session files):
 
 ```
 # .gitignore
-.tether/
+.leashd/
 ```
 
 ### The 9-Phase Workflow
@@ -211,8 +211,8 @@ environment:
 | 4 | Unit and Integration | Opt-in (`--unit`). Runs existing suites (pytest, jest, vitest, go test, cargo test). Analyzes and fixes failures. |
 | 5 | Backend Verification | Opt-in (`--backend`). Hits API endpoints with curl. Checks responses, logs, error handling. |
 | 6 | Agentic E2E Testing | Agent executes test cases live via browser MCP tools (plan → execute → assert → verdict). Persistent .spec.ts generation is optional and secondary. |
-| 7 | Error Analysis | Compiles all errors. Categorizes as CRITICAL / HIGH / MEDIUM / LOW. Writes structured issues to `.tether/test-session.md` with severity, file path, and reproduction steps. |
-| 8 | Healing | Fixes bugs from previous phases. Delegates complex multi-file fixes to sub-agents via Task tool. Re-runs affected tests. Updates `.tether/test-session.md` with fix status. |
+| 7 | Error Analysis | Compiles all errors. Categorizes as CRITICAL / HIGH / MEDIUM / LOW. Writes structured issues to `.leashd/test-session.md` with severity, file path, and reproduction steps. |
+| 8 | Healing | Fixes bugs from previous phases. Delegates complex multi-file fixes to sub-agents via Task tool. Re-runs affected tests. Updates `.leashd/test-session.md` with fix status. |
 | 9 | Report | Summary: pass/fail counts, errors, fixes applied, remaining issues, health assessment. |
 
 Phases 2, 3, 6 skip with --no-e2e. Phase 4 requires --unit to enable. Phase 5 requires --backend to enable.
@@ -253,9 +253,9 @@ cat, ls, head, tail, wc, grep, find
 
 File writes -- Write and Edit tools auto-approved for test file creation and source fixes.
 
-### Context Persistence (`.tether/test-session.md`)
+### Context Persistence (`.leashd/test-session.md`)
 
-The agent maintains a structured markdown file at `.tether/test-session.md` as persistent working memory across sessions. This file survives agent restarts — the agent reads it at the start of every phase to recover context.
+The agent maintains a structured markdown file at `.leashd/test-session.md` as persistent working memory across sessions. This file survives agent restarts — the agent reads it at the start of every phase to recover context.
 
 **Lifecycle:**
 
@@ -300,13 +300,13 @@ The agent maintains a structured markdown file at `.tether/test-session.md` as p
 - Fixed login form 500 error: missing `await` on auth API call (src/auth/login.tsx:42)
 ```
 
-**Seeding from project config:** When `.tether/test.yaml` exists, the context file is seeded with project config values (URL, credentials, preconditions) so the agent starts with full context immediately.
+**Seeding from project config:** When `.leashd/test.yaml` exists, the context file is seeded with project config values (URL, credentials, preconditions) so the agent starts with full context immediately.
 
-**`.gitignore` recommendation:** Add `.tether/` to your `.gitignore` — the context file contains session-specific data and potentially credentials:
+**`.gitignore` recommendation:** Add `.leashd/` to your `.gitignore` — the context file contains session-specific data and potentially credentials:
 
 ```
 # .gitignore
-.tether/
+.leashd/
 ```
 
 ### Browser Tools Reference
@@ -357,7 +357,7 @@ The agent prefers browser_snapshot over browser_take_screenshot -- faster, cheap
 
 ## Tier 2: Persistent Playwright Tests in Your Repo
 
-For saved, re-runnable e2e test files (.spec.ts) that live in your project and run independently of Tether.
+For saved, re-runnable e2e test files (.spec.ts) that live in your project and run independently of leashd.
 
 ### Setup Steps
 
@@ -567,7 +567,7 @@ The default is headed mode (visible browser window). If you've added `--headless
 **Context window exhaustion** --
 Focus: `/test login page`. Unit and backend are off by default — no flags needed. The agent uses browser_snapshot over screenshots to conserve tokens.
 
-**Tests pass locally but fail via Tether** --
+**Tests pass locally but fail via leashd** --
 Playwright MCP runs a separate Chromium instance. Viewport, fonts, and extensions may differ. Use browser_resize to match expected dimensions.
 
 **Chromium not installed** --
@@ -576,7 +576,7 @@ npx playwright install chromium
 ```
 
 **Re-providing URLs and credentials across restarts** --
-Create a `.tether/test.yaml` in your project. The agent loads it automatically every session:
+Create a `.leashd/test.yaml` in your project. The agent loads it automatically every session:
 ```yaml
 url: http://localhost:3000
 server: npm run dev
@@ -586,7 +586,7 @@ credentials:
 ```
 
 **Long sessions losing context** --
-The agent writes progress to `.tether/test-session.md` automatically. If a session crashes or the context window fills up, the agent reads this file at the start of each phase to recover. No manual action needed.
+The agent writes progress to `.leashd/test-session.md` automatically. If a session crashes or the context window fills up, the agent reads this file at the start of each phase to recover. No manual action needed.
 
 ---
 
@@ -597,7 +597,7 @@ The agent writes progress to `.tether/test-session.md` automatically. If a sessi
 npx playwright install chromium
 
 # Project test config (saves URLs/credentials across sessions)
-# Create .tether/test.yaml in project, then just:
+# Create .leashd/test.yaml in project, then just:
 /test
 
 # Basic testing (no repo changes)

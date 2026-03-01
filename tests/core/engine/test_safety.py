@@ -4,12 +4,12 @@ import asyncio
 
 import pytest
 
+from leashd.agents.base import AgentResponse, BaseAgent
+from leashd.core.engine import Engine
+from leashd.core.interactions import InteractionCoordinator
+from leashd.core.safety.approvals import ApprovalCoordinator
+from leashd.core.session import SessionManager
 from tests.core.engine.conftest import FakeAgent
-from tether.agents.base import AgentResponse, BaseAgent
-from tether.core.engine import Engine
-from tether.core.interactions import InteractionCoordinator
-from tether.core.safety.approvals import ApprovalCoordinator
-from tether.core.session import SessionManager
 
 
 class TestSafetyHookWiring:

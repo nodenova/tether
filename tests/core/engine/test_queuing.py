@@ -4,13 +4,13 @@ import asyncio
 
 import pytest
 
+from leashd.agents.base import AgentResponse, BaseAgent
+from leashd.core.engine import Engine
+from leashd.core.events import EventBus
+from leashd.core.interactions import InteractionCoordinator
+from leashd.core.safety.approvals import ApprovalCoordinator
+from leashd.core.session import SessionManager
 from tests.core.engine.conftest import FakeAgent
-from tether.agents.base import AgentResponse, BaseAgent
-from tether.core.engine import Engine
-from tether.core.events import EventBus
-from tether.core.interactions import InteractionCoordinator
-from tether.core.safety.approvals import ApprovalCoordinator
-from tether.core.session import SessionManager
 
 
 class TestMessageQueuing:
@@ -129,7 +129,7 @@ class TestMessageQueuing:
     async def test_queued_messages_logged_individually(
         self, config, audit_logger, mock_connector, tmp_path
     ):
-        from tether.storage.sqlite import SqliteSessionStore
+        from leashd.storage.sqlite import SqliteSessionStore
 
         store = SqliteSessionStore(tmp_path / "test.db")
         await store.setup()
@@ -167,7 +167,7 @@ class TestMessageQueuing:
     async def test_approval_bypasses_queue(
         self, config, audit_logger, mock_connector, policy_engine, tmp_dir
     ):
-        from tether.core.safety.approvals import PendingApproval
+        from leashd.core.safety.approvals import PendingApproval
 
         gate = asyncio.Event()
         agent = self._make_slow_agent(gate)
@@ -223,7 +223,7 @@ class TestMessageQueuing:
         task = asyncio.create_task(eng.handle_message("u1", "first", "c1"))
         await asyncio.sleep(0)
 
-        from tether.core.interactions import PendingInteraction
+        from leashd.core.interactions import PendingInteraction
 
         pending = PendingInteraction(
             interaction_id="test-iid", chat_id="c1", kind="question"
@@ -277,7 +277,7 @@ class TestMessageQueuing:
     async def test_message_queued_event_emitted(
         self, config, audit_logger, mock_connector
     ):
-        from tether.core.events import MESSAGE_QUEUED
+        from leashd.core.events import MESSAGE_QUEUED
 
         events = []
 
@@ -600,7 +600,7 @@ class TestMessageInterrupt:
 
     @pytest.mark.asyncio
     async def test_interrupt_event_emitted(self, config, audit_logger, mock_connector):
-        from tether.core.events import EXECUTION_INTERRUPTED
+        from leashd.core.events import EXECUTION_INTERRUPTED
 
         events = []
 

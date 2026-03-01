@@ -1,4 +1,4 @@
-"""Tests for TetherConfig."""
+"""Tests for LeashdConfig."""
 
 from __future__ import annotations
 
@@ -6,12 +6,12 @@ from pathlib import Path
 
 import pytest
 
-from tether.core.config import TetherConfig, build_directory_names, ensure_tether_dir
+from leashd.core.config import LeashdConfig, build_directory_names, ensure_leashd_dir
 
 
-class TestTetherConfig:
+class TestLeashdConfig:
     def test_default_values(self, tmp_path):
-        config = TetherConfig(approved_directories=[tmp_path])
+        config = LeashdConfig(approved_directories=[tmp_path])
         assert config.max_turns == 25
         assert config.storage_backend == "sqlite"
         assert config.approval_timeout_seconds == 300
@@ -23,20 +23,20 @@ class TestTetherConfig:
         assert config.rate_limit_rpm == 0
 
     def test_approved_directories_resolved(self, tmp_path):
-        config = TetherConfig(approved_directories=[tmp_path])
+        config = LeashdConfig(approved_directories=[tmp_path])
         assert config.approved_directories == [tmp_path.resolve()]
         assert config.approved_directories[0].is_absolute()
 
     def test_approved_directory_must_exist(self):
         with pytest.raises(ValueError, match="does not exist"):
-            TetherConfig(approved_directories=[Path("/nonexistent/directory/xyz")])
+            LeashdConfig(approved_directories=[Path("/nonexistent/directory/xyz")])
 
     def test_multi_dir_from_list(self, tmp_path):
         d1 = tmp_path / "proj1"
         d2 = tmp_path / "proj2"
         d1.mkdir()
         d2.mkdir()
-        config = TetherConfig(approved_directories=[d1, d2])
+        config = LeashdConfig(approved_directories=[d1, d2])
         assert len(config.approved_directories) == 2
         assert config.approved_directories[0] == d1.resolve()
         assert config.approved_directories[1] == d2.resolve()
@@ -46,11 +46,11 @@ class TestTetherConfig:
         d2 = tmp_path / "proj2"
         d1.mkdir()
         d2.mkdir()
-        config = TetherConfig(approved_directories=f"{d1},{d2}")
+        config = LeashdConfig(approved_directories=f"{d1},{d2}")
         assert len(config.approved_directories) == 2
 
     def test_single_path_accepted(self, tmp_path):
-        config = TetherConfig(approved_directories=tmp_path)
+        config = LeashdConfig(approved_directories=tmp_path)
         assert len(config.approved_directories) == 1
         assert config.approved_directories[0] == tmp_path.resolve()
 
@@ -58,48 +58,48 @@ class TestTetherConfig:
         existing = tmp_path / "exists"
         existing.mkdir()
         with pytest.raises(ValueError, match="does not exist"):
-            TetherConfig(approved_directories=[existing, Path("/nonexistent/dir/xyz")])
+            LeashdConfig(approved_directories=[existing, Path("/nonexistent/dir/xyz")])
 
     def test_empty_list_raises_error(self):
         with pytest.raises(ValueError, match="must not be empty"):
-            TetherConfig(approved_directories=[])
+            LeashdConfig(approved_directories=[])
 
     def test_parse_policy_files_csv(self, tmp_path):
         p1 = tmp_path / "a.yaml"
         p2 = tmp_path / "b.yaml"
         p1.touch()
         p2.touch()
-        result = TetherConfig.parse_policy_files(f"{p1},{p2}")
+        result = LeashdConfig.parse_policy_files(f"{p1},{p2}")
         assert len(result) == 2
         assert result[0] == p1
         assert result[1] == p2
 
     def test_parse_policy_files_list_passthrough(self, tmp_path):
         paths = [tmp_path / "a.yaml"]
-        result = TetherConfig.parse_policy_files(paths)
+        result = LeashdConfig.parse_policy_files(paths)
         assert result is paths
 
     def test_parse_policy_files_empty_string(self):
-        result = TetherConfig.parse_policy_files("")
+        result = LeashdConfig.parse_policy_files("")
         assert result == []
 
     def test_telegram_bot_token_default_none(self, tmp_path):
-        config = TetherConfig(approved_directories=[tmp_path])
+        config = LeashdConfig(approved_directories=[tmp_path])
         assert config.telegram_bot_token is None
 
     def test_telegram_bot_token_set(self, tmp_path):
-        config = TetherConfig(
+        config = LeashdConfig(
             approved_directories=[tmp_path], telegram_bot_token="123:ABC"
         )
         assert config.telegram_bot_token == "123:ABC"
 
     def test_streaming_defaults(self, tmp_path):
-        config = TetherConfig(approved_directories=[tmp_path])
+        config = LeashdConfig(approved_directories=[tmp_path])
         assert config.streaming_enabled is True
         assert config.streaming_throttle_seconds == 1.5
 
     def test_streaming_custom_values(self, tmp_path):
-        config = TetherConfig(
+        config = LeashdConfig(
             approved_directories=[tmp_path],
             streaming_enabled=False,
             streaming_throttle_seconds=3.0,
@@ -108,7 +108,7 @@ class TestTetherConfig:
         assert config.streaming_throttle_seconds == 3.0
 
     def test_custom_values(self, tmp_path):
-        config = TetherConfig(
+        config = LeashdConfig(
             approved_directories=[tmp_path],
             max_turns=10,
             storage_backend="sqlite",
@@ -127,44 +127,44 @@ class TestTetherConfig:
         real_dir.mkdir()
         link = tmp_path / "link"
         link.symlink_to(real_dir)
-        config = TetherConfig(approved_directories=[link])
+        config = LeashdConfig(approved_directories=[link])
         assert config.approved_directories[0] == real_dir.resolve()
 
     def test_policy_files_nonexistent_accepted(self, tmp_path):
-        config = TetherConfig(
+        config = LeashdConfig(
             approved_directories=[tmp_path],
             policy_files=[Path("/nonexistent/policy.yaml")],
         )
         assert len(config.policy_files) == 1
 
     def test_allowed_user_ids_from_set(self, tmp_path):
-        config = TetherConfig(
+        config = LeashdConfig(
             approved_directories=[tmp_path],
             allowed_user_ids={"a", "b"},
         )
         assert config.allowed_user_ids == {"a", "b"}
 
     def test_max_turns_custom_value(self, tmp_path):
-        config = TetherConfig(
+        config = LeashdConfig(
             approved_directories=[tmp_path],
             max_turns=50,
         )
         assert config.max_turns == 50
 
     def test_mcp_servers_default_empty(self, tmp_path):
-        config = TetherConfig(approved_directories=[tmp_path])
+        config = LeashdConfig(approved_directories=[tmp_path])
         assert config.mcp_servers == {}
 
     def test_mcp_servers_from_dict(self, tmp_path):
         servers = {"playwright": {"command": "npx", "args": ["@playwright/mcp"]}}
-        config = TetherConfig(approved_directories=[tmp_path], mcp_servers=servers)
+        config = LeashdConfig(approved_directories=[tmp_path], mcp_servers=servers)
         assert config.mcp_servers == servers
 
     def test_mcp_servers_from_json_string(self, tmp_path):
         import json
 
         servers = {"playwright": {"command": "npx"}}
-        config = TetherConfig(
+        config = LeashdConfig(
             approved_directories=[tmp_path],
             mcp_servers=json.dumps(servers),
         )
@@ -175,47 +175,47 @@ class TestConfigValidationEdgeCases:
     """Edge case validation tests."""
 
     def test_zero_max_turns_accepted(self, tmp_path):
-        config = TetherConfig(approved_directories=[tmp_path], max_turns=0)
+        config = LeashdConfig(approved_directories=[tmp_path], max_turns=0)
         assert config.max_turns == 0
 
     def test_negative_max_turns_accepted(self, tmp_path):
         """Pydantic doesn't enforce positive — this documents the behavior."""
-        config = TetherConfig(approved_directories=[tmp_path], max_turns=-1)
+        config = LeashdConfig(approved_directories=[tmp_path], max_turns=-1)
         assert config.max_turns == -1
 
     def test_very_long_system_prompt(self, tmp_path):
         long_prompt = "x" * 100_000
-        config = TetherConfig(
+        config = LeashdConfig(
             approved_directories=[tmp_path], system_prompt=long_prompt
         )
         assert len(config.system_prompt) == 100_000
 
     def test_unknown_storage_backend_accepted(self, tmp_path):
         """Unknown backend string is accepted (validated elsewhere)."""
-        config = TetherConfig(approved_directories=[tmp_path], storage_backend="redis")
+        config = LeashdConfig(approved_directories=[tmp_path], storage_backend="redis")
         assert config.storage_backend == "redis"
 
-    def test_log_dir_defaults_to_tether_logs(self, tmp_path):
-        config = TetherConfig(approved_directories=[tmp_path])
-        assert config.log_dir == Path(".tether/logs")
+    def test_log_dir_defaults_to_leashd_logs(self, tmp_path):
+        config = LeashdConfig(approved_directories=[tmp_path])
+        assert config.log_dir == Path(".leashd/logs")
 
     def test_log_max_bytes_defaults_to_10mb(self, tmp_path):
-        config = TetherConfig(approved_directories=[tmp_path])
+        config = LeashdConfig(approved_directories=[tmp_path])
         assert config.log_max_bytes == 10_485_760
 
     def test_log_backup_count_defaults_to_5(self, tmp_path):
-        config = TetherConfig(approved_directories=[tmp_path])
+        config = LeashdConfig(approved_directories=[tmp_path])
         assert config.log_backup_count == 5
 
 
 class TestBuildDirectoryNames:
     def test_unique_basenames(self, tmp_path):
-        d1 = tmp_path / "tether"
+        d1 = tmp_path / "leashd"
         d2 = tmp_path / "api"
         d1.mkdir()
         d2.mkdir()
         names = build_directory_names([d1, d2])
-        assert names == {"tether": d1, "api": d2}
+        assert names == {"leashd": d1, "api": d2}
 
     def test_conflicting_basenames_disambiguated(self, tmp_path):
         parent1 = tmp_path / "nodenova"
@@ -242,44 +242,44 @@ class TestBuildDirectoryNames:
         assert build_directory_names([]) == {}
 
 
-class TestTetherDirDefaults:
-    def test_storage_path_defaults_to_tether_dir(self, tmp_path):
-        config = TetherConfig(approved_directories=[tmp_path])
-        assert config.storage_path == Path(".tether/messages.db")
+class TestleashdDirDefaults:
+    def test_storage_path_defaults_to_leashd_dir(self, tmp_path):
+        config = LeashdConfig(approved_directories=[tmp_path])
+        assert config.storage_path == Path(".leashd/messages.db")
 
-    def test_audit_log_path_defaults_to_tether_dir(self, tmp_path):
-        config = TetherConfig(approved_directories=[tmp_path])
-        assert config.audit_log_path == Path(".tether/audit.jsonl")
+    def test_audit_log_path_defaults_to_leashd_dir(self, tmp_path):
+        config = LeashdConfig(approved_directories=[tmp_path])
+        assert config.audit_log_path == Path(".leashd/audit.jsonl")
 
-    def test_log_dir_defaults_to_tether_dir(self, tmp_path):
-        config = TetherConfig(approved_directories=[tmp_path])
-        assert config.log_dir == Path(".tether/logs")
+    def test_log_dir_defaults_to_leashd_dir(self, tmp_path):
+        config = LeashdConfig(approved_directories=[tmp_path])
+        assert config.log_dir == Path(".leashd/logs")
 
 
-class TestEnsureTetherDir:
+class TestEnsureleashdDir:
     def test_creates_directory(self, tmp_path):
-        result = ensure_tether_dir(tmp_path)
-        assert result == tmp_path / ".tether"
+        result = ensure_leashd_dir(tmp_path)
+        assert result == tmp_path / ".leashd"
         assert result.is_dir()
 
     def test_creates_gitignore(self, tmp_path):
-        ensure_tether_dir(tmp_path)
-        gitignore = tmp_path / ".tether" / ".gitignore"
+        ensure_leashd_dir(tmp_path)
+        gitignore = tmp_path / ".leashd" / ".gitignore"
         assert gitignore.is_file()
         content = gitignore.read_text()
         assert "!test.yaml" in content
         assert "!.gitignore" in content
 
     def test_does_not_overwrite_existing_gitignore(self, tmp_path):
-        tether_dir = tmp_path / ".tether"
-        tether_dir.mkdir()
-        gitignore = tether_dir / ".gitignore"
+        leashd_dir = tmp_path / ".leashd"
+        leashd_dir.mkdir()
+        gitignore = leashd_dir / ".gitignore"
         gitignore.write_text("custom content\n")
 
-        ensure_tether_dir(tmp_path)
+        ensure_leashd_dir(tmp_path)
         assert gitignore.read_text() == "custom content\n"
 
     def test_idempotent(self, tmp_path):
-        ensure_tether_dir(tmp_path)
-        ensure_tether_dir(tmp_path)
-        assert (tmp_path / ".tether").is_dir()
+        ensure_leashd_dir(tmp_path)
+        ensure_leashd_dir(tmp_path)
+        assert (tmp_path / ".leashd").is_dir()

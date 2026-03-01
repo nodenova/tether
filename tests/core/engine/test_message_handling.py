@@ -7,13 +7,13 @@ from unittest.mock import AsyncMock, patch
 import pytest
 import structlog.contextvars
 
+from leashd.agents.base import AgentResponse, BaseAgent
+from leashd.core.config import LeashdConfig
+from leashd.core.engine import Engine
+from leashd.core.session import SessionManager
+from leashd.exceptions import AgentError
+from leashd.middleware.base import MessageContext
 from tests.core.engine.conftest import FakeAgent
-from tether.agents.base import AgentResponse, BaseAgent
-from tether.core.config import TetherConfig
-from tether.core.engine import Engine
-from tether.core.session import SessionManager
-from tether.exceptions import AgentError
-from tether.middleware.base import MessageContext
 
 
 class TestEngineMessageHandling:
@@ -81,7 +81,7 @@ class TestEngineMessageLogging:
     async def test_messages_logged_when_sqlite_store(
         self, config, fake_agent, audit_logger, tmp_path
     ):
-        from tether.storage.sqlite import SqliteSessionStore
+        from leashd.storage.sqlite import SqliteSessionStore
 
         store = SqliteSessionStore(tmp_path / "msg.db")
         await store.setup()
@@ -113,8 +113,8 @@ class TestEngineMessageLogging:
     ):
         from unittest.mock import AsyncMock
 
-        from tether.exceptions import StorageError
-        from tether.storage.sqlite import SqliteSessionStore
+        from leashd.exceptions import StorageError
+        from leashd.storage.sqlite import SqliteSessionStore
 
         store = SqliteSessionStore(tmp_path / "msg.db")
         await store.setup()
@@ -137,7 +137,7 @@ class TestEngineMessageLogging:
     async def test_agent_error_only_logs_user_message(
         self, config, audit_logger, tmp_path
     ):
-        from tether.storage.sqlite import SqliteSessionStore
+        from leashd.storage.sqlite import SqliteSessionStore
 
         store = SqliteSessionStore(tmp_path / "msg.db")
         await store.setup()
@@ -334,7 +334,7 @@ class TestEngineResilience:
             async def shutdown(self):
                 pass
 
-        config_short = TetherConfig(
+        config_short = LeashdConfig(
             approved_directories=config.approved_directories,
             max_turns=5,
             agent_timeout_seconds=1,
@@ -371,7 +371,7 @@ class TestEngineResilience:
             async def shutdown(self):
                 pass
 
-        config_short = TetherConfig(
+        config_short = LeashdConfig(
             approved_directories=config.approved_directories,
             max_turns=5,
             agent_timeout_seconds=1,
@@ -412,7 +412,7 @@ class TestEngineResilience:
             async def shutdown(self):
                 pass
 
-        config_short = TetherConfig(
+        config_short = LeashdConfig(
             approved_directories=config.approved_directories,
             max_turns=5,
             agent_timeout_seconds=1,

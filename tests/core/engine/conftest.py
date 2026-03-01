@@ -4,10 +4,10 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from tether.agents.base import AgentResponse, BaseAgent
-from tether.core.engine import Engine
-from tether.core.session import SessionManager
-from tether.exceptions import AgentError
+from leashd.agents.base import AgentResponse, BaseAgent
+from leashd.core.engine import Engine
+from leashd.core.session import SessionManager
+from leashd.exceptions import AgentError
 
 
 class FakeAgent(BaseAgent):

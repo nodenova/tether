@@ -6,15 +6,15 @@ from unittest.mock import patch
 
 import pytest
 
-from tether.core.events import (
+from leashd.core.events import (
     TOOL_ALLOWED,
     TOOL_DENIED,
     TOOL_GATED,
     Event,
     EventBus,
 )
-from tether.plugins.base import PluginContext
-from tether.plugins.builtin.browser_tools import (
+from leashd.plugins.base import PluginContext
+from leashd.plugins.builtin.browser_tools import (
     ALL_BROWSER_TOOLS,
     BROWSER_MUTATION_TOOLS,
     BROWSER_READONLY_TOOLS,

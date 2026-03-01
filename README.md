@@ -1,19 +1,19 @@
-# Tether
+# leashd
 
 **Drive Claude Code from your phone via Telegram, with safety guardrails.**
 
 [![Python 3.13+](https://img.shields.io/badge/python-3.13%2B-blue.svg)](https://www.python.org/downloads/)
 [![Coverage 89%+](https://img.shields.io/badge/coverage-89%25%2B-brightgreen.svg)](#development)
 [![Status: Alpha](https://img.shields.io/badge/status-alpha-orange.svg)](#status)
-[![License](https://img.shields.io/badge/license-TBD-lightgrey.svg)](#)
+[![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 
 ---
 
-Tether lets you send natural-language coding instructions from Telegram on your phone to a Claude Code agent running on your dev machine. A three-layer safety pipeline — sandbox, policy rules, and human approval — keeps the AI from doing anything dangerous without your explicit sign-off.
+leashd lets you send natural-language coding instructions from Telegram on your phone to a Claude Code agent running on your dev machine. A three-layer safety pipeline — sandbox, policy rules, and human approval — keeps the AI from doing anything dangerous without your explicit sign-off.
 
 ## What's New in 0.3.0
 
-- **`/test` command** — 9-phase agent-driven test workflow with project config (`.tether/test.yaml`)
+- **`/test` command** — 9-phase agent-driven test workflow with project config (`.leashd/test.yaml`)
 - **`/git merge`** — AI-assisted conflict resolution with auto-resolve/abort buttons
 - **`/plan <text>` and `/edit <text>`** — switch mode and start the agent in one step
 - **Message interrupt buttons** — interrupt or wait during agent execution instead of silent queuing
@@ -58,14 +58,14 @@ See [CHANGELOG.md](CHANGELOG.md) for full details.
 
 - **Python 3.13+**
 - **[uv](https://docs.astral.sh/uv/)** — fast Python package manager
-- **[Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code)** — installed and authenticated. The `claude` command must work in your terminal. Tether delegates to it via `claude-agent-sdk`.
+- **[Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code)** — installed and authenticated. The `claude` command must work in your terminal. leashd delegates to it via `claude-agent-sdk`.
 - **Telegram account** — to create a bot and chat with it from your phone
 - **Node.js 18+** *(optional)* — required only for [browser testing](#browser-testing) via Playwright MCP
 
 ### 1. Clone and install
 
 ```bash
-git clone git@github.com:nodenova/tether.git && cd tether
+git clone git@github.com:nodenova/leashd.git && cd leashd
 uv sync
 ```
 
@@ -74,8 +74,8 @@ uv sync
 1. Open Telegram on your phone
 2. Search for **@BotFather** and start a chat
 3. Send `/newbot`
-4. Pick a display name (e.g., "My Tether Bot")
-5. Pick a username ending in `bot` (e.g., `my_tether_bot`)
+4. Pick a display name (e.g., "My leashd Bot")
+5. Pick a username ending in `bot` (e.g., `my_leashd_bot`)
 6. BotFather replies with a **token** like `123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11` — copy it
 
 ### 3. Find your Telegram user ID
@@ -92,19 +92,19 @@ Edit `.env` and set these three values:
 
 ```bash
 # The project directory you want the AI to work on (must exist)
-TETHER_APPROVED_DIRECTORIES=/path/to/your/project
+LEASHD_APPROVED_DIRECTORIES=/path/to/your/project
 
 # Bot token from step 2
-TETHER_TELEGRAM_BOT_TOKEN=123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11
+LEASHD_TELEGRAM_BOT_TOKEN=123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11
 
 # Your Telegram user ID from step 3 (restricts access to only you)
-TETHER_ALLOWED_USER_IDS=981234567
+LEASHD_ALLOWED_USER_IDS=981234567
 ```
 
 ### 5. Run
 
 ```bash
-uv run -m tether
+uv run -m leashd
 ```
 
 ### 6. Start coding from your phone
@@ -117,13 +117,13 @@ Claude will start working. When it needs to do something gated by policy (like w
 
 ## How It Works
 
-You type a message in Telegram on your phone. Tether receives it, runs it through the safety pipeline, and forwards it to a Claude Code agent session scoped to your project directory. Claude reads files, writes code, runs tests — whatever you asked. Each tool call is checked against sandbox boundaries, YAML policy rules, and (when required) sent back to you as an inline Approve/Reject button. The response flows back to your Telegram chat.
+You type a message in Telegram on your phone. leashd receives it, runs it through the safety pipeline, and forwards it to a Claude Code agent session scoped to your project directory. Claude reads files, writes code, runs tests — whatever you asked. Each tool call is checked against sandbox boundaries, YAML policy rules, and (when required) sent back to you as an inline Approve/Reject button. The response flows back to your Telegram chat.
 
 Sessions are multi-turn: Claude remembers the full conversation context across messages, so you can iterate naturally ("now add tests for that", "rename it to X").
 
 ## Configuration
 
-All settings are environment variables prefixed with `TETHER_`. Set them in `.env` or export them directly.
+All settings are environment variables prefixed with `LEASHD_`. Set them in `.env` or export them directly.
 
 The three essential variables are covered in [Quick Start](#4-configure). Here's the full reference:
 
@@ -132,29 +132,29 @@ The three essential variables are covered in [Quick Start](#4-configure). Here's
 
 | Variable | Default | Description |
 |---|---|---|
-| `TETHER_APPROVED_DIRECTORIES` | **required** | Directories the AI agent can work in (comma-separated). Must exist. |
-| `TETHER_TELEGRAM_BOT_TOKEN` | — | Bot token from @BotFather. Without this, Tether runs in local CLI mode instead. |
-| `TETHER_ALLOWED_USER_IDS` | *(no restriction)* | Comma-separated Telegram user IDs that can use the bot. Empty = anyone can use it. |
-| `TETHER_MAX_TURNS` | `25` | Max conversation turns per request. |
-| `TETHER_SYSTEM_PROMPT` | — | Custom system prompt for the agent. |
-| `TETHER_POLICY_FILES` | built-in `default.yaml` | Comma-separated paths to YAML policy files. |
-| `TETHER_APPROVAL_TIMEOUT_SECONDS` | `300` | Seconds to wait for your approval tap before auto-denying. |
-| `TETHER_RATE_LIMIT_RPM` | `0` *(off)* | Max requests per minute per user. |
-| `TETHER_RATE_LIMIT_BURST` | `5` | Burst capacity for the rate limiter. |
-| `TETHER_STORAGE_BACKEND` | `sqlite` | `sqlite` (persistent, default) or `memory` (sessions lost on restart). |
-| `TETHER_STORAGE_PATH` | `.tether/messages.db` | SQLite database path. Only used when backend is `sqlite`. |
-| `TETHER_LOG_LEVEL` | `INFO` | `DEBUG`, `INFO`, `WARNING`, or `ERROR`. |
-| `TETHER_AUDIT_LOG_PATH` | `.tether/audit.jsonl` | Path for the append-only audit log of all tool decisions. |
-| `TETHER_ALLOWED_TOOLS` | *(all)* | Allowlist of Claude tool names. Empty = all tools allowed. |
-| `TETHER_DISALLOWED_TOOLS` | *(none)* | Denylist of Claude tool names. |
-| `TETHER_STREAMING_ENABLED` | `true` | Progressive streaming updates in Telegram. |
-| `TETHER_STREAMING_THROTTLE_SECONDS` | `1.5` | Min seconds between message edits during streaming. |
-| `TETHER_AGENT_TIMEOUT_SECONDS` | `1800` | Agent execution timeout (30 minutes). |
-| `TETHER_DEFAULT_MODE` | `default` | Default session mode: `"default"`, `"plan"`, or `"auto"`. |
-| `TETHER_MCP_SERVERS` | `{}` | JSON dict of MCP server configurations. |
-| `TETHER_LOG_DIR` | `.tether/logs` | Directory for rotating JSON file logging (`{dir}/app.log`). |
-| `TETHER_LOG_MAX_BYTES` | `10485760` | Max log file size before rotation. Used with `LOG_DIR`. |
-| `TETHER_LOG_BACKUP_COUNT` | `5` | Rotated log backups to keep. Used with `LOG_DIR`. |
+| `LEASHD_APPROVED_DIRECTORIES` | **required** | Directories the AI agent can work in (comma-separated). Must exist. |
+| `LEASHD_TELEGRAM_BOT_TOKEN` | — | Bot token from @BotFather. Without this, leashd runs in local CLI mode instead. |
+| `LEASHD_ALLOWED_USER_IDS` | *(no restriction)* | Comma-separated Telegram user IDs that can use the bot. Empty = anyone can use it. |
+| `LEASHD_MAX_TURNS` | `25` | Max conversation turns per request. |
+| `LEASHD_SYSTEM_PROMPT` | — | Custom system prompt for the agent. |
+| `LEASHD_POLICY_FILES` | built-in `default.yaml` | Comma-separated paths to YAML policy files. |
+| `LEASHD_APPROVAL_TIMEOUT_SECONDS` | `300` | Seconds to wait for your approval tap before auto-denying. |
+| `LEASHD_RATE_LIMIT_RPM` | `0` *(off)* | Max requests per minute per user. |
+| `LEASHD_RATE_LIMIT_BURST` | `5` | Burst capacity for the rate limiter. |
+| `LEASHD_STORAGE_BACKEND` | `sqlite` | `sqlite` (persistent, default) or `memory` (sessions lost on restart). |
+| `LEASHD_STORAGE_PATH` | `.leashd/messages.db` | SQLite database path. Only used when backend is `sqlite`. |
+| `LEASHD_LOG_LEVEL` | `INFO` | `DEBUG`, `INFO`, `WARNING`, or `ERROR`. |
+| `LEASHD_AUDIT_LOG_PATH` | `.leashd/audit.jsonl` | Path for the append-only audit log of all tool decisions. |
+| `LEASHD_ALLOWED_TOOLS` | *(all)* | Allowlist of Claude tool names. Empty = all tools allowed. |
+| `LEASHD_DISALLOWED_TOOLS` | *(none)* | Denylist of Claude tool names. |
+| `LEASHD_STREAMING_ENABLED` | `true` | Progressive streaming updates in Telegram. |
+| `LEASHD_STREAMING_THROTTLE_SECONDS` | `1.5` | Min seconds between message edits during streaming. |
+| `LEASHD_AGENT_TIMEOUT_SECONDS` | `1800` | Agent execution timeout (30 minutes). |
+| `LEASHD_DEFAULT_MODE` | `default` | Default session mode: `"default"`, `"plan"`, or `"auto"`. |
+| `LEASHD_MCP_SERVERS` | `{}` | JSON dict of MCP server configurations. |
+| `LEASHD_LOG_DIR` | `.leashd/logs` | Directory for rotating JSON file logging (`{dir}/app.log`). |
+| `LEASHD_LOG_MAX_BYTES` | `10485760` | Max log file size before rotation. Used with `LOG_DIR`. |
+| `LEASHD_LOG_BACKUP_COUNT` | `5` | Rotated log backups to keep. Used with `LOG_DIR`. |
 
 </details>
 
@@ -162,17 +162,17 @@ The three essential variables are covered in [Quick Start](#4-configure). Here's
 
 Every tool call Claude makes passes through a three-layer pipeline before it can execute:
 
-**1. Sandbox** — The agent can only touch files inside `TETHER_APPROVED_DIRECTORIES`. Any path traversal attempt is blocked immediately and logged as a security violation.
+**1. Sandbox** — The agent can only touch files inside `LEASHD_APPROVED_DIRECTORIES`. Any path traversal attempt is blocked immediately and logged as a security violation.
 
 **2. Policy rules** — YAML rules classify each tool call as `allow`, `deny`, or `require_approval` based on the tool name, command patterns, and file path patterns. Rules are evaluated in order; first match wins.
 
-**3. Human approval** — For `require_approval` actions, Tether sends you an inline message on Telegram with **Approve** and **Reject** buttons. If you don't respond within the timeout (default: 5 minutes), the action is denied automatically. Safe by default.
+**3. Human approval** — For `require_approval` actions, leashd sends you an inline message on Telegram with **Approve** and **Reject** buttons. If you don't respond within the timeout (default: 5 minutes), the action is denied automatically. Safe by default.
 
-Everything is logged to `.tether/audit.jsonl` — every tool attempt, every decision.
+Everything is logged to `.leashd/audit.jsonl` — every tool attempt, every decision.
 
 ### Built-in policies
 
-Tether ships with four policies in `policies/`:
+leashd ships with four policies in `policies/`:
 
 **`default.yaml`** (recommended) — Good starting point for phone-based vibe coding.
 - Auto-allows: file reads, search, grep, git status/log/diff, readonly browser tools (snapshots, screenshots)
@@ -192,7 +192,7 @@ Tether ships with four policies in `policies/`:
 To switch policies:
 
 ```bash
-TETHER_POLICY_FILES=policies/strict.yaml
+LEASHD_POLICY_FILES=policies/strict.yaml
 ```
 
 **`dev-tools.yaml`** (overlay) — Auto-allows common development commands. Loaded alongside `default.yaml` by default.
@@ -202,28 +202,28 @@ TETHER_POLICY_FILES=policies/strict.yaml
 To switch policies:
 
 ```bash
-TETHER_POLICY_FILES=policies/strict.yaml
+LEASHD_POLICY_FILES=policies/strict.yaml
 ```
 
 You can also combine multiple policy files (rules are merged, evaluated in order):
 
 ```bash
-TETHER_POLICY_FILES=policies/default.yaml,policies/my-overrides.yaml
+LEASHD_POLICY_FILES=policies/default.yaml,policies/my-overrides.yaml
 ```
 
 ## Session Persistence
 
-By default, sessions are stored in SQLite (`.tether/messages.db`) and persist across restarts — Claude remembers your conversation context between sessions. Tether also logs every message (user and assistant) with cost, duration, and session metadata — giving you a queryable conversation history.
+By default, sessions are stored in SQLite (`.leashd/messages.db`) and persist across restarts — Claude remembers your conversation context between sessions. leashd also logs every message (user and assistant) with cost, duration, and session metadata — giving you a queryable conversation history.
 
 For development or testing, you can opt into in-memory storage (sessions lost on restart):
 
 ```bash
-TETHER_STORAGE_BACKEND=memory
+LEASHD_STORAGE_BACKEND=memory
 ```
 
 ## Browser Testing
 
-Tether integrates with [Playwright MCP](https://github.com/playwright-community/mcp) to give Claude browser automation capabilities — navigating pages, clicking elements, taking snapshots, and generating Playwright tests — all gated by the safety pipeline.
+leashd integrates with [Playwright MCP](https://github.com/playwright-community/mcp) to give Claude browser automation capabilities — navigating pages, clicking elements, taking snapshots, and generating Playwright tests — all gated by the safety pipeline.
 
 **Prerequisites:** Node.js 18+ and a one-time browser install:
 
@@ -236,35 +236,35 @@ npx playwright install chromium
 **Typical workflow:**
 
 1. Start your dev server (`npm run dev`, `uv run uvicorn`, etc.)
-2. Launch Claude Code in the Tether project directory
+2. Launch Claude Code in the leashd project directory
 3. Ask Claude to test your UI — "Navigate to localhost:3000 and verify the login form"
 4. Claude uses browser tools, gated by your policy, and reports findings
 
-Tether also includes Playwright test agents (Planner, Generator, Healer) and a `/healer` slash command for automated test repair.
+leashd also includes Playwright test agents (Planner, Generator, Healer) and a `/healer` slash command for automated test repair.
 
 See [docs/browser-testing.md](docs/browser-testing.md) for the full guide.
 
 ## Streaming
 
-When connected via Telegram, responses stream in real-time — the message updates progressively as Claude types. While tools are running, you see a live indicator (e.g., `🔧 Bash: pytest tests/`). The final message includes a tool usage summary (e.g., `🧰 Bash x3, Read, Glob`). Disable with `TETHER_STREAMING_ENABLED=false`.
+When connected via Telegram, responses stream in real-time — the message updates progressively as Claude types. While tools are running, you see a live indicator (e.g., `🔧 Bash: pytest tests/`). The final message includes a tool usage summary (e.g., `🧰 Bash x3, Read, Glob`). Disable with `LEASHD_STREAMING_ENABLED=false`.
 
 ## Logging
 
-Tether uses [structlog](https://www.structlog.org/) for structured logging. Every important code path — session lifecycle, agent execution, safety decisions, commands, and plugin activity — emits structured log events.
+leashd uses [structlog](https://www.structlog.org/) for structured logging. Every important code path — session lifecycle, agent execution, safety decisions, commands, and plugin activity — emits structured log events.
 
 ### Changing the log level
 
-Set `TETHER_LOG_LEVEL` in your `.env` or environment:
+Set `LEASHD_LOG_LEVEL` in your `.env` or environment:
 
 ```bash
 # Show all logs including detailed tracing
-TETHER_LOG_LEVEL=DEBUG
+LEASHD_LOG_LEVEL=DEBUG
 
 # Default — operational events only
-TETHER_LOG_LEVEL=INFO
+LEASHD_LOG_LEVEL=INFO
 
 # Quieter — only warnings and errors
-TETHER_LOG_LEVEL=WARNING
+LEASHD_LOG_LEVEL=WARNING
 ```
 
 ### Enabling file logging
@@ -272,10 +272,10 @@ TETHER_LOG_LEVEL=WARNING
 By default, logs go only to the console. To also write JSON logs to a rotating file (useful for production debugging):
 
 ```bash
-TETHER_LOG_DIR=logs
+LEASHD_LOG_DIR=logs
 ```
 
-This creates `logs/app.log` with automatic rotation. You can tune rotation with `TETHER_LOG_MAX_BYTES` (default: 10 MB) and `TETHER_LOG_BACKUP_COUNT` (default: 5 backups).
+This creates `logs/app.log` with automatic rotation. You can tune rotation with `LEASHD_LOG_MAX_BYTES` (default: 10 MB) and `LEASHD_LOG_BACKUP_COUNT` (default: 5 backups).
 
 ### Key log events
 
@@ -291,17 +291,17 @@ At `DEBUG` level, additional events trace safety decisions (`policy_evaluated`, 
 
 ## CLI Mode
 
-If you don't set `TETHER_TELEGRAM_BOT_TOKEN`, Tether runs as a local REPL in your terminal — useful for testing your configuration before going mobile. Note: actions that require approval are auto-denied in CLI mode since there's no approval UI.
+If you don't set `LEASHD_TELEGRAM_BOT_TOKEN`, leashd runs as a local REPL in your terminal — useful for testing your configuration before going mobile. Note: actions that require approval are auto-denied in CLI mode since there's no approval UI.
 
 ```bash
-# No TETHER_TELEGRAM_BOT_TOKEN set
-uv run tether
+# No LEASHD_TELEGRAM_BOT_TOKEN set
+uv run leashd
 # > type your prompts here
 ```
 
 ## Architecture
 
-Tether's core is the **Engine**, which receives messages from connectors, runs them through a middleware chain (auth, rate limiting), routes them to the Claude Code agent, and sends responses back. Every tool call the agent makes is intercepted by the **Gatekeeper**, which orchestrates the three-layer safety pipeline: sandbox enforcement, YAML policy matching, and async human approval. An **EventBus** decouples subsystems — plugins subscribe to events like `tool.allowed`, `tool.denied`, and `approval.requested` to extend behavior without touching core code. Connectors (Telegram, with more planned) and storage backends (memory, SQLite) are swappable via protocol classes.
+leashd's core is the **Engine**, which receives messages from connectors, runs them through a middleware chain (auth, rate limiting), routes them to the Claude Code agent, and sends responses back. Every tool call the agent makes is intercepted by the **Gatekeeper**, which orchestrates the three-layer safety pipeline: sandbox enforcement, YAML policy matching, and async human approval. An **EventBus** decouples subsystems — plugins subscribe to events like `tool.allowed`, `tool.denied`, and `approval.requested` to extend behavior without touching core code. Connectors (Telegram, with more planned) and storage backends (memory, SQLite) are swappable via protocol classes.
 
 ## Development
 
@@ -316,7 +316,7 @@ uv run pytest tests/
 uv run pytest tests/test_policy.py -v
 
 # Run tests with coverage
-uv run pytest --cov=tether tests/
+uv run pytest --cov=leashd tests/
 
 # Lint
 uv run ruff check .

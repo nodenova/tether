@@ -4,7 +4,7 @@ import asyncio
 
 import pytest
 
-from tether.core.config import TetherConfig
+from leashd.core.config import LeashdConfig
 
 
 class TestQuestionHandling:
@@ -68,7 +68,7 @@ class TestQuestionHandling:
 
     @pytest.mark.asyncio
     async def test_timeout_denies(self, mock_connector, config):
-        from tether.core.interactions import InteractionCoordinator
+        from leashd.core.interactions import InteractionCoordinator
 
         config.interaction_timeout_seconds = 0.1
         coord = InteractionCoordinator(mock_connector, config)
@@ -89,7 +89,7 @@ class TestQuestionHandling:
 
     @pytest.mark.asyncio
     async def test_default_none_timeout_waits_for_answer(self, mock_connector, config):
-        from tether.core.interactions import InteractionCoordinator
+        from leashd.core.interactions import InteractionCoordinator
 
         assert config.interaction_timeout_seconds is None
         coord = InteractionCoordinator(mock_connector, config)
@@ -195,7 +195,7 @@ class TestQuestionHandling:
 class TestPlanReviewHandling:
     @pytest.mark.asyncio
     async def test_proceed_allows(self, interaction_coordinator, mock_connector):
-        from tether.core.interactions import PlanReviewDecision
+        from leashd.core.interactions import PlanReviewDecision
 
         async def click_proceed():
             await asyncio.sleep(0.05)
@@ -236,7 +236,7 @@ class TestPlanReviewHandling:
     async def test_clean_proceed_allows_with_flag(
         self, interaction_coordinator, mock_connector
     ):
-        from tether.core.interactions import PlanReviewDecision
+        from leashd.core.interactions import PlanReviewDecision
 
         async def click_clean():
             await asyncio.sleep(0.05)
@@ -258,7 +258,7 @@ class TestPlanReviewHandling:
     async def test_plan_review_times_out(self, mock_connector, config):
         from claude_agent_sdk.types import PermissionResultDeny
 
-        from tether.core.interactions import InteractionCoordinator
+        from leashd.core.interactions import InteractionCoordinator
 
         config.interaction_timeout_seconds = 0.1
         coord = InteractionCoordinator(mock_connector, config)
@@ -271,7 +271,7 @@ class TestPlanReviewHandling:
     async def test_default_none_timeout_waits_for_decision(
         self, mock_connector, config
     ):
-        from tether.core.interactions import InteractionCoordinator, PlanReviewDecision
+        from leashd.core.interactions import InteractionCoordinator, PlanReviewDecision
 
         assert config.interaction_timeout_seconds is None
         coord = InteractionCoordinator(mock_connector, config)
@@ -293,7 +293,7 @@ class TestPlanReviewHandling:
     async def test_default_allows_without_auto_approve(
         self, interaction_coordinator, mock_connector
     ):
-        from tether.core.interactions import PlanReviewDecision
+        from leashd.core.interactions import PlanReviewDecision
 
         async def click_default():
             await asyncio.sleep(0.05)
@@ -315,7 +315,7 @@ class TestPlanReviewHandling:
     async def test_text_during_plan_review_treated_as_adjustment(
         self, mock_connector, config, event_bus
     ):
-        from tether.core.interactions import InteractionCoordinator
+        from leashd.core.interactions import InteractionCoordinator
 
         coord = InteractionCoordinator(mock_connector, config, event_bus)
 
@@ -333,8 +333,8 @@ class TestPlanReviewHandling:
 
     @pytest.mark.asyncio
     async def test_text_during_plan_review_sends_activity(self, config, event_bus):
+        from leashd.core.interactions import InteractionCoordinator
         from tests.conftest import MockConnector
-        from tether.core.interactions import InteractionCoordinator
 
         connector = MockConnector(support_streaming=True)
         coord = InteractionCoordinator(connector, config, event_bus)
@@ -466,7 +466,7 @@ class TestInteractionTimeoutBehavior:
     """Tests for timeout, cancel, and state cleanup in InteractionCoordinator."""
 
     def _make_coord(self, connector, config, event_bus=None):
-        from tether.core.interactions import InteractionCoordinator
+        from leashd.core.interactions import InteractionCoordinator
 
         return InteractionCoordinator(connector, config, event_bus)
 
@@ -658,7 +658,7 @@ class TestInteractionTimeoutBehavior:
         assert config.interaction_timeout_seconds == 42
         assert config.approval_timeout_seconds == 999
 
-        config2 = TetherConfig(
+        config2 = LeashdConfig(
             approved_directories=config.approved_directories,
             approval_timeout_seconds=10,
         )
@@ -765,7 +765,7 @@ class TestInteractionEdgeCases:
     async def test_events_emitted(
         self, interaction_coordinator, mock_connector, event_bus
     ):
-        from tether.core.events import INTERACTION_REQUESTED, INTERACTION_RESOLVED
+        from leashd.core.events import INTERACTION_REQUESTED, INTERACTION_RESOLVED
 
         events = []
 

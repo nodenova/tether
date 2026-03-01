@@ -6,11 +6,11 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
+from leashd.agents.base import AgentResponse, BaseAgent, ToolActivity
+from leashd.core.engine import Engine, _StreamingResponder
+from leashd.core.session import SessionManager
+from leashd.exceptions import AgentError
 from tests.conftest import MockConnector
-from tether.agents.base import AgentResponse, BaseAgent, ToolActivity
-from tether.core.engine import Engine, _StreamingResponder
-from tether.core.session import SessionManager
-from tether.exceptions import AgentError
 
 
 class FakeStreamingAgent(BaseAgent):
@@ -238,9 +238,9 @@ class TestEngineStreaming:
 
     @pytest.mark.asyncio
     async def test_streaming_disabled_via_config(self, tmp_path, audit_logger):
-        from tether.core.config import TetherConfig
+        from leashd.core.config import LeashdConfig
 
-        config = TetherConfig(
+        config = LeashdConfig(
             approved_directories=[tmp_path],
             streaming_enabled=False,
             audit_log_path=tmp_path / "audit.jsonl",
@@ -527,9 +527,9 @@ class TestEngineToolActivityWiring:
     async def test_no_tool_activity_when_streaming_disabled(
         self, tmp_path, audit_logger
     ):
-        from tether.core.config import TetherConfig
+        from leashd.core.config import LeashdConfig
 
-        config = TetherConfig(
+        config = LeashdConfig(
             approved_directories=[tmp_path],
             streaming_enabled=False,
             audit_log_path=tmp_path / "audit.jsonl",

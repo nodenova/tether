@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from tether.git.service import GitService, _porcelain_to_status, _strip_claude_coauthor
+from leashd.git.service import GitService, _porcelain_to_status, _strip_claude_coauthor
 
 
 @pytest.fixture
@@ -29,7 +29,7 @@ def _make_proc(returncode=0, stdout="", stderr=""):
 def _patch_subprocess(proc):
     """Patch asyncio.create_subprocess_exec to return the given proc."""
     return patch(
-        "tether.git.service.asyncio.create_subprocess_exec",
+        "leashd.git.service.asyncio.create_subprocess_exec",
         new_callable=AsyncMock,
         return_value=proc,
     )
@@ -360,7 +360,7 @@ class TestCheckout:
             )
 
         with patch(
-            "tether.git.service.asyncio.create_subprocess_exec",
+            "leashd.git.service.asyncio.create_subprocess_exec",
             side_effect=side_effect,
         ):
             result = await service.checkout(cwd, "feature/new")
@@ -376,7 +376,7 @@ class TestCheckout:
             return _make_proc(returncode=1, stderr="error: not found")
 
         with patch(
-            "tether.git.service.asyncio.create_subprocess_exec",
+            "leashd.git.service.asyncio.create_subprocess_exec",
             side_effect=side_effect,
         ):
             result = await service.checkout(cwd, "nonexistent")
@@ -713,7 +713,7 @@ class TestRun:
         proc.communicate = slow_communicate
 
         with patch(
-            "tether.git.service.asyncio.create_subprocess_exec",
+            "leashd.git.service.asyncio.create_subprocess_exec",
             new_callable=AsyncMock,
             return_value=proc,
         ):
@@ -723,7 +723,7 @@ class TestRun:
 
     async def test_git_not_installed(self, service, cwd):
         with patch(
-            "tether.git.service.asyncio.create_subprocess_exec",
+            "leashd.git.service.asyncio.create_subprocess_exec",
             side_effect=FileNotFoundError,
         ):
             code, _stdout, stderr = await service._run("status", cwd=cwd)
@@ -732,7 +732,7 @@ class TestRun:
 
     async def test_os_error(self, service, cwd):
         with patch(
-            "tether.git.service.asyncio.create_subprocess_exec",
+            "leashd.git.service.asyncio.create_subprocess_exec",
             side_effect=OSError("Permission denied"),
         ):
             code, _stdout, stderr = await service._run("status", cwd=cwd)
@@ -751,7 +751,7 @@ class TestRun:
         proc.communicate = slow_communicate
 
         with patch(
-            "tether.git.service.asyncio.create_subprocess_exec",
+            "leashd.git.service.asyncio.create_subprocess_exec",
             new_callable=AsyncMock,
             return_value=proc,
         ):

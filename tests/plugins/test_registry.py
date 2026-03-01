@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import pytest
 
-from tether.core.events import EventBus
-from tether.exceptions import PluginError
-from tether.plugins.base import PluginContext, PluginMeta, TetherPlugin
-from tether.plugins.registry import PluginRegistry
+from leashd.core.events import EventBus
+from leashd.exceptions import PluginError
+from leashd.plugins.base import LeashdPlugin, PluginContext, PluginMeta
+from leashd.plugins.registry import PluginRegistry
 
 
-class StubPlugin(TetherPlugin):
+class StubPlugin(LeashdPlugin):
     meta = PluginMeta(name="stub", version="1.0.0", description="Test plugin")
 
     def __init__(self):
@@ -83,7 +83,7 @@ class TestPluginRegistry:
 
     @pytest.mark.asyncio
     async def test_init_failure_raises_plugin_error(self, registry, plugin_context):
-        class BadPlugin(TetherPlugin):
+        class BadPlugin(LeashdPlugin):
             meta = PluginMeta(name="bad", version="0.0.1")
 
             async def initialize(self, context):
@@ -97,7 +97,7 @@ class TestPluginRegistry:
     async def test_stop_all_reverse_order(self, registry, plugin_context):
         stop_order = []
 
-        class PluginA(TetherPlugin):
+        class PluginA(LeashdPlugin):
             meta = PluginMeta(name="a", version="1.0.0")
 
             async def initialize(self, context):
@@ -106,7 +106,7 @@ class TestPluginRegistry:
             async def stop(self):
                 stop_order.append("A")
 
-        class PluginB(TetherPlugin):
+        class PluginB(LeashdPlugin):
             meta = PluginMeta(name="b", version="1.0.0")
 
             async def initialize(self, context):
@@ -115,7 +115,7 @@ class TestPluginRegistry:
             async def stop(self):
                 stop_order.append("B")
 
-        class PluginC(TetherPlugin):
+        class PluginC(LeashdPlugin):
             meta = PluginMeta(name="c", version="1.0.0")
 
             async def initialize(self, context):
@@ -133,7 +133,7 @@ class TestPluginRegistry:
 
     @pytest.mark.asyncio
     async def test_stop_all_continues_on_error(self, registry, plugin_context):
-        class FailStop(TetherPlugin):
+        class FailStop(LeashdPlugin):
             meta = PluginMeta(name="fail_stop", version="1.0.0")
 
             async def initialize(self, context):
@@ -153,7 +153,7 @@ class TestPluginRegistry:
 
     @pytest.mark.asyncio
     async def test_init_failure_skips_remaining(self, registry, plugin_context):
-        class BadPlugin(TetherPlugin):
+        class BadPlugin(LeashdPlugin):
             meta = PluginMeta(name="bad", version="0.0.1")
 
             async def initialize(self, context):
@@ -184,7 +184,7 @@ class TestPluginRegistry:
     async def test_start_all_exception_propagates(self, registry, plugin_context):
         """Exception in start() wraps in PluginError and propagates."""
 
-        class BadStart(TetherPlugin):
+        class BadStart(LeashdPlugin):
             meta = PluginMeta(name="bad_start", version="1.0")
 
             async def initialize(self, context):
@@ -202,7 +202,7 @@ class TestPluginRegistry:
     async def test_correct_context_passed_to_initialize(self, registry, plugin_context):
         received_ctx = []
 
-        class ContextCapture(TetherPlugin):
+        class ContextCapture(LeashdPlugin):
             meta = PluginMeta(name="ctx_cap", version="1.0")
 
             async def initialize(self, context):
@@ -218,7 +218,7 @@ class TestPluginRegistry:
     async def test_multiple_plugins_started(self, registry, plugin_context):
         started = []
 
-        class PA(TetherPlugin):
+        class PA(LeashdPlugin):
             meta = PluginMeta(name="pa", version="1.0")
 
             async def initialize(self, context):
@@ -227,7 +227,7 @@ class TestPluginRegistry:
             async def start(self):
                 started.append("pa")
 
-        class PB(TetherPlugin):
+        class PB(LeashdPlugin):
             meta = PluginMeta(name="pb", version="1.0")
 
             async def initialize(self, context):

@@ -63,7 +63,7 @@ sequenceDiagram
 
 ## Agent Modes
 
-Tether supports three agent modes per session: **default**, **plan**, and **auto** (plus special **test** and **merge** modes activated by plugins).
+leashd supports three agent modes per session: **default**, **plan**, and **auto** (plus special **test** and **merge** modes activated by plugins).
 
 - **default** — balanced mode; the agent decides whether to plan or implement directly
 - **plan** — the agent receives a system prompt instruction (`_PLAN_MODE_INSTRUCTION`) that tells it to explore and plan before implementing. When the agent calls `ExitPlanMode`, the user reviews the plan and decides how to proceed.

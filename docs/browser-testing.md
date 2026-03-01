@@ -1,6 +1,6 @@
 # Browser Testing (Playwright MCP)
 
-Tether integrates with [Playwright MCP](https://github.com/playwright-community/mcp) to give Claude Code browser automation capabilities — navigating pages, clicking elements, taking snapshots, and generating Playwright tests — all gated by Tether's safety pipeline.
+leashd integrates with [Playwright MCP](https://github.com/playwright-community/mcp) to give Claude Code browser automation capabilities — navigating pages, clicking elements, taking snapshots, and generating Playwright tests — all gated by leashd's safety pipeline.
 
 ## Prerequisites
 
@@ -13,15 +13,15 @@ npx playwright install chromium
 
 This downloads the Chromium binary Playwright needs. You only need to do this once per machine.
 
-> **Note:** You'll see a warning about "running without first installing your project's dependencies." This is safe to ignore — the browser binary installs successfully despite the warning. Tether is a Python project and doesn't need `npm install` or a `package.json`.
+> **Note:** You'll see a warning about "running without first installing your project's dependencies." This is safe to ignore — the browser binary installs successfully despite the warning. leashd is a Python project and doesn't need `npm install` or a `package.json`.
 
 ## How It Works
 
 The integration has three layers:
 
-1. **`.mcp.json`** at the project root tells Claude Code to spawn a Playwright MCP server. Claude Code's SDK handles the MCP server lifecycle — Tether's Python process never touches Playwright directly.
+1. **`.mcp.json`** at the project root tells Claude Code to spawn a Playwright MCP server. Claude Code's SDK handles the MCP server lifecycle — leashd's Python process never touches Playwright directly.
 
-2. **Policy rules** in each YAML preset classify the 28 browser tools. Tether's existing safety pipeline (sandbox → policy → approval) gates every browser tool call.
+2. **Policy rules** in each YAML preset classify the 28 browser tools. leashd's existing safety pipeline (sandbox → policy → approval) gates every browser tool call.
 
 3. **`BrowserToolsPlugin`** provides structured logging for browser tool events — which tools were invoked, whether they were allowed or denied, and whether they're mutations.
 
@@ -29,7 +29,7 @@ The integration has three layers:
 sequenceDiagram
     participant CC as Claude Code
     participant MCP as Playwright MCP Server
-    participant GK as Tether Gatekeeper
+    participant GK as leashd Gatekeeper
     participant Policy as Policy Engine
 
     CC->>MCP: browser_navigate("http://localhost:3000")
@@ -182,7 +182,7 @@ npx playwright init-agents --loop=claude
 
 ### The `/healer` Command
 
-Tether includes a `/healer` slash command (`.claude/commands/healer.md`) that invokes the healer agent workflow:
+leashd includes a `/healer` slash command (`.claude/commands/healer.md`) that invokes the healer agent workflow:
 
 1. Run the failing test suite with `npx playwright test`
 2. Analyze Playwright trace files for each failure
@@ -196,7 +196,7 @@ Tether includes a `/healer` slash command (`.claude/commands/healer.md`) that in
 A typical browser testing session looks like this:
 
 1. **Start your dev server** — e.g., `npm run dev` in a separate terminal
-2. **Launch Claude Code** in the Tether project directory
+2. **Launch Claude Code** in the leashd project directory
 3. **Ask Claude to navigate** — "Go to http://localhost:3000 and check if the login form renders"
 4. Claude calls `browser_navigate` → gated by policy → you approve (in default policy)
 5. Claude calls `browser_snapshot` → auto-allowed (readonly) → returns the page structure
@@ -213,7 +213,7 @@ Use `browser_snapshot` for routine inspection and reserve `browser_take_screensh
 
 ## Known Gotchas
 
-- **Misleading npm warning** — `npx playwright install chromium` prints a warning about missing project dependencies. This is safe to ignore — the browser installs successfully. Tether is a Python project and doesn't need `npm install` or a `package.json`.
+- **Misleading npm warning** — `npx playwright install chromium` prints a warning about missing project dependencies. This is safe to ignore — the browser installs successfully. leashd is a Python project and doesn't need `npm install` or a `package.json`.
 - **Version pinning** — `.mcp.json` pins `@playwright/mcp@0.0.41`. Updating may change tool names or behavior. Test after upgrading.
 - **Windows Chrome conflict** — On Windows, if Chrome is already open, Playwright may fail to launch. Close existing Chrome instances or use `--cdp-endpoint` to connect to a running instance.
 - **Context window exhaustion** — Heavy use of `browser_take_screenshot` can fill the context window quickly. Use `browser_snapshot` (text-based) when possible.

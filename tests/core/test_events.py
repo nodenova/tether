@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from tether.core.events import Event, EventBus
+from leashd.core.events import Event, EventBus
 
 
 @pytest.fixture

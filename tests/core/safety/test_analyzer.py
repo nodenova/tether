@@ -1,6 +1,6 @@
 """Tests for bash command and path analyzers."""
 
-from tether.core.safety.analyzer import analyze_bash, analyze_path, strip_cd_prefix
+from leashd.core.safety.analyzer import analyze_bash, analyze_path, strip_cd_prefix
 
 
 class TestCommandAnalyzer:

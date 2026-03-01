@@ -6,23 +6,23 @@ from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 
-from tests.conftest import MockConnector
-from tether.core.events import COMMAND_MERGE, MERGE_STARTED, Event, EventBus
-from tether.core.safety.audit import AuditLogger
-from tether.core.safety.gatekeeper import ToolGatekeeper
-from tether.core.safety.sandbox import SandboxEnforcer
-from tether.core.session import Session
-from tether.git import formatter
-from tether.git.handler import GitCommandHandler
-from tether.git.models import GitResult, GitStatus, MergeResult
-from tether.git.service import GitService
-from tether.plugins.base import PluginContext
-from tether.plugins.builtin.merge_resolver import (
+from leashd.core.events import COMMAND_MERGE, MERGE_STARTED, Event, EventBus
+from leashd.core.safety.audit import AuditLogger
+from leashd.core.safety.gatekeeper import ToolGatekeeper
+from leashd.core.safety.sandbox import SandboxEnforcer
+from leashd.core.session import Session
+from leashd.git import formatter
+from leashd.git.handler import GitCommandHandler
+from leashd.git.models import GitResult, GitStatus, MergeResult
+from leashd.git.service import GitService
+from leashd.plugins.base import PluginContext
+from leashd.plugins.builtin.merge_resolver import (
     MERGE_BASH_AUTO_APPROVE,
     MergeConfig,
     MergeResolverPlugin,
     build_merge_instruction,
 )
+from tests.conftest import MockConnector
 
 # ── Fixtures ─────────────────────────────────────────────────────────
 
@@ -47,7 +47,7 @@ def _make_proc(returncode=0, stdout="", stderr=""):
 
 def _patch_subprocess(proc):
     return patch(
-        "tether.git.service.asyncio.create_subprocess_exec",
+        "leashd.git.service.asyncio.create_subprocess_exec",
         new_callable=AsyncMock,
         return_value=proc,
     )
@@ -133,7 +133,7 @@ class TestServiceMerge:
             return _make_proc(returncode=0, stdout="src/app.py\nsrc/utils.py\n")
 
         with patch(
-            "tether.git.service.asyncio.create_subprocess_exec",
+            "leashd.git.service.asyncio.create_subprocess_exec",
             side_effect=side_effect,
         ):
             result = await service.merge(cwd, "feature")
@@ -306,7 +306,7 @@ class TestMergeResolverPlugin:
 
     async def test_plugin_sets_session_mode(self, event_bus, session, tmp_path):
         plugin = MergeResolverPlugin()
-        config_obj = _make_tether_config(tmp_path)
+        config_obj = _make_leashd_config(tmp_path)
         ctx = PluginContext(event_bus=event_bus, config=config_obj)
         await plugin.initialize(ctx)
 
@@ -334,7 +334,7 @@ class TestMergeResolverPlugin:
 
     async def test_plugin_auto_approves_tools(self, event_bus, session, tmp_path):
         plugin = MergeResolverPlugin()
-        config_obj = _make_tether_config(tmp_path)
+        config_obj = _make_leashd_config(tmp_path)
         ctx = PluginContext(event_bus=event_bus, config=config_obj)
         await plugin.initialize(ctx)
 
@@ -365,7 +365,7 @@ class TestMergeResolverPlugin:
 
     async def test_plugin_emits_merge_started(self, event_bus, session, tmp_path):
         plugin = MergeResolverPlugin()
-        config_obj = _make_tether_config(tmp_path)
+        config_obj = _make_leashd_config(tmp_path)
         ctx = PluginContext(event_bus=event_bus, config=config_obj)
         await plugin.initialize(ctx)
 
@@ -497,10 +497,10 @@ class TestFormatHelpIncludesMerge:
 # ── Helpers ──────────────────────────────────────────────────────────
 
 
-def _make_tether_config(tmp_path):
-    from tether.core.config import TetherConfig
+def _make_leashd_config(tmp_path):
+    from leashd.core.config import LeashdConfig
 
-    return TetherConfig(
+    return LeashdConfig(
         approved_directories=[tmp_path],
         audit_log_path=tmp_path / "audit.jsonl",
     )

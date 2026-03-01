@@ -6,15 +6,15 @@ import pytest
 from telegram import Message
 from telegram.error import BadRequest, InvalidToken, NetworkError, RetryAfter, TimedOut
 
-from tether.connectors.base import InlineButton
-from tether.connectors.telegram import (
+from leashd.connectors.base import InlineButton
+from leashd.connectors.telegram import (
     _MAX_MESSAGE_LENGTH,
     TelegramConnector,
     _retry_on_network_error,
     _split_text,
     _to_telegram_markup,
 )
-from tether.exceptions import ConnectorError
+from leashd.exceptions import ConnectorError
 
 # --- Pure function tests ---
 
@@ -118,7 +118,7 @@ class TestStart:
         mock_builder.build.return_value = mock_app
 
         with patch(
-            "tether.connectors.telegram.Application.builder",
+            "leashd.connectors.telegram.Application.builder",
             return_value=mock_builder,
         ):
             await connector.start()
@@ -1359,7 +1359,7 @@ class TestRetryOnNetworkError:
     @pytest.mark.asyncio
     async def test_retries_on_timed_out_then_succeeds(self):
         factory = AsyncMock(side_effect=[TimedOut(), "ok"])
-        with patch("tether.connectors.telegram.asyncio.sleep") as mock_sleep:
+        with patch("leashd.connectors.telegram.asyncio.sleep") as mock_sleep:
             result = await _retry_on_network_error(
                 factory,
                 max_retries=3,
@@ -1374,7 +1374,7 @@ class TestRetryOnNetworkError:
     @pytest.mark.asyncio
     async def test_retries_on_network_error_then_succeeds(self):
         factory = AsyncMock(side_effect=[NetworkError("conn reset"), "ok"])
-        with patch("tether.connectors.telegram.asyncio.sleep"):
+        with patch("leashd.connectors.telegram.asyncio.sleep"):
             result = await _retry_on_network_error(
                 factory,
                 max_retries=3,
@@ -1388,7 +1388,7 @@ class TestRetryOnNetworkError:
     async def test_exhausts_retries_raises_connector_error(self):
         factory = AsyncMock(side_effect=NetworkError("down"))
         with (
-            patch("tether.connectors.telegram.asyncio.sleep"),
+            patch("leashd.connectors.telegram.asyncio.sleep"),
             pytest.raises(ConnectorError, match="test_op failed after 3 retries"),
         ):
             await _retry_on_network_error(
@@ -1419,7 +1419,7 @@ class TestRetryOnNetworkError:
             side_effect=[NetworkError("1"), NetworkError("2"), NetworkError("3")]
         )
         with (
-            patch("tether.connectors.telegram.asyncio.sleep") as mock_sleep,
+            patch("leashd.connectors.telegram.asyncio.sleep") as mock_sleep,
             pytest.raises(ConnectorError),
         ):
             await _retry_on_network_error(
@@ -1438,7 +1438,7 @@ class TestRetryOnNetworkError:
             side_effect=[NetworkError("1"), NetworkError("2"), NetworkError("3")]
         )
         with (
-            patch("tether.connectors.telegram.asyncio.sleep") as mock_sleep,
+            patch("leashd.connectors.telegram.asyncio.sleep") as mock_sleep,
             pytest.raises(ConnectorError),
         ):
             await _retry_on_network_error(
@@ -1454,7 +1454,7 @@ class TestRetryOnNetworkError:
     @pytest.mark.asyncio
     async def test_retry_after_uses_server_delay(self):
         factory = AsyncMock(side_effect=[RetryAfter(42), "ok"])
-        with patch("tether.connectors.telegram.asyncio.sleep") as mock_sleep:
+        with patch("leashd.connectors.telegram.asyncio.sleep") as mock_sleep:
             result = await _retry_on_network_error(
                 factory,
                 max_retries=3,
@@ -1479,10 +1479,10 @@ class TestStartRetry:
 
         with (
             patch(
-                "tether.connectors.telegram.Application.builder",
+                "leashd.connectors.telegram.Application.builder",
                 return_value=mock_builder,
             ),
-            patch("tether.connectors.telegram.asyncio.sleep"),
+            patch("leashd.connectors.telegram.asyncio.sleep"),
         ):
             await connector.start()
 
@@ -1501,10 +1501,10 @@ class TestStartRetry:
 
         with (
             patch(
-                "tether.connectors.telegram.Application.builder",
+                "leashd.connectors.telegram.Application.builder",
                 return_value=mock_builder,
             ),
-            patch("tether.connectors.telegram.asyncio.sleep"),
+            patch("leashd.connectors.telegram.asyncio.sleep"),
             pytest.raises(ConnectorError),
         ):
             await connector.start()
@@ -1521,7 +1521,7 @@ class TestStartRetry:
 
         with (
             patch(
-                "tether.connectors.telegram.Application.builder",
+                "leashd.connectors.telegram.Application.builder",
                 return_value=mock_builder,
             ),
             pytest.raises(InvalidToken),
@@ -1538,7 +1538,7 @@ class TestSendMessageRetry:
         connector._app = mock_app
         mock_app.bot.send_message = AsyncMock(side_effect=[NetworkError("blip"), None])
 
-        with patch("tether.connectors.telegram.asyncio.sleep"):
+        with patch("leashd.connectors.telegram.asyncio.sleep"):
             await connector.send_message("123", "hello")
 
         assert mock_app.bot.send_message.await_count == 2
@@ -1549,7 +1549,7 @@ class TestSendMessageRetry:
         connector._app = mock_app
         mock_app.bot.send_message = AsyncMock(side_effect=NetworkError("down"))
 
-        with patch("tether.connectors.telegram.asyncio.sleep"):
+        with patch("leashd.connectors.telegram.asyncio.sleep"):
             await connector.send_message("123", "hello")
         # ConnectorError caught by the outer except — no raise
 
@@ -1563,7 +1563,7 @@ class TestSendMessageRetry:
             side_effect=[NetworkError("blip"), mock_msg]
         )
 
-        with patch("tether.connectors.telegram.asyncio.sleep"):
+        with patch("leashd.connectors.telegram.asyncio.sleep"):
             result = await connector.send_message_with_id("123", "hello")
 
         assert result == "42"

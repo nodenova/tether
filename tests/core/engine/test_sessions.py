@@ -5,14 +5,14 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from leashd.agents.base import AgentResponse, BaseAgent
+from leashd.core.config import LeashdConfig
+from leashd.core.engine import Engine
+from leashd.core.interactions import InteractionCoordinator
+from leashd.core.session import Session, SessionManager
+from leashd.exceptions import AgentError, StorageError
+from leashd.middleware.base import MessageContext, MiddlewareChain
 from tests.core.engine.conftest import FakeAgent
-from tether.agents.base import AgentResponse, BaseAgent
-from tether.core.config import TetherConfig
-from tether.core.engine import Engine
-from tether.core.interactions import InteractionCoordinator
-from tether.core.session import Session, SessionManager
-from tether.exceptions import AgentError, StorageError
-from tether.middleware.base import MessageContext, MiddlewareChain
 
 
 class TestEngineSessionManagement:
@@ -86,7 +86,7 @@ class TestEngineSessionManagement:
 class TestEngineWithMiddleware:
     @pytest.mark.asyncio
     async def test_middleware_chain_runs(self, config, fake_agent, audit_logger):
-        from tether.middleware.auth import AuthMiddleware
+        from leashd.middleware.auth import AuthMiddleware
 
         chain = MiddlewareChain()
         chain.add(AuthMiddleware({"user1"}))
@@ -108,7 +108,7 @@ class TestEngineWithMiddleware:
     async def test_middleware_rejects_unauthorized(
         self, config, fake_agent, audit_logger
     ):
-        from tether.middleware.auth import AuthMiddleware
+        from leashd.middleware.auth import AuthMiddleware
 
         chain = MiddlewareChain()
         chain.add(AuthMiddleware({"user1"}))
@@ -130,7 +130,7 @@ class TestEngineWithMiddleware:
     async def test_connector_handler_enforces_middleware(
         self, config, fake_agent, audit_logger, mock_connector
     ):
-        from tether.middleware.auth import AuthMiddleware
+        from leashd.middleware.auth import AuthMiddleware
 
         chain = MiddlewareChain()
         chain.add(AuthMiddleware({"user1"}))
@@ -154,7 +154,7 @@ class TestEngineWithMiddleware:
     async def test_connector_handler_authorized_user_through_middleware(
         self, config, fake_agent, audit_logger, mock_connector
     ):
-        from tether.middleware.auth import AuthMiddleware
+        from leashd.middleware.auth import AuthMiddleware
 
         chain = MiddlewareChain()
         chain.add(AuthMiddleware({"user1"}))
@@ -369,7 +369,7 @@ class TestErrorPathSessionPersistence:
         store.load = AsyncMock(return_value=None)
         store.save = AsyncMock(side_effect=capture_save)
 
-        config = TetherConfig(
+        config = LeashdConfig(
             approved_directories=[tmp_path],
             audit_log_path=tmp_path / "audit.jsonl",
         )
@@ -399,9 +399,9 @@ class TestErrorPathSessionPersistence:
         self, audit_logger, policy_engine, tmp_path
     ):
         """Pre-seed SQLite with stale ID → agent fails → reload → ID is None."""
-        from tether.storage.sqlite import SqliteSessionStore
+        from leashd.storage.sqlite import SqliteSessionStore
 
-        config = TetherConfig(
+        config = LeashdConfig(
             approved_directories=[tmp_path],
             audit_log_path=tmp_path / "audit.jsonl",
         )
@@ -444,9 +444,9 @@ class TestErrorPathSessionPersistence:
         self, audit_logger, policy_engine, tmp_path
     ):
         """Two-engine pattern: stale ID cleared in Engine 1, Engine 2 works fresh."""
-        from tether.storage.sqlite import SqliteSessionStore
+        from leashd.storage.sqlite import SqliteSessionStore
 
-        config = TetherConfig(
+        config = LeashdConfig(
             approved_directories=[tmp_path],
             audit_log_path=tmp_path / "audit.jsonl",
         )
@@ -503,7 +503,7 @@ class TestErrorPathSessionPersistence:
         self, audit_logger, policy_engine, tmp_path
     ):
         """Timeout path: stale claude_session_id is cleared, not re-persisted."""
-        config = TetherConfig(
+        config = LeashdConfig(
             approved_directories=[tmp_path],
             audit_log_path=tmp_path / "audit.jsonl",
             agent_timeout_seconds=1,
@@ -535,7 +535,7 @@ class TestErrorPathSessionPersistence:
         self, audit_logger, policy_engine, tmp_path
     ):
         """Timeout path: new session ID acquired during execution is preserved."""
-        config = TetherConfig(
+        config = LeashdConfig(
             approved_directories=[tmp_path],
             audit_log_path=tmp_path / "audit.jsonl",
             agent_timeout_seconds=1,
@@ -570,9 +570,9 @@ class TestErrorPathSessionPersistence:
         self, audit_logger, policy_engine, tmp_path
     ):
         """SQLite end-to-end: first msg stale→error→cleared, second msg fresh→succeeds."""
-        from tether.storage.sqlite import SqliteSessionStore
+        from leashd.storage.sqlite import SqliteSessionStore
 
-        config = TetherConfig(
+        config = LeashdConfig(
             approved_directories=[tmp_path],
             audit_log_path=tmp_path / "audit.jsonl",
         )
@@ -639,7 +639,7 @@ class TestErrorPathSessionPersistence:
         store.load = AsyncMock(return_value=None)
         store.save = AsyncMock(side_effect=capture_save)
 
-        config = TetherConfig(
+        config = LeashdConfig(
             approved_directories=[tmp_path],
             audit_log_path=tmp_path / "audit.jsonl",
         )
@@ -665,20 +665,20 @@ class TestErrorPathSessionPersistence:
         assert len(error_saves) >= 1
 
 
-class TestTetherDirCreatedOnSessionInit:
-    """Verify .tether/ is created on first message and on commands."""
+class TestleashdDirCreatedOnSessionInit:
+    """Verify .leashd/ is created on first message and on commands."""
 
     @pytest.mark.asyncio
-    async def test_tether_dir_created_on_first_message(
+    async def test_leashd_dir_created_on_first_message(
         self, policy_engine, mock_connector, tmp_path
     ):
         d1 = tmp_path / "proj1"
         d1.mkdir()
-        config = TetherConfig(
+        config = LeashdConfig(
             approved_directories=[d1],
             audit_log_path=tmp_path / "audit.jsonl",
         )
-        from tether.core.safety.audit import AuditLogger
+        from leashd.core.safety.audit import AuditLogger
 
         eng = Engine(
             connector=mock_connector,
@@ -689,22 +689,22 @@ class TestTetherDirCreatedOnSessionInit:
             audit=AuditLogger(tmp_path / "audit.jsonl"),
         )
 
-        assert not (d1 / ".tether").exists()
+        assert not (d1 / ".leashd").exists()
         await eng.handle_message("user1", "hello", "chat1")
-        assert (d1 / ".tether").is_dir()
-        assert (d1 / ".tether" / ".gitignore").is_file()
+        assert (d1 / ".leashd").is_dir()
+        assert (d1 / ".leashd" / ".gitignore").is_file()
 
     @pytest.mark.asyncio
-    async def test_tether_dir_created_on_command(
+    async def test_leashd_dir_created_on_command(
         self, policy_engine, mock_connector, tmp_path
     ):
         d1 = tmp_path / "proj1"
         d1.mkdir()
-        config = TetherConfig(
+        config = LeashdConfig(
             approved_directories=[d1],
             audit_log_path=tmp_path / "audit.jsonl",
         )
-        from tether.core.safety.audit import AuditLogger
+        from leashd.core.safety.audit import AuditLogger
 
         eng = Engine(
             connector=mock_connector,
@@ -715,10 +715,10 @@ class TestTetherDirCreatedOnSessionInit:
             audit=AuditLogger(tmp_path / "audit.jsonl"),
         )
 
-        assert not (d1 / ".tether").exists()
+        assert not (d1 / ".leashd").exists()
         await eng.handle_command("user1", "status", "", "chat1")
-        assert (d1 / ".tether").is_dir()
-        assert (d1 / ".tether" / ".gitignore").is_file()
+        assert (d1 / ".leashd").is_dir()
+        assert (d1 / ".leashd" / ".gitignore").is_file()
 
 
 class TestSessionPersistenceOnDirSwitch:
@@ -729,11 +729,11 @@ class TestSessionPersistenceOnDirSwitch:
         self, audit_logger, policy_engine, mock_connector, tmp_path
     ):
 
-        d1 = tmp_path / "tether"
+        d1 = tmp_path / "leashd"
         d2 = tmp_path / "api"
         d1.mkdir()
         d2.mkdir()
-        config = TetherConfig(
+        config = LeashdConfig(
             approved_directories=[d1, d2],
             audit_log_path=tmp_path / "audit.jsonl",
         )
@@ -770,7 +770,7 @@ class TestSessionPersistenceOnDirSwitch:
         monkeypatch.setattr(
             Engine, "_discover_plan_file", staticmethod(lambda wd=None: None)
         )
-        config = TetherConfig(
+        config = LeashdConfig(
             approved_directories=[tmp_path],
             audit_log_path=tmp_path / "audit.jsonl",
         )
@@ -840,13 +840,13 @@ class TestSessionPersistenceOnDirSwitch:
         self, audit_logger, policy_engine, mock_connector, tmp_path
     ):
         """End-to-end: /dir switch persists working_directory in SQLite."""
-        from tether.storage.sqlite import SqliteSessionStore
+        from leashd.storage.sqlite import SqliteSessionStore
 
-        d1 = tmp_path / "tether"
+        d1 = tmp_path / "leashd"
         d2 = tmp_path / "api"
         d1.mkdir()
         d2.mkdir()
-        config = TetherConfig(
+        config = LeashdConfig(
             approved_directories=[d1, d2],
             audit_log_path=tmp_path / "audit.jsonl",
         )
@@ -883,18 +883,18 @@ class TestDirectoryPersistenceAcrossRestart:
     async def test_dir_survives_restart(
         self, audit_logger, policy_engine, mock_connector, tmp_path
     ):
-        from tether.storage.sqlite import SqliteSessionStore
+        from leashd.storage.sqlite import SqliteSessionStore
 
-        d1 = tmp_path / "tether"
+        d1 = tmp_path / "leashd"
         d2 = tmp_path / "api"
         d1.mkdir()
         d2.mkdir()
-        config = TetherConfig(
+        config = LeashdConfig(
             approved_directories=[d1, d2],
             audit_log_path=tmp_path / "audit.jsonl",
         )
         session_db = tmp_path / "sessions.db"
-        msg_db_1 = d1 / ".tether" / "messages.db"
+        msg_db_1 = d1 / ".leashd" / "messages.db"
         msg_db_1.parent.mkdir(parents=True, exist_ok=True)
 
         # Engine 1: switch to api
@@ -921,7 +921,7 @@ class TestDirectoryPersistenceAcrossRestart:
 
         # Engine 2: fresh stores on same session DB — simulates restart
         session_store_2 = SqliteSessionStore(session_db)
-        msg_db_default = d1 / ".tether" / "messages.db"
+        msg_db_default = d1 / ".leashd" / "messages.db"
         message_store_2 = SqliteSessionStore(msg_db_default)
         await session_store_2.setup()
         await message_store_2.setup()
@@ -945,13 +945,13 @@ class TestDirectoryPersistenceAcrossRestart:
     async def test_session_restore_realigns_message_store(
         self, audit_logger, policy_engine, tmp_path
     ):
-        from tether.storage.sqlite import SqliteSessionStore
+        from leashd.storage.sqlite import SqliteSessionStore
 
-        d1 = tmp_path / "tether"
+        d1 = tmp_path / "leashd"
         d2 = tmp_path / "api"
         d1.mkdir()
         d2.mkdir()
-        config = TetherConfig(
+        config = LeashdConfig(
             approved_directories=[d1, d2],
             audit_log_path=tmp_path / "audit.jsonl",
         )
@@ -960,7 +960,7 @@ class TestDirectoryPersistenceAcrossRestart:
         # Pre-seed: save session with api directory
         session_store = SqliteSessionStore(session_db)
         await session_store.setup()
-        from tether.core.session import Session
+        from leashd.core.session import Session
 
         await session_store.save(
             Session(
@@ -971,7 +971,7 @@ class TestDirectoryPersistenceAcrossRestart:
             )
         )
 
-        msg_db = d1 / ".tether" / "messages.db"
+        msg_db = d1 / ".leashd" / "messages.db"
         msg_db.parent.mkdir(parents=True, exist_ok=True)
         message_store = SqliteSessionStore(msg_db)
         await message_store.setup()
@@ -991,7 +991,7 @@ class TestDirectoryPersistenceAcrossRestart:
         await eng.handle_message("user1", "hello", "chat1")
 
         # Message store should have been realigned to api's messages.db
-        expected_path = str(d2.resolve() / ".tether" / "messages.db")
+        expected_path = str(d2.resolve() / ".leashd" / "messages.db")
         assert message_store._db_path == expected_path
         await session_store.teardown()
         await message_store.teardown()
@@ -1000,18 +1000,18 @@ class TestDirectoryPersistenceAcrossRestart:
     async def test_dir_switch_saves_to_session_store_not_message_store(
         self, audit_logger, policy_engine, mock_connector, tmp_path
     ):
-        from tether.storage.sqlite import SqliteSessionStore
+        from leashd.storage.sqlite import SqliteSessionStore
 
-        d1 = tmp_path / "tether"
+        d1 = tmp_path / "leashd"
         d2 = tmp_path / "api"
         d1.mkdir()
         d2.mkdir()
-        config = TetherConfig(
+        config = LeashdConfig(
             approved_directories=[d1, d2],
             audit_log_path=tmp_path / "audit.jsonl",
         )
         session_db = tmp_path / "sessions.db"
-        msg_db = d1 / ".tether" / "messages.db"
+        msg_db = d1 / ".leashd" / "messages.db"
         msg_db.parent.mkdir(parents=True, exist_ok=True)
 
         session_store = SqliteSessionStore(session_db)
@@ -1057,7 +1057,7 @@ class TestRealisticSessionScenarios:
         store.load = AsyncMock(return_value=None)
         store.save = AsyncMock(side_effect=capture_save)
 
-        config = TetherConfig(
+        config = LeashdConfig(
             approved_directories=[tmp_path],
             audit_log_path=tmp_path / "audit.jsonl",
         )
@@ -1090,7 +1090,7 @@ class TestRealisticSessionScenarios:
         store.load = AsyncMock(return_value=None)
         store.save = AsyncMock()
 
-        config = TetherConfig(
+        config = LeashdConfig(
             approved_directories=[tmp_path],
             audit_log_path=tmp_path / "audit.jsonl",
         )
@@ -1120,7 +1120,7 @@ class TestRealisticSessionScenarios:
         store.load = AsyncMock(return_value=None)
         store.save = AsyncMock()
 
-        config = TetherConfig(
+        config = LeashdConfig(
             approved_directories=[tmp_path],
             audit_log_path=tmp_path / "audit.jsonl",
         )
@@ -1152,7 +1152,7 @@ class TestRealisticSessionScenarios:
         store.load = AsyncMock(return_value=None)
         store.save = AsyncMock()
 
-        config = TetherConfig(
+        config = LeashdConfig(
             approved_directories=[tmp_path],
             audit_log_path=tmp_path / "audit.jsonl",
         )
@@ -1197,7 +1197,7 @@ class TestRealisticSessionScenarios:
         store.load = AsyncMock(return_value=None)
         store.save = AsyncMock()
 
-        config = TetherConfig(
+        config = LeashdConfig(
             approved_directories=[tmp_path],
             audit_log_path=tmp_path / "audit.jsonl",
         )
@@ -1227,9 +1227,9 @@ class TestRealisticSessionScenarios:
         self, audit_logger, policy_engine, tmp_path
     ):
         """Two failures then recovery — accumulated state stays clean in SQLite."""
-        from tether.storage.sqlite import SqliteSessionStore
+        from leashd.storage.sqlite import SqliteSessionStore
 
-        config = TetherConfig(
+        config = LeashdConfig(
             approved_directories=[tmp_path],
             audit_log_path=tmp_path / "audit.jsonl",
         )
@@ -1286,7 +1286,7 @@ class TestRealisticSessionScenarios:
         store.load = AsyncMock(return_value=None)
         store.save = AsyncMock(side_effect=StorageError("disk full"))
 
-        config = TetherConfig(
+        config = LeashdConfig(
             approved_directories=[tmp_path],
             audit_log_path=tmp_path / "audit.jsonl",
         )
@@ -1317,7 +1317,7 @@ class TestRealisticSessionScenarios:
         store.load = AsyncMock(return_value=None)
         store.save = AsyncMock(side_effect=StorageError("connection lost"))
 
-        config = TetherConfig(
+        config = LeashdConfig(
             approved_directories=[tmp_path],
             audit_log_path=tmp_path / "audit.jsonl",
         )
@@ -1344,7 +1344,7 @@ class TestRealisticSessionScenarios:
         self, audit_logger, policy_engine, tmp_path
     ):
         """Four consecutive messages — cost and count accumulate correctly."""
-        config = TetherConfig(
+        config = LeashdConfig(
             approved_directories=[tmp_path],
             audit_log_path=tmp_path / "audit.jsonl",
         )
@@ -1386,7 +1386,7 @@ class TestRealisticSessionScenarios:
         store.load = AsyncMock(return_value=None)
         store.save = AsyncMock(side_effect=capture_save)
 
-        config = TetherConfig(
+        config = LeashdConfig(
             approved_directories=[tmp_path],
             audit_log_path=tmp_path / "audit.jsonl",
         )
@@ -1418,8 +1418,8 @@ class TestWorkspacePersistence:
         self, tmp_path, policy_engine, audit_logger
     ):
         """Activate workspace in engine1, create engine2 with same DB — hydration restores directories."""
-        from tether.core.workspace import Workspace
-        from tether.storage.sqlite import SqliteSessionStore
+        from leashd.core.workspace import Workspace
+        from leashd.storage.sqlite import SqliteSessionStore
 
         db_path = tmp_path / "sessions.db"
         dir_a = tmp_path / "fe"
@@ -1427,7 +1427,7 @@ class TestWorkspacePersistence:
         dir_a.mkdir()
         dir_b.mkdir()
 
-        config = TetherConfig(
+        config = LeashdConfig(
             approved_directories=[tmp_path, dir_a, dir_b],
             audit_log_path=tmp_path / "audit.jsonl",
         )
@@ -1490,14 +1490,14 @@ class TestWorkspacePersistence:
         self, tmp_path, policy_engine, audit_logger
     ):
         """If workspace was deleted from YAML, hydration clears the stale name."""
-        from tether.core.workspace import Workspace
-        from tether.storage.sqlite import SqliteSessionStore
+        from leashd.core.workspace import Workspace
+        from leashd.storage.sqlite import SqliteSessionStore
 
         db_path = tmp_path / "sessions.db"
         dir_a = tmp_path / "repo"
         dir_a.mkdir()
 
-        config = TetherConfig(
+        config = LeashdConfig(
             approved_directories=[tmp_path, dir_a],
             audit_log_path=tmp_path / "audit.jsonl",
         )

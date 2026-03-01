@@ -134,7 +134,7 @@ This intercepts user messages during an active interaction and routes them to th
 
 ## Timeout Behavior
 
-All interactions use `asyncio.wait_for()` with the configured timeout (`TETHER_APPROVAL_TIMEOUT_SECONDS`, default 300s). On timeout:
+All interactions use `asyncio.wait_for()` with the configured timeout (`LEASHD_APPROVAL_TIMEOUT_SECONDS`, default 300s). On timeout:
 
 - The pending interaction is cleaned up
 - `PermissionResultDeny` is returned

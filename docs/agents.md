@@ -1,6 +1,6 @@
 # Agent Protocol
 
-Agents are the bridge between Tether and AI backends. The agent protocol is pluggable — swap the underlying model or SDK without changing the rest of the system.
+Agents are the bridge between leashd and AI backends. The agent protocol is pluggable — swap the underlying model or SDK without changing the rest of the system.
 
 ## `BaseAgent` Protocol
 
@@ -155,8 +155,8 @@ When the Anthropic API returns a transient error, the SDK surfaces it as a `Resu
 Implement the `BaseAgent` protocol:
 
 ```python
-from tether.agents.base import AgentResponse, BaseAgent, ToolActivity
-from tether.core.session import Session
+from leashd.agents.base import AgentResponse, BaseAgent, ToolActivity
+from leashd.core.session import Session
 
 
 class MyAgent:

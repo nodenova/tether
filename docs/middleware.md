@@ -123,7 +123,7 @@ Each user gets their own `TokenBucket`. Tokens refill at `requests_per_minute / 
 ## Writing Custom Middleware
 
 ```python
-from tether.middleware.base import MessageContext, Middleware, NextHandler
+from leashd.middleware.base import MessageContext, Middleware, NextHandler
 
 
 class LoggingMiddleware(Middleware):
@@ -137,7 +137,7 @@ class LoggingMiddleware(Middleware):
 Register during engine construction. `build_engine()` adds auth and rate limit middleware automatically when configured. To add custom middleware, modify the chain before passing it to the engine:
 
 ```python
-from tether.middleware.base import MiddlewareChain
+from leashd.middleware.base import MiddlewareChain
 
 chain = MiddlewareChain()
 chain.add(AuthMiddleware(allowed_user_ids={"123"}))

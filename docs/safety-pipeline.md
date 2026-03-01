@@ -134,7 +134,7 @@ sequenceDiagram
 
 ### Timeout Behavior
 
-If the user does not respond within the timeout period (configurable via `TETHER_APPROVAL_TIMEOUT_SECONDS`, default 300s), the approval defaults to **deny**. This is the safe default — silence means no.
+If the user does not respond within the timeout period (configurable via `LEASHD_APPROVAL_TIMEOUT_SECONDS`, default 300s), the approval defaults to **deny**. This is the safe default — silence means no.
 
 ### `PendingApproval` Tracking
 

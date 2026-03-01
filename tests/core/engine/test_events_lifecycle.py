@@ -4,18 +4,18 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from tests.core.engine.conftest import FakeAgent
-from tether.agents.base import AgentResponse, BaseAgent
-from tether.core.engine import Engine
-from tether.core.events import (
+from leashd.agents.base import AgentResponse, BaseAgent
+from leashd.core.engine import Engine
+from leashd.core.events import (
     MESSAGE_IN,
     MESSAGE_OUT,
     TOOL_ALLOWED,
     TOOL_DENIED,
     EventBus,
 )
-from tether.core.safety.approvals import ApprovalCoordinator
-from tether.core.session import SessionManager
+from leashd.core.safety.approvals import ApprovalCoordinator
+from leashd.core.session import SessionManager
+from tests.core.engine.conftest import FakeAgent
 
 
 class TestEngineEvents:
@@ -123,7 +123,7 @@ class TestEngineEvents:
 class TestEngineLifecycle:
     @pytest.mark.asyncio
     async def test_engine_started_event(self, config, fake_agent, audit_logger):
-        from tether.core.events import ENGINE_STARTED
+        from leashd.core.events import ENGINE_STARTED
 
         events = []
 
@@ -148,7 +148,7 @@ class TestEngineLifecycle:
 
     @pytest.mark.asyncio
     async def test_engine_stopped_event(self, config, fake_agent, audit_logger):
-        from tether.core.events import ENGINE_STOPPED
+        from leashd.core.events import ENGINE_STOPPED
 
         events = []
 
@@ -178,7 +178,7 @@ class TestEngineStartupShutdown:
     @pytest.mark.asyncio
     async def test_startup_calls_store_setup(self, config, fake_agent, audit_logger):
 
-        from tether.storage.memory import MemorySessionStore
+        from leashd.storage.memory import MemorySessionStore
 
         store = MemorySessionStore()
         store.setup = AsyncMock()
@@ -198,10 +198,10 @@ class TestEngineStartupShutdown:
     async def test_startup_calls_plugin_init_and_start(
         self, config, fake_agent, audit_logger
     ):
-        from tether.plugins.base import PluginMeta, TetherPlugin
-        from tether.plugins.registry import PluginRegistry
+        from leashd.plugins.base import LeashdPlugin, PluginMeta
+        from leashd.plugins.registry import PluginRegistry
 
-        class FakePlugin(TetherPlugin):
+        class FakePlugin(LeashdPlugin):
             meta = PluginMeta(name="test", version="1.0")
             init_called = False
             start_called = False
@@ -229,10 +229,10 @@ class TestEngineStartupShutdown:
 
     @pytest.mark.asyncio
     async def test_shutdown_calls_plugin_stop(self, config, fake_agent, audit_logger):
-        from tether.plugins.base import PluginMeta, TetherPlugin
-        from tether.plugins.registry import PluginRegistry
+        from leashd.plugins.base import LeashdPlugin, PluginMeta
+        from leashd.plugins.registry import PluginRegistry
 
-        class FakePlugin(TetherPlugin):
+        class FakePlugin(LeashdPlugin):
             meta = PluginMeta(name="test2", version="1.0")
             stop_called = False
 
@@ -261,7 +261,7 @@ class TestEngineStartupShutdown:
         self, config, fake_agent, audit_logger
     ):
 
-        from tether.storage.memory import MemorySessionStore
+        from leashd.storage.memory import MemorySessionStore
 
         store = MemorySessionStore()
         store.teardown = AsyncMock()
@@ -282,13 +282,13 @@ class TestEngineStartupShutdown:
         self, config, fake_agent, audit_logger
     ):
 
-        from tether.plugins.base import PluginMeta, TetherPlugin
-        from tether.plugins.registry import PluginRegistry
-        from tether.storage.memory import MemorySessionStore
+        from leashd.plugins.base import LeashdPlugin, PluginMeta
+        from leashd.plugins.registry import PluginRegistry
+        from leashd.storage.memory import MemorySessionStore
 
         lifecycle_events = []
 
-        class LP(TetherPlugin):
+        class LP(LeashdPlugin):
             meta = PluginMeta(name="lp", version="1.0")
 
             async def initialize(self, context):
@@ -345,7 +345,7 @@ class TestAuditLogger:
     """Tests for audit logger edge cases."""
 
     def test_audit_write_failure_logged_not_raised(self, tmp_path):
-        from tether.core.safety.audit import AuditLogger
+        from leashd.core.safety.audit import AuditLogger
 
         logger = AuditLogger(tmp_path / "nonexistent_dir_xyz" / "deep" / "audit.jsonl")
         # _write creates parent dir, but let's make it fail by using a file as parent
@@ -356,7 +356,7 @@ class TestAuditLogger:
         logger._write({"event": "test"})
 
     def test_sanitize_input_truncation(self):
-        from tether.core.safety.audit import _sanitize_input
+        from leashd.core.safety.audit import _sanitize_input
 
         long_val = "x" * 600
         result = _sanitize_input({"cmd": long_val})
@@ -364,7 +364,7 @@ class TestAuditLogger:
         assert "[truncated]" in result["cmd"]
 
     def test_sanitize_input_passthrough_non_strings(self):
-        from tether.core.safety.audit import _sanitize_input
+        from leashd.core.safety.audit import _sanitize_input
 
         result = _sanitize_input({"count": 42, "flag": True, "data": None})
         assert result["count"] == 42
@@ -372,7 +372,7 @@ class TestAuditLogger:
         assert result["data"] is None
 
     def test_switch_path_writes_to_new_file(self, tmp_path):
-        from tether.core.safety.audit import AuditLogger
+        from leashd.core.safety.audit import AuditLogger
 
         old_path = tmp_path / "old" / "audit.jsonl"
         new_path = tmp_path / "new" / "audit.jsonl"
@@ -389,7 +389,7 @@ class TestAuditLogger:
         assert "after_switch" in lines[0]
 
     def test_switch_path_creates_parent_dirs(self, tmp_path):
-        from tether.core.safety.audit import AuditLogger
+        from leashd.core.safety.audit import AuditLogger
 
         audit = AuditLogger(tmp_path / "audit.jsonl")
         new_path = tmp_path / "deep" / "nested" / "audit.jsonl"
@@ -415,7 +415,7 @@ class TestEngineAgentCrashCancelsApprovals:
         )
 
         # Manually add a pending approval for the chat
-        from tether.core.safety.approvals import PendingApproval
+        from leashd.core.safety.approvals import PendingApproval
 
         pending = PendingApproval(
             approval_id="test-approval-id",
@@ -628,7 +628,7 @@ class TestTurnLimitWarningContent:
         text = turn_msgs[0]["text"]
         assert "Send a message to continue" in text
         assert "/clear" in text
-        assert "TETHER_MAX_TURNS" in text
+        assert "LEASHD_MAX_TURNS" in text
 
     @pytest.mark.asyncio
     async def test_warning_exceeds_max_turns(

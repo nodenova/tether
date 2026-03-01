@@ -4,13 +4,13 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from leashd.core.config import LeashdConfig
+from leashd.core.engine import Engine
+from leashd.core.events import EventBus
+from leashd.core.interactions import InteractionCoordinator, PendingInteraction
+from leashd.core.safety.approvals import ApprovalCoordinator, PendingApproval
+from leashd.core.session import SessionManager
 from tests.core.engine.conftest import FakeAgent, _make_git_handler_mock
-from tether.core.config import TetherConfig
-from tether.core.engine import Engine
-from tether.core.events import EventBus
-from tether.core.interactions import InteractionCoordinator, PendingInteraction
-from tether.core.safety.approvals import ApprovalCoordinator, PendingApproval
-from tether.core.session import SessionManager
 
 
 class TestHandleCommand:
@@ -291,11 +291,11 @@ class TestHandleCommand:
     async def test_clear_preserves_working_directory(
         self, audit_logger, policy_engine, mock_connector, tmp_path
     ):
-        d1 = tmp_path / "tether"
+        d1 = tmp_path / "leashd"
         d2 = tmp_path / "api"
         d1.mkdir()
         d2.mkdir()
-        config = TetherConfig(
+        config = LeashdConfig(
             approved_directories=[d1, d2],
             audit_log_path=tmp_path / "audit.jsonl",
         )
@@ -325,13 +325,13 @@ class TestHandleCommand:
     async def test_clear_preserves_directory_with_sqlite(
         self, audit_logger, policy_engine, mock_connector, tmp_path
     ):
-        from tether.storage.sqlite import SqliteSessionStore
+        from leashd.storage.sqlite import SqliteSessionStore
 
-        d1 = tmp_path / "tether"
+        d1 = tmp_path / "leashd"
         d2 = tmp_path / "api"
         d1.mkdir()
         d2.mkdir()
-        config = TetherConfig(
+        config = LeashdConfig(
             approved_directories=[d1, d2],
             audit_log_path=tmp_path / "audit.jsonl",
         )
@@ -363,11 +363,11 @@ class TestHandleCommand:
     async def test_clear_preserves_directory_across_multiple_clears(
         self, audit_logger, policy_engine, mock_connector, tmp_path
     ):
-        d1 = tmp_path / "tether"
+        d1 = tmp_path / "leashd"
         d2 = tmp_path / "api"
         d1.mkdir()
         d2.mkdir()
-        config = TetherConfig(
+        config = LeashdConfig(
             approved_directories=[d1, d2],
             audit_log_path=tmp_path / "audit.jsonl",
         )
@@ -396,8 +396,8 @@ class TestTestCommand:
     async def _make_engine_with_plugin(
         self, config, audit_logger, policy_engine, mock_connector
     ):
-        from tether.plugins.base import PluginContext
-        from tether.plugins.builtin.test_runner import TestRunnerPlugin
+        from leashd.plugins.base import PluginContext
+        from leashd.plugins.builtin.test_runner import TestRunnerPlugin
 
         agent = FakeAgent()
         bus = EventBus()
@@ -436,7 +436,7 @@ class TestTestCommand:
     async def test_test_command_auto_approves_browser_tools(
         self, config, audit_logger, policy_engine, mock_connector
     ):
-        from tether.plugins.builtin.browser_tools import BROWSER_MUTATION_TOOLS
+        from leashd.plugins.builtin.browser_tools import BROWSER_MUTATION_TOOLS
 
         eng, _ = await self._make_engine_with_plugin(
             config, audit_logger, policy_engine, mock_connector
@@ -492,7 +492,7 @@ class TestTestCommand:
     async def test_default_command_clears_test_mode(
         self, config, audit_logger, policy_engine, mock_connector
     ):
-        from tether.plugins.builtin.browser_tools import BROWSER_MUTATION_TOOLS
+        from leashd.plugins.builtin.browser_tools import BROWSER_MUTATION_TOOLS
 
         eng, _ = await self._make_engine_with_plugin(
             config, audit_logger, policy_engine, mock_connector
@@ -534,7 +534,7 @@ class TestTestCommand:
     async def test_auto_approves_browser_readonly_tools(
         self, config, audit_logger, policy_engine, mock_connector
     ):
-        from tether.plugins.builtin.browser_tools import BROWSER_READONLY_TOOLS
+        from leashd.plugins.builtin.browser_tools import BROWSER_READONLY_TOOLS
 
         eng, _ = await self._make_engine_with_plugin(
             config, audit_logger, policy_engine, mock_connector
@@ -585,11 +585,11 @@ class TestDirCommand:
     async def test_dir_lists_directories(
         self, audit_logger, policy_engine, mock_connector, tmp_path
     ):
-        d1 = tmp_path / "tether"
+        d1 = tmp_path / "leashd"
         d2 = tmp_path / "api"
         d1.mkdir()
         d2.mkdir()
-        config = TetherConfig(
+        config = LeashdConfig(
             approved_directories=[d1, d2],
             audit_log_path=tmp_path / "audit.jsonl",
         )
@@ -610,7 +610,7 @@ class TestDirCommand:
         assert msg["text"] == "Select directory:"
         assert msg["buttons"] is not None
         button_texts = [row[0].text for row in msg["buttons"]]
-        assert any("tether" in t for t in button_texts)
+        assert any("leashd" in t for t in button_texts)
         assert any("api" in t for t in button_texts)
         assert any("✅" in t for t in button_texts)
 
@@ -618,11 +618,11 @@ class TestDirCommand:
     async def test_dir_switches_directory(
         self, audit_logger, policy_engine, mock_connector, tmp_path
     ):
-        d1 = tmp_path / "tether"
+        d1 = tmp_path / "leashd"
         d2 = tmp_path / "api"
         d1.mkdir()
         d2.mkdir()
-        config = TetherConfig(
+        config = LeashdConfig(
             approved_directories=[d1, d2],
             audit_log_path=tmp_path / "audit.jsonl",
         )
@@ -650,9 +650,9 @@ class TestDirCommand:
     async def test_dir_unknown_name_returns_error(
         self, audit_logger, policy_engine, mock_connector, tmp_path
     ):
-        d1 = tmp_path / "tether"
+        d1 = tmp_path / "leashd"
         d1.mkdir()
-        config = TetherConfig(
+        config = LeashdConfig(
             approved_directories=[d1],
             audit_log_path=tmp_path / "audit.jsonl",
         )
@@ -674,11 +674,11 @@ class TestDirCommand:
     async def test_dir_already_active(
         self, audit_logger, policy_engine, mock_connector, tmp_path
     ):
-        d1 = tmp_path / "tether"
+        d1 = tmp_path / "leashd"
         d2 = tmp_path / "api"
         d1.mkdir()
         d2.mkdir()
-        config = TetherConfig(
+        config = LeashdConfig(
             approved_directories=[d1, d2],
             audit_log_path=tmp_path / "audit.jsonl",
         )
@@ -691,7 +691,7 @@ class TestDirCommand:
             audit=audit_logger,
         )
 
-        result = await eng.handle_command("user1", "dir", "tether", "chat1")
+        result = await eng.handle_command("user1", "dir", "leashd", "chat1")
 
         assert "Already in" in result
 
@@ -699,9 +699,9 @@ class TestDirCommand:
     async def test_status_shows_directory(
         self, audit_logger, policy_engine, mock_connector, tmp_path
     ):
-        d1 = tmp_path / "tether"
+        d1 = tmp_path / "leashd"
         d1.mkdir()
-        config = TetherConfig(
+        config = LeashdConfig(
             approved_directories=[d1],
             audit_log_path=tmp_path / "audit.jsonl",
         )
@@ -718,17 +718,17 @@ class TestDirCommand:
         result = await eng.handle_command("user1", "status", "", "chat1")
 
         assert "Directory:" in result
-        assert "tether" in result
+        assert "leashd" in result
 
     @pytest.mark.asyncio
     async def test_dir_switch_disables_auto_approve(
         self, audit_logger, policy_engine, mock_connector, tmp_path
     ):
-        d1 = tmp_path / "tether"
+        d1 = tmp_path / "leashd"
         d2 = tmp_path / "api"
         d1.mkdir()
         d2.mkdir()
-        config = TetherConfig(
+        config = LeashdConfig(
             approved_directories=[d1, d2],
             audit_log_path=tmp_path / "audit.jsonl",
         )
@@ -760,12 +760,12 @@ class TestDirSwitchDataPaths:
         d2 = tmp_path / "proj2"
         d1.mkdir()
         d2.mkdir()
-        audit_path = d1 / ".tether" / "audit.jsonl"
+        audit_path = d1 / ".leashd" / "audit.jsonl"
         audit_path.parent.mkdir(parents=True, exist_ok=True)
-        from tether.core.safety.audit import AuditLogger
+        from leashd.core.safety.audit import AuditLogger
 
         audit = AuditLogger(audit_path)
-        config = TetherConfig(approved_directories=[d1, d2])
+        config = LeashdConfig(approved_directories=[d1, d2])
         eng = Engine(
             connector=mock_connector,
             agent=FakeAgent(),
@@ -780,7 +780,7 @@ class TestDirSwitchDataPaths:
         await eng.handle_message("user1", "hello", "chat1")
         await eng.handle_command("user1", "dir", "proj2", "chat1")
 
-        expected = d2 / ".tether" / "audit.jsonl"
+        expected = d2 / ".leashd" / "audit.jsonl"
         assert eng.audit._path == expected
 
     @pytest.mark.asyncio
@@ -791,13 +791,13 @@ class TestDirSwitchDataPaths:
         d2 = tmp_path / "proj2"
         d1.mkdir()
         d2.mkdir()
-        from tether.storage.sqlite import SqliteSessionStore
+        from leashd.storage.sqlite import SqliteSessionStore
 
-        db_path = d1 / ".tether" / "messages.db"
+        db_path = d1 / ".leashd" / "messages.db"
         db_path.parent.mkdir(parents=True, exist_ok=True)
         store = SqliteSessionStore(db_path)
         await store.setup()
-        config = TetherConfig(approved_directories=[d1, d2])
+        config = LeashdConfig(approved_directories=[d1, d2])
         eng = Engine(
             connector=mock_connector,
             agent=FakeAgent(),
@@ -812,7 +812,7 @@ class TestDirSwitchDataPaths:
         await eng.handle_message("user1", "hello", "chat1")
         await eng.handle_command("user1", "dir", "proj2", "chat1")
 
-        expected = str(d2 / ".tether" / "messages.db")
+        expected = str(d2 / ".leashd" / "messages.db")
         assert eng._message_store._db_path == expected
         await store.teardown()
 
@@ -825,10 +825,10 @@ class TestDirSwitchDataPaths:
         d1.mkdir()
         d2.mkdir()
         pinned_path = tmp_path / "global_audit.jsonl"
-        from tether.core.safety.audit import AuditLogger
+        from leashd.core.safety.audit import AuditLogger
 
         audit = AuditLogger(pinned_path)
-        config = TetherConfig(
+        config = LeashdConfig(
             approved_directories=[d1, d2],
             audit_log_path=pinned_path,
         )
@@ -849,18 +849,18 @@ class TestDirSwitchDataPaths:
         assert eng.audit._path == pinned_path
 
     @pytest.mark.asyncio
-    async def test_dir_switch_creates_tether_dir(
+    async def test_dir_switch_creates_leashd_dir(
         self, policy_engine, mock_connector, tmp_path
     ):
         d1 = tmp_path / "proj1"
         d2 = tmp_path / "proj2"
         d1.mkdir()
         d2.mkdir()
-        config = TetherConfig(
+        config = LeashdConfig(
             approved_directories=[d1, d2],
             audit_log_path=tmp_path / "audit.jsonl",
         )
-        from tether.core.safety.audit import AuditLogger
+        from leashd.core.safety.audit import AuditLogger
 
         eng = Engine(
             connector=mock_connector,
@@ -874,8 +874,8 @@ class TestDirSwitchDataPaths:
         await eng.handle_message("user1", "hello", "chat1")
         await eng.handle_command("user1", "dir", "proj2", "chat1")
 
-        assert (d2 / ".tether").is_dir()
-        assert (d2 / ".tether" / ".gitignore").is_file()
+        assert (d2 / ".leashd").is_dir()
+        assert (d2 / ".leashd" / ".gitignore").is_file()
 
 
 class TestDirButtons:
@@ -883,11 +883,11 @@ class TestDirButtons:
     async def test_dir_sends_buttons_with_connector(
         self, audit_logger, policy_engine, mock_connector, tmp_path
     ):
-        d1 = tmp_path / "tether"
+        d1 = tmp_path / "leashd"
         d2 = tmp_path / "api"
         d1.mkdir()
         d2.mkdir()
-        config = TetherConfig(
+        config = LeashdConfig(
             approved_directories=[d1, d2],
             audit_log_path=tmp_path / "audit.jsonl",
         )
@@ -908,18 +908,18 @@ class TestDirButtons:
         assert msg["text"] == "Select directory:"
         assert msg["buttons"] is not None
         button_texts = [row[0].text for row in msg["buttons"]]
-        assert any("tether" in t for t in button_texts)
+        assert any("leashd" in t for t in button_texts)
         assert any("api" in t for t in button_texts)
 
     @pytest.mark.asyncio
     async def test_dir_shows_active_marker_on_button(
         self, audit_logger, policy_engine, mock_connector, tmp_path
     ):
-        d1 = tmp_path / "tether"
+        d1 = tmp_path / "leashd"
         d2 = tmp_path / "api"
         d1.mkdir()
         d2.mkdir()
-        config = TetherConfig(
+        config = LeashdConfig(
             approved_directories=[d1, d2],
             audit_log_path=tmp_path / "audit.jsonl",
         )
@@ -943,11 +943,11 @@ class TestDirButtons:
     async def test_dir_callback_data_uses_prefix(
         self, audit_logger, policy_engine, mock_connector, tmp_path
     ):
-        d1 = tmp_path / "tether"
+        d1 = tmp_path / "leashd"
         d2 = tmp_path / "api"
         d1.mkdir()
         d2.mkdir()
-        config = TetherConfig(
+        config = LeashdConfig(
             approved_directories=[d1, d2],
             audit_log_path=tmp_path / "audit.jsonl",
         )
@@ -970,11 +970,11 @@ class TestDirButtons:
     async def test_dir_falls_back_to_text_without_connector(
         self, audit_logger, policy_engine, tmp_path
     ):
-        d1 = tmp_path / "tether"
+        d1 = tmp_path / "leashd"
         d2 = tmp_path / "api"
         d1.mkdir()
         d2.mkdir()
-        config = TetherConfig(
+        config = LeashdConfig(
             approved_directories=[d1, d2],
             audit_log_path=tmp_path / "audit.jsonl",
         )
@@ -990,16 +990,16 @@ class TestDirButtons:
         result = await eng.handle_command("user1", "dir", "", "chat1")
 
         assert "Directories:" in result
-        assert "tether" in result
+        assert "leashd" in result
         assert "api" in result
 
     @pytest.mark.asyncio
     async def test_dir_single_directory_falls_back_to_text(
         self, audit_logger, policy_engine, mock_connector, tmp_path
     ):
-        d1 = tmp_path / "tether"
+        d1 = tmp_path / "leashd"
         d1.mkdir()
-        config = TetherConfig(
+        config = LeashdConfig(
             approved_directories=[d1],
             audit_log_path=tmp_path / "audit.jsonl",
         )
@@ -1015,7 +1015,7 @@ class TestDirButtons:
         result = await eng.handle_command("user1", "dir", "", "chat1")
 
         assert "Directories:" in result
-        assert "tether" in result
+        assert "leashd" in result
 
 
 class TestGitCommandWithoutHandler:
@@ -1065,7 +1065,7 @@ class TestActiveDirNameFallback:
     ):
         d1 = tmp_path / "myproject"
         d1.mkdir()
-        config = TetherConfig(
+        config = LeashdConfig(
             approved_directories=[d1],
             audit_log_path=tmp_path / "audit.jsonl",
         )
@@ -1090,7 +1090,7 @@ class TestActiveDirNameFallback:
     ):
         d1 = tmp_path / "myproject"
         d1.mkdir()
-        config = TetherConfig(
+        config = LeashdConfig(
             approved_directories=[d1],
             audit_log_path=tmp_path / "audit.jsonl",
         )

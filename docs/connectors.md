@@ -1,6 +1,6 @@
 # Connector Protocol
 
-Connectors are I/O transports that bridge Tether to external platforms. They handle message delivery, typing indicators, approval requests, file sending, and interactive UI elements. The protocol is platform-agnostic — implement `BaseConnector` to add support for any messaging platform.
+Connectors are I/O transports that bridge leashd to external platforms. They handle message delivery, typing indicators, approval requests, file sending, and interactive UI elements. The protocol is platform-agnostic — implement `BaseConnector` to add support for any messaging platform.
 
 ## `BaseConnector` ABC
 
@@ -114,7 +114,7 @@ If `send_message_with_id()` returns `None`, streaming is disabled and the full r
 ### Step 1: Implement the ABC
 
 ```python
-from tether.connectors.base import BaseConnector, InlineButton
+from leashd.connectors.base import BaseConnector, InlineButton
 
 
 class SlackConnector(BaseConnector):
@@ -180,7 +180,7 @@ if self._interaction_resolver:
 ### Step 3: Pass to `build_engine()`
 
 ```python
-from tether.app import build_engine
+from leashd.app import build_engine
 
 connector = SlackConnector(bot_token="xoxb-...")
 engine = build_engine(connector=connector)

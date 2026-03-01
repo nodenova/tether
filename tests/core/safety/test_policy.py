@@ -5,8 +5,8 @@ from pathlib import Path
 
 import pytest
 
-from tether.core.safety.policy import PolicyDecision, PolicyEngine
-from tether.plugins.builtin.browser_tools import (
+from leashd.core.safety.policy import PolicyDecision, PolicyEngine
+from leashd.plugins.builtin.browser_tools import (
     ALL_BROWSER_TOOLS,
     BROWSER_MUTATION_TOOLS,
     BROWSER_READONLY_TOOLS,
@@ -17,7 +17,7 @@ from tether.plugins.builtin.browser_tools import (
 def engine():
     policy_path = (
         Path(__file__).parent.parent.parent.parent
-        / "tether"
+        / "leashd"
         / "policies"
         / "default.yaml"
     )
@@ -507,7 +507,7 @@ class TestDevToolsOverlay:
     @pytest.fixture
     def dev_overlay_engine(self):
         policies_dir = (
-            Path(__file__).parent.parent.parent.parent / "tether" / "policies"
+            Path(__file__).parent.parent.parent.parent / "leashd" / "policies"
         )
         return PolicyEngine(
             [policies_dir / "default.yaml", policies_dir / "dev-tools.yaml"]
@@ -628,7 +628,7 @@ class TestDevToolsRegexBoundaries:
     @pytest.fixture
     def dev_overlay_engine(self):
         policies_dir = (
-            Path(__file__).parent.parent.parent.parent / "tether" / "policies"
+            Path(__file__).parent.parent.parent.parent / "leashd" / "policies"
         )
         return PolicyEngine(
             [policies_dir / "default.yaml", policies_dir / "dev-tools.yaml"]

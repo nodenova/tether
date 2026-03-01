@@ -7,12 +7,12 @@ from unittest.mock import patch
 import pytest
 from claude_agent_sdk.types import PermissionResultDeny
 
+from leashd.agents.base import AgentResponse, BaseAgent
+from leashd.core.config import LeashdConfig
+from leashd.core.engine import Engine
+from leashd.core.interactions import InteractionCoordinator
+from leashd.core.session import SessionManager
 from tests.core.engine.conftest import FakeAgent
-from tether.agents.base import AgentResponse, BaseAgent
-from tether.core.config import TetherConfig
-from tether.core.engine import Engine
-from tether.core.interactions import InteractionCoordinator
-from tether.core.session import SessionManager
 
 
 class TestPlanContentInEngine:
@@ -1042,7 +1042,7 @@ class TestDirectoryPersistenceThroughPlanMode:
         d2 = tmp_path / "api"
         d1.mkdir()
         d2.mkdir()
-        config = TetherConfig(
+        config = LeashdConfig(
             approved_directories=[d1, d2],
             audit_log_path=tmp_path / "audit.jsonl",
         )
@@ -1117,7 +1117,7 @@ class TestDirectoryPersistenceThroughPlanMode:
         d2 = tmp_path / "api"
         d1.mkdir()
         d2.mkdir()
-        config = TetherConfig(
+        config = LeashdConfig(
             approved_directories=[d1, d2],
             audit_log_path=tmp_path / "audit.jsonl",
         )
@@ -1183,7 +1183,7 @@ class TestDirectoryPersistenceThroughPlanMode:
         d2 = tmp_path / "api"
         d1.mkdir()
         d2.mkdir()
-        config = TetherConfig(
+        config = LeashdConfig(
             approved_directories=[d1, d2],
             audit_log_path=tmp_path / "audit.jsonl",
         )
@@ -1261,7 +1261,7 @@ class TestDirectoryPersistenceThroughPlanMode:
         d2 = tmp_path / "api"
         d1.mkdir()
         d2.mkdir()
-        config = TetherConfig(
+        config = LeashdConfig(
             approved_directories=[d1, d2],
             audit_log_path=tmp_path / "audit.jsonl",
         )
@@ -1337,7 +1337,7 @@ class TestDirectoryPersistenceThroughPlanMode:
         d2 = tmp_path / "api"
         d1.mkdir()
         d2.mkdir()
-        config = TetherConfig(
+        config = LeashdConfig(
             approved_directories=[d1, d2],
             audit_log_path=tmp_path / "audit.jsonl",
         )
@@ -1406,7 +1406,7 @@ class TestDirectoryPersistenceThroughPlanMode:
         self, audit_logger, policy_engine, mock_connector, tmp_path, monkeypatch
     ):
         """ExitPlanMode → 'clean_edit' with SQLite: dir persists in store."""
-        from tether.storage.sqlite import SqliteSessionStore
+        from leashd.storage.sqlite import SqliteSessionStore
 
         monkeypatch.setattr(
             Engine, "_discover_plan_file", staticmethod(lambda wd=None: None)
@@ -1415,7 +1415,7 @@ class TestDirectoryPersistenceThroughPlanMode:
         d2 = tmp_path / "api"
         d1.mkdir()
         d2.mkdir()
-        config = TetherConfig(
+        config = LeashdConfig(
             approved_directories=[d1, d2],
             audit_log_path=tmp_path / "audit.jsonl",
         )
@@ -1513,9 +1513,9 @@ class TestPlanModeRegression:
     async def test_plan_command_persists_session(
         self, tmp_path, audit_logger, policy_engine, mock_connector
     ):
-        from tether.storage.sqlite import SqliteSessionStore
+        from leashd.storage.sqlite import SqliteSessionStore
 
-        config = TetherConfig(
+        config = LeashdConfig(
             approved_directories=[tmp_path],
             audit_log_path=tmp_path / "audit.jsonl",
         )
@@ -1841,7 +1841,7 @@ class TestResolvePlanContentFallbacks:
     """Verify _resolve_plan_content priority: disk → cached write → fallback."""
 
     def test_disk_file_preferred(self, config, audit_logger, tmp_path):
-        from tether.core.engine import _ToolCallbackState
+        from leashd.core.engine import _ToolCallbackState
 
         eng = Engine(
             connector=None,
@@ -1862,7 +1862,7 @@ class TestResolvePlanContentFallbacks:
         assert result == "# Disk Plan Content"
 
     def test_cached_write_fallback_when_no_disk_file(self, config, audit_logger):
-        from tether.core.engine import _ToolCallbackState
+        from leashd.core.engine import _ToolCallbackState
 
         eng = Engine(
             connector=None,
@@ -1881,7 +1881,7 @@ class TestResolvePlanContentFallbacks:
 
     def test_response_fallback_when_neither_exists(self, config, audit_logger):
 
-        from tether.core.engine import _ToolCallbackState
+        from leashd.core.engine import _ToolCallbackState
 
         eng = Engine(
             connector=None,
@@ -1901,7 +1901,7 @@ class TestResolvePlanContentFallbacks:
     def test_disk_error_falls_back_to_cached_write(
         self, config, audit_logger, tmp_path
     ):
-        from tether.core.engine import _ToolCallbackState
+        from leashd.core.engine import _ToolCallbackState
 
         eng = Engine(
             connector=None,
@@ -1925,7 +1925,7 @@ class TestResolvePlanContentFallbacks:
     def test_disk_error_no_cache_falls_back_to_response(
         self, config, audit_logger, tmp_path
     ):
-        from tether.core.engine import _ToolCallbackState
+        from leashd.core.engine import _ToolCallbackState
 
         eng = Engine(
             connector=None,
@@ -1970,7 +1970,7 @@ class TestExitPlanModeClearsActivity:
                 if prompt != "Implement the plan.":
                     session.mode = "plan"
                     if on_tool_activity:
-                        from tether.agents.base import ToolActivity
+                        from leashd.agents.base import ToolActivity
 
                         await on_tool_activity(
                             ToolActivity(

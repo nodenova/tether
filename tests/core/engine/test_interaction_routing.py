@@ -4,12 +4,12 @@ import asyncio
 
 import pytest
 
+from leashd.agents.base import AgentResponse, BaseAgent
+from leashd.core.engine import Engine
+from leashd.core.interactions import InteractionCoordinator
+from leashd.core.safety.approvals import ApprovalCoordinator
+from leashd.core.session import SessionManager
 from tests.core.engine.conftest import FakeAgent
-from tether.agents.base import AgentResponse, BaseAgent
-from tether.core.engine import Engine
-from tether.core.interactions import InteractionCoordinator
-from tether.core.safety.approvals import ApprovalCoordinator
-from tether.core.session import SessionManager
 
 
 class TestEngineInteractionRouting:
@@ -494,7 +494,7 @@ class TestCleanProceedAutoImplementation:
         self, config, policy_engine, audit_logger, mock_connector
     ):
         """message.out event is NOT emitted for plan agent response on clean_proceed."""
-        from tether.core.events import MESSAGE_OUT
+        from leashd.core.events import MESSAGE_OUT
 
         coordinator = InteractionCoordinator(mock_connector, config)
         message_out_events: list[dict] = []
@@ -574,7 +574,7 @@ class TestEngineApprovalTextRouting:
         )
 
         # Manually create a pending approval to simulate in-flight approval
-        from tether.core.safety.approvals import PendingApproval
+        from leashd.core.safety.approvals import PendingApproval
 
         pending = PendingApproval(
             approval_id="test-id",
@@ -611,7 +611,7 @@ class TestEngineApprovalTextRouting:
         )
 
         # Both have pending items for same chat
-        from tether.core.safety.approvals import PendingApproval
+        from leashd.core.safety.approvals import PendingApproval
 
         pending = PendingApproval(
             approval_id="appr-1",
@@ -621,7 +621,7 @@ class TestEngineApprovalTextRouting:
         )
         approval_coord.pending["appr-1"] = pending
 
-        from tether.core.interactions import PendingInteraction
+        from leashd.core.interactions import PendingInteraction
 
         interaction = PendingInteraction(
             interaction_id="inter-1",

@@ -2,11 +2,11 @@
 
 import pytest
 
-from tether.plugins.builtin.test_config_loader import (
+from leashd.plugins.builtin.test_config_loader import (
     ProjectTestConfig,
     load_project_test_config,
 )
-from tether.plugins.builtin.test_runner import (
+from leashd.plugins.builtin.test_runner import (
     TestConfig,
     _merge_project_config,
 )
@@ -14,13 +14,13 @@ from tether.plugins.builtin.test_runner import (
 
 class TestLoadProjectTestConfig:
     @pytest.fixture
-    def tether_dir(self, tmp_path):
-        d = tmp_path / ".tether"
+    def leashd_dir(self, tmp_path):
+        d = tmp_path / ".leashd"
         d.mkdir()
         return d
 
-    def test_load_valid_yaml(self, tmp_path, tether_dir):
-        config_file = tether_dir / "test.yaml"
+    def test_load_valid_yaml(self, tmp_path, leashd_dir):
+        config_file = leashd_dir / "test.yaml"
         config_file.write_text(
             "url: http://localhost:3000\n"
             "server: npm run dev\n"
@@ -41,8 +41,8 @@ class TestLoadProjectTestConfig:
         assert result.preconditions == ["Backend must be running"]
         assert result.focus_areas == ["SKU replacement"]
 
-    def test_load_yml_extension(self, tmp_path, tether_dir):
-        config_file = tether_dir / "test.yml"
+    def test_load_yml_extension(self, tmp_path, leashd_dir):
+        config_file = leashd_dir / "test.yml"
         config_file.write_text("url: http://localhost:8080\n")
         result = load_project_test_config(str(tmp_path))
         assert result is not None
@@ -52,21 +52,21 @@ class TestLoadProjectTestConfig:
         result = load_project_test_config(str(tmp_path))
         assert result is None
 
-    def test_load_invalid_yaml(self, tmp_path, tether_dir):
-        config_file = tether_dir / "test.yaml"
+    def test_load_invalid_yaml(self, tmp_path, leashd_dir):
+        config_file = leashd_dir / "test.yaml"
         config_file.write_text("url: [invalid: yaml: {{")
         result = load_project_test_config(str(tmp_path))
         assert result is None
 
-    def test_load_empty_file(self, tmp_path, tether_dir):
-        config_file = tether_dir / "test.yaml"
+    def test_load_empty_file(self, tmp_path, leashd_dir):
+        config_file = leashd_dir / "test.yaml"
         config_file.write_text("")
         result = load_project_test_config(str(tmp_path))
         assert result is not None
         assert result.url is None
 
-    def test_load_partial_config(self, tmp_path, tether_dir):
-        config_file = tether_dir / "test.yaml"
+    def test_load_partial_config(self, tmp_path, leashd_dir):
+        config_file = leashd_dir / "test.yaml"
         config_file.write_text("framework: django\n")
         result = load_project_test_config(str(tmp_path))
         assert result is not None
@@ -74,9 +74,9 @@ class TestLoadProjectTestConfig:
         assert result.url is None
         assert result.credentials == {}
 
-    def test_yaml_takes_precedence_over_yml(self, tmp_path, tether_dir):
-        (tether_dir / "test.yaml").write_text("url: http://yaml\n")
-        (tether_dir / "test.yml").write_text("url: http://yml\n")
+    def test_yaml_takes_precedence_over_yml(self, tmp_path, leashd_dir):
+        (leashd_dir / "test.yaml").write_text("url: http://yaml\n")
+        (leashd_dir / "test.yml").write_text("url: http://yml\n")
         result = load_project_test_config(str(tmp_path))
         assert result is not None
         assert result.url == "http://yaml"

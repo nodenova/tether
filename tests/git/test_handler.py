@@ -8,24 +8,25 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-# Re-use MockConnector from conftest
-from tests.conftest import MockConnector
-from tether.core.events import EventBus
-from tether.core.safety.audit import AuditLogger
-from tether.core.safety.sandbox import SandboxEnforcer
-from tether.core.session import Session
-from tether.git.formatter import build_auto_message
-from tether.git.handler import (
+from leashd.core.events import EventBus
+from leashd.core.safety.audit import AuditLogger
+from leashd.core.safety.sandbox import SandboxEnforcer
+from leashd.core.session import Session
+from leashd.git.formatter import build_auto_message
+from leashd.git.handler import (
     GIT_CALLBACK_PREFIX,
     GitCommandHandler,
 )
-from tether.git.models import (
+from leashd.git.models import (
     FileChange,
     GitBranch,
     GitLogEntry,
     GitResult,
     GitStatus,
 )
+
+# Re-use MockConnector from conftest
+from tests.conftest import MockConnector
 
 # ── Fixtures ─────────────────────────────────────────────────────────
 
@@ -741,7 +742,7 @@ class TestPendingInput:
         assert result is False
 
     async def test_resolve_sets_value_and_signals(self, handler):
-        from tether.git.handler import _PendingInput
+        from leashd.git.handler import _PendingInput
 
         pending = _PendingInput(kind="commit")
         handler._pending["chat1"] = pending
@@ -881,7 +882,7 @@ class TestEdgeCases:
         assert len(mock_connector.sent_messages) >= 2
 
     async def test_multiple_chats_independent_pending(self, handler):
-        from tether.git.handler import _PendingInput
+        from leashd.git.handler import _PendingInput
 
         handler._pending["chat1"] = _PendingInput(kind="commit")
         handler._pending["chat2"] = _PendingInput(kind="commit")

@@ -4,15 +4,15 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from tether.core.events import COMMAND_TEST, TEST_STARTED, Event, EventBus
-from tether.core.session import Session
-from tether.plugins.base import PluginContext
-from tether.plugins.builtin.browser_tools import (
+from leashd.core.events import COMMAND_TEST, TEST_STARTED, Event, EventBus
+from leashd.core.session import Session
+from leashd.plugins.base import PluginContext
+from leashd.plugins.builtin.browser_tools import (
     BROWSER_MUTATION_TOOLS,
     BROWSER_READONLY_TOOLS,
 )
-from tether.plugins.builtin.test_config_loader import ProjectTestConfig
-from tether.plugins.builtin.test_runner import (
+from leashd.plugins.builtin.test_config_loader import ProjectTestConfig
+from leashd.plugins.builtin.test_runner import (
     TEST_BASH_AUTO_APPROVE,
     TestConfig,
     TestRunnerPlugin,
@@ -652,9 +652,9 @@ class TestAutoApproveTotalCount:
 
     @pytest.fixture
     async def initialized_plugin(self, event_bus):
-        from tether.core.config import TetherConfig
+        from leashd.core.config import LeashdConfig
 
-        config = TetherConfig(approved_directories=["/tmp"])
+        config = LeashdConfig(approved_directories=["/tmp"])
         p = TestRunnerPlugin()
         ctx = PluginContext(event_bus=event_bus, config=config)
         await p.initialize(ctx)
@@ -691,10 +691,10 @@ class TestTestStartedEventData:
 
     @pytest.mark.asyncio
     async def test_full_config_in_event(self):
-        from tether.core.config import TetherConfig
+        from leashd.core.config import LeashdConfig
 
         event_bus = EventBus()
-        config = TetherConfig(approved_directories=["/tmp"])
+        config = LeashdConfig(approved_directories=["/tmp"])
         p = TestRunnerPlugin()
         ctx = PluginContext(event_bus=event_bus, config=config)
         await p.initialize(ctx)
@@ -817,7 +817,7 @@ class TestContextPersistenceInstructions:
     def test_build_instruction_includes_context_persistence(self):
         instruction = build_test_instruction(TestConfig())
         assert "CONTEXT PERSISTENCE" in instruction
-        assert ".tether/test-session.md" in instruction
+        assert ".leashd/test-session.md" in instruction
         assert "working memory" in instruction
 
     def test_context_persistence_mentions_sections(self):
@@ -864,13 +864,13 @@ class TestContextPersistenceInstructions:
             else len(instruction)
         )
         phase1 = instruction[phase1_start:phase1_end]
-        assert ".tether/test-session.md" in phase1
+        assert ".leashd/test-session.md" in phase1
 
     def test_prompt_starts_with_context_instruction(self):
         """User prompt begins with context file instruction for highest salience."""
         prompt = _build_test_prompt(TestConfig())
         assert prompt.startswith("IMPORTANT:")
-        assert ".tether/test-session.md" in prompt
+        assert ".leashd/test-session.md" in prompt
 
 
 class TestSelfHealingInstructions:
@@ -878,7 +878,7 @@ class TestSelfHealingInstructions:
 
     def test_build_instruction_phase7_mentions_context_file(self):
         instruction = build_test_instruction(TestConfig())
-        assert ".tether/test-session.md" in instruction
+        assert ".leashd/test-session.md" in instruction
         # Phase 7 specifically mentions writing issues
         assert "Issues Found table" in instruction
 
@@ -936,12 +936,12 @@ class TestProjectConfigMergeInPlugin:
 
     @pytest.mark.asyncio
     async def test_plugin_loads_project_config(self, tmp_path):
-        from tether.core.config import TetherConfig
+        from leashd.core.config import LeashdConfig
 
         # Write a project config file
-        tether_dir = tmp_path / ".tether"
-        tether_dir.mkdir()
-        config_file = tether_dir / "test.yaml"
+        leashd_dir = tmp_path / ".leashd"
+        leashd_dir.mkdir()
+        config_file = leashd_dir / "test.yaml"
         config_file.write_text(
             "url: http://localhost:3000\n"
             "framework: next.js\n"
@@ -950,7 +950,7 @@ class TestProjectConfigMergeInPlugin:
         )
 
         event_bus = EventBus()
-        config = TetherConfig(approved_directories=[str(tmp_path)])
+        config = LeashdConfig(approved_directories=[str(tmp_path)])
         p = TestRunnerPlugin()
         ctx = PluginContext(event_bus=event_bus, config=config)
         await p.initialize(ctx)
@@ -984,15 +984,15 @@ class TestProjectConfigMergeInPlugin:
 
     @pytest.mark.asyncio
     async def test_plugin_cli_overrides_project(self, tmp_path):
-        from tether.core.config import TetherConfig
+        from leashd.core.config import LeashdConfig
 
-        tether_dir = tmp_path / ".tether"
-        tether_dir.mkdir()
-        config_file = tether_dir / "test.yaml"
+        leashd_dir = tmp_path / ".leashd"
+        leashd_dir.mkdir()
+        config_file = leashd_dir / "test.yaml"
         config_file.write_text("url: http://project-url\n")
 
         event_bus = EventBus()
-        config = TetherConfig(approved_directories=[str(tmp_path)])
+        config = LeashdConfig(approved_directories=[str(tmp_path)])
         p = TestRunnerPlugin()
         ctx = PluginContext(event_bus=event_bus, config=config)
         await p.initialize(ctx)

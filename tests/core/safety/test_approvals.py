@@ -4,7 +4,7 @@ import asyncio
 
 import pytest
 
-from tether.core.safety.policy import Classification
+from leashd.core.safety.policy import Classification
 
 
 @pytest.fixture
@@ -488,7 +488,7 @@ class TestApprovalBypass:
         """RuntimeError from connector.request_approval propagates."""
         from unittest.mock import AsyncMock
 
-        from tether.core.safety.approvals import ApprovalCoordinator
+        from leashd.core.safety.approvals import ApprovalCoordinator
 
         mock_conn = AsyncMock()
         mock_conn.request_approval.side_effect = RuntimeError("network down")

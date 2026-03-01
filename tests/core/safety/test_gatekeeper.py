@@ -6,13 +6,13 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from tether.core.events import EventBus
-from tether.core.safety.gatekeeper import (
+from leashd.core.events import EventBus
+from leashd.core.safety.gatekeeper import (
     ToolGatekeeper,
     _approval_key,
     normalize_tool_name,
 )
-from tether.core.safety.policy import (
+from leashd.core.safety.policy import (
     PolicyDecision,
 )
 
@@ -163,7 +163,7 @@ class TestGatekeeperApproval:
 class TestGatekeeperEvents:
     @pytest.mark.asyncio
     async def test_tool_gated_event_emitted(self, gatekeeper, event_bus):
-        from tether.core.events import TOOL_GATED
+        from leashd.core.events import TOOL_GATED
 
         events = []
 
@@ -177,7 +177,7 @@ class TestGatekeeperEvents:
 
     @pytest.mark.asyncio
     async def test_tool_allowed_event_emitted(self, gatekeeper, event_bus):
-        from tether.core.events import TOOL_ALLOWED
+        from leashd.core.events import TOOL_ALLOWED
 
         events = []
 
@@ -190,7 +190,7 @@ class TestGatekeeperEvents:
 
     @pytest.mark.asyncio
     async def test_tool_denied_event_emitted(self, gatekeeper, event_bus):
-        from tether.core.events import TOOL_DENIED
+        from leashd.core.events import TOOL_DENIED
 
         events = []
 
@@ -269,7 +269,7 @@ class TestGatekeeperEdgeCases:
     ):
         import asyncio
 
-        from tether.core.events import TOOL_DENIED
+        from leashd.core.events import TOOL_DENIED
 
         events = []
 
@@ -309,7 +309,7 @@ class TestGatekeeperEdgeCases:
     ):
         import asyncio
 
-        from tether.core.events import TOOL_ALLOWED
+        from leashd.core.events import TOOL_ALLOWED
 
         events = []
 
@@ -633,7 +633,7 @@ class TestApprovalKeyExtraction:
         )
 
     def test_bash_third_word_is_flag_stops_at_two(self):
-        assert _approval_key("Bash", {"command": "uv run -m tether"}) == "Bash::uv run"
+        assert _approval_key("Bash", {"command": "uv run -m leashd"}) == "Bash::uv run"
 
     def test_bash_with_flag_second_token(self):
         assert _approval_key("Bash", {"command": "git -C /path status"}) == "Bash::git"
@@ -804,7 +804,7 @@ class TestGatekeeperSafetyInvariants:
         self, sandbox, mock_audit, event_bus, tmp_path
     ):
         """DENY rule before ALLOW rule for same tool → denied."""
-        from tether.core.safety.policy import PolicyEngine
+        from leashd.core.safety.policy import PolicyEngine
 
         policy = tmp_path / "deny_first.yaml"
         policy.write_text(
@@ -1069,10 +1069,10 @@ class TestMCPToolNameNormalization:
         """mcp__playwright__browser_snapshot should match browser_snapshot allow rule."""
         from pathlib import Path
 
-        from tether.core.safety.policy import PolicyEngine
+        from leashd.core.safety.policy import PolicyEngine
 
         policies_dir = (
-            Path(__file__).parent.parent.parent.parent / "tether" / "policies"
+            Path(__file__).parent.parent.parent.parent / "leashd" / "policies"
         )
         policy_paths = [policies_dir / "default.yaml"]
         pe = PolicyEngine(policy_paths)
@@ -1122,7 +1122,7 @@ class TestMCPToolNameNormalization:
         self, sandbox, mock_audit, event_bus
     ):
         """Events should contain the original MCP-prefixed tool name."""
-        from tether.core.events import TOOL_GATED
+        from leashd.core.events import TOOL_GATED
 
         events = []
 

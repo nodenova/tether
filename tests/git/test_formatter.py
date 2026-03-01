@@ -1,7 +1,7 @@
 """Tests for git display formatting functions."""
 
-from tether.git import formatter
-from tether.git.models import (
+from leashd.git import formatter
+from leashd.git.models import (
     FileChange,
     GitBranch,
     GitLogEntry,

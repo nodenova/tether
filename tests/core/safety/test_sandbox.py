@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from tether.core.safety.sandbox import SandboxEnforcer
+from leashd.core.safety.sandbox import SandboxEnforcer
 
 
 class TestSandboxEnforcer:

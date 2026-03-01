@@ -7,28 +7,28 @@ from pathlib import Path
 
 import pytest
 
-from tether.connectors.base import BaseConnector, InlineButton
-from tether.core.config import TetherConfig
-from tether.core.events import EventBus
-from tether.core.interactions import InteractionCoordinator
-from tether.core.safety.approvals import ApprovalCoordinator
-from tether.core.safety.audit import AuditLogger
-from tether.core.safety.policy import PolicyEngine
-from tether.core.safety.sandbox import SandboxEnforcer
-from tether.core.session import SessionManager
-from tether.storage.memory import MemorySessionStore
+from leashd.connectors.base import BaseConnector, InlineButton
+from leashd.core.config import LeashdConfig
+from leashd.core.events import EventBus
+from leashd.core.interactions import InteractionCoordinator
+from leashd.core.safety.approvals import ApprovalCoordinator
+from leashd.core.safety.audit import AuditLogger
+from leashd.core.safety.policy import PolicyEngine
+from leashd.core.safety.sandbox import SandboxEnforcer
+from leashd.core.session import SessionManager
+from leashd.storage.memory import MemorySessionStore
 
 
 @pytest.fixture(autouse=True)
 def _isolate_env(monkeypatch):
     """Prevent .env file and shell env from leaking into tests.
 
-    Root cause: TetherConfig.model_config has env_file=".env" which loads
+    Root cause: LeashdConfig.model_config has env_file=".env" which loads
     the project .env relative to cwd. Nullify it at the source.
     """
-    monkeypatch.setitem(TetherConfig.model_config, "env_file", None)
+    monkeypatch.setitem(LeashdConfig.model_config, "env_file", None)
     for key in list(os.environ):
-        if key.startswith("TETHER_"):
+        if key.startswith("LEASHD_"):
             monkeypatch.delenv(key, raising=False)
 
 
@@ -295,7 +295,7 @@ def tmp_dir(tmp_path):
 
 @pytest.fixture
 def config(tmp_path):
-    return TetherConfig(
+    return LeashdConfig(
         approved_directories=[tmp_path],
         max_turns=5,
         audit_log_path=tmp_path / "audit.jsonl",
@@ -319,7 +319,7 @@ def sandbox(tmp_path):
 
 @pytest.fixture
 def policy_engine():
-    policies_dir = Path(__file__).parent.parent / "tether" / "policies"
+    policies_dir = Path(__file__).parent.parent / "leashd" / "policies"
     policy_paths = []
     for name in ("default.yaml", "dev-tools.yaml"):
         p = policies_dir / name
@@ -350,7 +350,7 @@ def memory_store():
 
 @pytest.fixture
 def strict_policy_engine():
-    strict_policy = Path(__file__).parent.parent / "tether" / "policies" / "strict.yaml"
+    strict_policy = Path(__file__).parent.parent / "leashd" / "policies" / "strict.yaml"
     if strict_policy.exists():
         return PolicyEngine([strict_policy])
     return PolicyEngine()
@@ -364,7 +364,7 @@ def interaction_coordinator(mock_connector, config, event_bus):
 @pytest.fixture
 def permissive_policy_engine():
     permissive_policy = (
-        Path(__file__).parent.parent / "tether" / "policies" / "permissive.yaml"
+        Path(__file__).parent.parent / "leashd" / "policies" / "permissive.yaml"
     )
     if permissive_policy.exists():
         return PolicyEngine([permissive_policy])

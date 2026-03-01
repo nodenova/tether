@@ -1,6 +1,6 @@
 # Storage
 
-Tether's storage layer manages session persistence and message history. It uses a protocol-based design with two built-in backends.
+leashd's storage layer manages session persistence and message history. It uses a protocol-based design with two built-in backends.
 
 ## `SessionStore` Protocol
 
@@ -149,8 +149,8 @@ The engine calls `save_message()` via `_log_message()` after each user message a
 Implement the `SessionStore` protocol:
 
 ```python
-from tether.storage.base import SessionStore
-from tether.core.session import Session
+from leashd.storage.base import SessionStore
+from leashd.core.session import Session
 
 
 class RedisSessionStore:
@@ -178,4 +178,4 @@ class RedisSessionStore:
         ...
 ```
 
-Set `TETHER_STORAGE_BACKEND` to your backend name and update `build_engine()` to instantiate it. The `SessionManager` works with any `SessionStore` implementation.
+Set `LEASHD_STORAGE_BACKEND` to your backend name and update `build_engine()` to instantiate it. The `SessionManager` works with any `SessionStore` implementation.

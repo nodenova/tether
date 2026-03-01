@@ -4,14 +4,14 @@ import json
 
 import pytest
 
-from tether.core.events import TOOL_DENIED, Event, EventBus
-from tether.plugins.base import PluginContext
+from leashd.core.events import TOOL_DENIED, Event, EventBus
+from leashd.plugins.base import PluginContext
 
 
 class TestAuditPlugin:
     @pytest.mark.asyncio
     async def test_audit_plugin_logs_sandbox_violation(self, config, audit_logger):
-        from tether.plugins.builtin.audit_plugin import AuditPlugin
+        from leashd.plugins.builtin.audit_plugin import AuditPlugin
 
         bus = EventBus()
         ctx = PluginContext(event_bus=bus, config=config)
@@ -38,7 +38,7 @@ class TestAuditPlugin:
 
     @pytest.mark.asyncio
     async def test_audit_plugin_ignores_non_sandbox_denials(self, config, audit_logger):
-        from tether.plugins.builtin.audit_plugin import AuditPlugin
+        from leashd.plugins.builtin.audit_plugin import AuditPlugin
 
         bus = EventBus()
         ctx = PluginContext(event_bus=bus, config=config)
@@ -60,7 +60,7 @@ class TestAuditPlugin:
 
     @pytest.mark.asyncio
     async def test_audit_plugin_ignores_non_sandbox_reason(self, config, audit_logger):
-        from tether.plugins.builtin.audit_plugin import AuditPlugin
+        from leashd.plugins.builtin.audit_plugin import AuditPlugin
 
         bus = EventBus()
         ctx = PluginContext(event_bus=bus, config=config)

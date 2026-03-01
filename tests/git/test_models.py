@@ -3,7 +3,7 @@
 import pytest
 from pydantic import ValidationError
 
-from tether.git.models import FileChange, GitBranch, GitLogEntry, GitResult, GitStatus
+from leashd.git.models import FileChange, GitBranch, GitLogEntry, GitResult, GitStatus
 
 
 class TestFileChange:

@@ -1,11 +1,11 @@
 # Plugin System
 
-Plugins extend Tether with observability, custom logic, and integration hooks. They subscribe to `EventBus` events and react without modifying core components.
+Plugins extend leashd with observability, custom logic, and integration hooks. They subscribe to `EventBus` events and react without modifying core components.
 
 ## Plugin Protocol
 
 ```python
-class TetherPlugin(Protocol):
+class LeashdPlugin(Protocol):
     meta: PluginMeta
 
     async def initialize(self, context: PluginContext) -> None: ...
@@ -31,7 +31,7 @@ class PluginContext(BaseModel):
     model_config = ConfigDict(frozen=True, arbitrary_types_allowed=True)
 
     event_bus: EventBus
-    config: TetherConfig
+    config: LeashdConfig
 ```
 
 Plugins receive a `PluginContext` during initialization. This gives them access to the event bus for subscribing to events and the configuration for reading settings.
@@ -183,11 +183,11 @@ When a merge results in conflicts, the plugin sets the session to merge mode and
 
 ## Built-In: `TestConfigLoaderPlugin`
 
-`TestConfigLoaderPlugin` (`plugins/builtin/test_config_loader.py`) loads per-project test configuration from `.tether/test.yaml`.
+`TestConfigLoaderPlugin` (`plugins/builtin/test_config_loader.py`) loads per-project test configuration from `.leashd/test.yaml`.
 
 | Aspect | Detail |
 |---|---|
-| Config file | `.tether/test.yaml` in the project working directory |
+| Config file | `.leashd/test.yaml` in the project working directory |
 | Merge behavior | CLI flags override config file values |
 | Supported fields | URL, server command, framework, credentials, preconditions |
 
@@ -198,8 +198,8 @@ The plugin provides project-specific defaults for the `/test` workflow, so teams
 ### Step 1: Define the Plugin
 
 ```python
-from tether.plugins.base import PluginContext, PluginMeta, TetherPlugin
-from tether.core.events import MESSAGE_IN, Event
+from leashd.plugins.base import PluginContext, PluginMeta, LeashdPlugin
+from leashd.core.events import MESSAGE_IN, Event
 
 
 class MetricsPlugin:
@@ -230,7 +230,7 @@ class MetricsPlugin:
 ### Step 2: Register via `build_engine()`
 
 ```python
-from tether.app import build_engine
+from leashd.app import build_engine
 
 engine = build_engine(plugins=[MetricsPlugin()])
 ```

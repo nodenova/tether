@@ -1,6 +1,6 @@
 # EventBus Reference
 
-`EventBus` (`core/events.py`) is Tether's async pub/sub system. It decouples subsystems so plugins, audit logging, and internal components can react to system events without direct dependencies.
+`EventBus` (`core/events.py`) is leashd's async pub/sub system. It decouples subsystems so plugins, audit logging, and internal components can react to system events without direct dependencies.
 
 ## Core Types
 

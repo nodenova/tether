@@ -1,14 +1,18 @@
 # Changelog
 
-## [0.4.0] - 2026-02-27
-- **added**: `/workspace` (alias `/ws`) — group related repos under named workspaces for multi-repo context. YAML config in `.tether/workspaces.yaml`, inline keyboard buttons, and workspace-aware system prompt injection
+## [0.4.0] - 2026-03-01
+- **changed**: Rebranded from "tether" to "leashd" — package name, env var prefix (`LEASHD_*`), config dir (`.leashd/`), all imports, CLI entry point, and documentation
+- **added**: Apache 2.0 license
+- **added**: PyPI package metadata (classifiers, URLs, keywords, `py.typed` marker)
+- **added**: `/workspace` (alias `/ws`) — group related repos under named workspaces for multi-repo context. YAML config in `.leashd/workspaces.yaml`, inline keyboard buttons, and workspace-aware system prompt injection
 - **added**: Behavioral integration tests for plan approval flow — verify Write/Edit actually succeed after clean_edit, edit, and default approvals (closes coverage gap that let `_cancel_agent()` deletion slip through)
+- **fixed**: `_SafeSDKClient` now handles SDK returning `None` for unknown message types (compatibility with claude-agent-sdk 0.1.44+)
 
 ## [0.3.0] - 2026-02-26
 
 ### Added
 - `/git merge <branch>` — AI-assisted conflict resolution with auto-resolve/abort buttons and 4-phase merge workflow
-- `/test` command — 9-phase agent-driven test workflow with structured args (`--url`, `--framework`, `--dir`, `--no-e2e`, `--no-unit`, `--no-backend`), project config (`.tether/test.yaml`), write-ahead crash recovery, and context persistence across sessions
+- `/test` command — 9-phase agent-driven test workflow with structured args (`--url`, `--framework`, `--dir`, `--no-e2e`, `--no-unit`, `--no-backend`), project config (`.leashd/test.yaml`), write-ahead crash recovery, and context persistence across sessions
 - `/plan <text>` and `/edit <text>` — switch mode and start agent in one step
 - `/dir` inline keyboard buttons for one-tap directory switching
 - Message interrupt — inline buttons to interrupt or wait during agent execution instead of silent queuing
@@ -42,9 +46,9 @@
   - Auto-generated commit messages from staged changes
   - Fuzzy branch matching with fallback to remote tracking
   - Interactive workflows: stage files, confirm pushes, enter commit messages via chat
-- **Git service layer** (`tether/git/service.py`) — async wrapper around git CLI with 30s timeout, input validation against shell injection
-- **Git data models** (`tether/git/models.py`) — frozen Pydantic models for status, branches, log entries, and results
-- **Git display formatters** (`tether/git/formatter.py`) — Telegram-friendly formatting with emoji indicators and 4096-char truncation
+- **Git service layer** (`leashd/git/service.py`) — async wrapper around git CLI with 30s timeout, input validation against shell injection
+- **Git data models** (`leashd/git/models.py`) — frozen Pydantic models for status, branches, log entries, and results
+- **Git display formatters** (`leashd/git/formatter.py`) — Telegram-friendly formatting with emoji indicators and 4096-char truncation
 - **Git callback routing** — inline button support in Telegram connector for git operations
 - **Audit logging for git operations** — every git command logged with session context and working directory
 

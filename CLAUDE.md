@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Tether is a remote AI-assisted development system with safety constraints. It lets developers drive Claude Code agent sessions from any device (e.g., phone via Telegram) while enforcing YAML-driven safety policies that gate dangerous AI actions behind human approval.
+leashd is a remote AI-assisted development system with safety constraints. It lets developers drive Claude Code agent sessions from any device (e.g., phone via Telegram) while enforcing YAML-driven safety policies that gate dangerous AI actions behind human approval.
 
 ## Commands
 
@@ -13,7 +13,7 @@ Tether is a remote AI-assisted development system with safety constraints. It le
 uv sync
 
 # Run the CLI
-uv run -m tether
+uv run -m leashd
 
 # Run all tests
 uv run pytest tests/
@@ -25,7 +25,7 @@ uv run pytest tests/test_policy.py -v
 uv run pytest tests/test_policy.py::test_function_name -v
 
 # Run tests with coverage
-uv run pytest --cov=tether tests/
+uv run pytest --cov=leashd tests/
 
 # Lint
 uv run ruff check .
@@ -57,26 +57,26 @@ The system follows a three-layer safety pipeline: **Sandbox → Policy → Appro
 5. **Audit** (`audit.py`) — append-only JSONL log of all tool attempts and decisions
 
 **Middleware** (`middleware/`): `MiddlewareChain` processes messages before they reach the Engine. Each middleware can pass through or short-circuit.
-- `AuthMiddleware` — user whitelist via `TETHER_ALLOWED_USER_IDS`
-- `RateLimitMiddleware` — token-bucket rate limiting per user via `TETHER_RATE_LIMIT_RPM`
+- `AuthMiddleware` — user whitelist via `LEASHD_ALLOWED_USER_IDS`
+- `RateLimitMiddleware` — token-bucket rate limiting per user via `LEASHD_RATE_LIMIT_RPM`
 
 **EventBus** (`core/events.py`): Pub/sub system for decoupling subsystems. Plugins and internal components subscribe to named events. Key events: `tool.gated`, `tool.allowed`, `tool.denied`, `message.in`, `message.out`, `approval.requested`, `approval.resolved`, `safety.violation`, `engine.started`, `engine.stopped`, `command.test`, `test.started`, `test.completed`, `command.merge`, `merge.started`, `merge.completed`, `interaction.requested`, `interaction.resolved`, `message.queued`, `execution.interrupted`.
 
 **Plugin system** (`plugins/`):
-- `TetherPlugin` ABC with lifecycle hooks: `initialize → start → stop`
+- `LeashdPlugin` ABC with lifecycle hooks: `initialize → start → stop`
 - `PluginRegistry` for explicit registration (no auto-discovery)
 - Plugins receive a `PluginContext` (event bus + config) and subscribe to `EventBus` events in `initialize()`
 - Built-in: `AuditPlugin` logs sandbox violations from `tool.denied` events
 - Built-in: `BrowserToolsPlugin` provides structured logging for the 28 Playwright MCP browser tools (classifies as readonly vs mutation, logs gated/allowed/denied events)
 - Built-in: `TestRunnerPlugin` activates 9-phase test workflow via `/test` command, auto-approves browser tools and test commands
 - Built-in: `MergeResolverPlugin` handles `/git merge` conflict resolution, auto-approves Edit/Write/Read and git read commands
-- Built-in: `TestConfigLoaderPlugin` loads per-project test configuration from `.tether/test.yaml` to customize the `/test` workflow
+- Built-in: `TestConfigLoaderPlugin` loads per-project test configuration from `.leashd/test.yaml` to customize the `/test` workflow
 
 **Interactions** (`core/interactions.py`): `InteractionCoordinator` bridges Claude's `AskUserQuestion` and `ExitPlanMode` SDK events to connectors — forwards questions/plan reviews to Telegram, collects user responses, and returns them to the agent.
 
 **Session management** (`core/session.py`): `SessionManager` handles session lifecycle — creation, lookup by user+chat pair, working directory switching, and delegation to the storage backend.
 
-**Workspaces** (`core/workspace.py`): Groups related repos under a named workspace so the agent gets multi-repo context. `Workspace` is a frozen Pydantic model; `load_workspaces()` reads `.tether/workspaces.yaml`, validates dirs against `TETHER_APPROVED_DIRECTORIES`. `/workspace` (alias `/ws`) command activates a workspace — sets cwd to primary dir, injects multi-repo context into system prompt. MCP servers are **not** copied from workspace directories; the agent only uses MCP from the working directory and TetherConfig.
+**Workspaces** (`core/workspace.py`): Groups related repos under a named workspace so the agent gets multi-repo context. `Workspace` is a frozen Pydantic model; `load_workspaces()` reads `.leashd/workspaces.yaml`, validates dirs against `LEASHD_APPROVED_DIRECTORIES`. `/workspace` (alias `/ws`) command activates a workspace — sets cwd to primary dir, injects multi-repo context into system prompt. MCP servers are **not** copied from workspace directories; the agent only uses MCP from the working directory and LeashdConfig.
 
 **Git integration** (`git/`): Full `/git` command suite accessible from Telegram with inline action buttons.
 - `GitService` (`service.py`) — async wrapper around git CLI with 30s timeout and input validation
@@ -90,13 +90,13 @@ The system follows a three-layer safety pipeline: **Sandbox → Policy → Appro
 
 **Policies** (`policies/`): Four built-in YAML policies — `default.yaml` (balanced), `strict.yaml` (maximum restrictions, shorter timeout), `permissive.yaml` (maximum freedom for trusted environments), `dev-tools.yaml` (overlay that auto-allows common dev commands like package managers, linters, test runners — meant to be combined with other policies). All deny credential file access and destructive patterns.
 
-**Configuration** (`core/config.py`): `TetherConfig` uses pydantic-settings, loaded from environment variables prefixed with `TETHER_`. Required: `TETHER_APPROVED_DIRECTORIES` (comma-separated paths). `build_directory_names()` derives short names from basenames for the `/dir` command.
+**Configuration** (`core/config.py`): `LeashdConfig` uses pydantic-settings, loaded from environment variables prefixed with `LEASHD_`. Required: `LEASHD_APPROVED_DIRECTORIES` (comma-separated paths). `build_directory_names()` derives short names from basenames for the `/dir` command.
 
 **Storage** (`storage/`): `SessionStore` ABC with two backends — `MemorySessionStore` (in-process dict) and `SqliteSessionStore` (persistent via aiosqlite). Sessions are keyed by user+chat pair.
 
 ## Browser Testing (Playwright MCP)
 
-Tether integrates with Playwright MCP for browser automation. The `.mcp.json` at project root configures Claude Code to spawn the MCP server (pinned `@playwright/mcp@0.0.41`, headed mode by default). Tether's Python process does not touch Playwright — Claude Code's SDK manages the MCP server lifecycle.
+leashd integrates with Playwright MCP for browser automation. The `.mcp.json` at project root configures Claude Code to spawn the MCP server (pinned `@playwright/mcp@0.0.41`, headed mode by default). leashd's Python process does not touch Playwright — Claude Code's SDK manages the MCP server lifecycle.
 
 - **Prerequisites:** Node.js 18+, one-time `npx playwright install chromium`
 - **28 browser tools** (7 readonly, 21 mutation) flow through the existing safety pipeline — policy rules are defined in all three YAML presets (`default.yaml`, `strict.yaml`, `permissive.yaml`)
@@ -109,7 +109,7 @@ Tether integrates with Playwright MCP for browser automation. The `.mcp.json` at
 ## Code Conventions
 
 - Python 3.13+ required
-- **Always use `uv run` for all Python commands** — never use `python3`, `python`, or `python3 -m`. Examples: `uv run pytest`, `uv run ruff`, `uv run mypy`, `uv run tether`
+- **Always use `uv run` for all Python commands** — never use `python3`, `python`, or `python3 -m`. Examples: `uv run pytest`, `uv run ruff`, `uv run mypy`, `uv run leashd`
 - Async-first: all agent/connector operations use asyncio
 - Ruff for linting and formatting (88-char line length, rules: E, F, I, N, W, UP, B, SIM, RUF, S, C4, PT, RET, ARG)
 - Pydantic models for data validation, pydantic-settings for configuration
@@ -131,7 +131,7 @@ Tether integrates with Playwright MCP for browser automation. The `.mcp.json` at
 
 ## Logging & Observability
 
-Tether produces three data surfaces per project, all under `{project}/.tether/`:
+leashd produces three data surfaces per project, all under `{project}/.leashd/`:
 
 | Surface | Path | Format | Purpose |
 |---------|------|--------|---------|
@@ -139,7 +139,7 @@ Tether produces three data surfaces per project, all under `{project}/.tether/`:
 | Audit log | `audit.jsonl` | JSON lines (append-only) | Tool-gating decisions, approvals, security violations |
 | Message store | `messages.db` | SQLite | Conversation history (user/assistant messages, cost, duration) |
 
-Session metadata lives in a separate fixed-location store at `{tether_root}/.tether/sessions.db`.
+Session metadata lives in a separate fixed-location store at `{leashd_root}/.leashd/sessions.db`.
 
 **Context variable auto-propagation** (`core/engine.py`): The engine binds `request_id`, `chat_id`, and `session_id` to structlog contextvars at the start of each turn. These fields automatically appear in every log entry during that turn without explicit passing. `request_id` is ephemeral (8-char hex, fresh per turn); `session_id` persists across the conversation.
 
@@ -149,7 +149,7 @@ Session metadata lives in a separate fixed-location store at `{tether_root}/.tet
 - `user_id` + `chat_id` — session store, message store, and app logs
 - `working_directory` — links session store to the correct project's per-project files
 
-**Logging env vars**: `TETHER_LOG_LEVEL` (default `INFO`), `TETHER_LOG_DIR` (default `.tether/logs`), `TETHER_LOG_MAX_BYTES` (default 10 MB), `TETHER_LOG_BACKUP_COUNT` (default 5), `TETHER_AUDIT_LOG_PATH` (default `.tether/audit.jsonl`).
+**Logging env vars**: `LEASHD_LOG_LEVEL` (default `INFO`), `LEASHD_LOG_DIR` (default `.leashd/logs`), `LEASHD_LOG_MAX_BYTES` (default 10 MB), `LEASHD_LOG_BACKUP_COUNT` (default 5), `LEASHD_AUDIT_LOG_PATH` (default `.leashd/audit.jsonl`).
 
 ## Changelog
 

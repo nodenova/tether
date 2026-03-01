@@ -2,11 +2,11 @@
 
 import pytest
 
+from leashd.core.config import LeashdConfig, build_directory_names
+from leashd.core.engine import Engine
+from leashd.core.session import SessionManager
+from leashd.core.workspace import Workspace
 from tests.core.engine.conftest import FakeAgent
-from tether.core.config import TetherConfig, build_directory_names
-from tether.core.engine import Engine
-from tether.core.session import SessionManager
-from tether.core.workspace import Workspace
 
 
 def _make_engine(
@@ -56,7 +56,7 @@ class TestWorkspaceCommand:
         dir_a.mkdir()
         dir_b.mkdir()
 
-        config = TetherConfig(
+        config = LeashdConfig(
             approved_directories=[tmp_path, dir_a, dir_b],
             audit_log_path=tmp_path / "audit.jsonl",
         )
@@ -86,7 +86,7 @@ class TestWorkspaceCommand:
     ):
         dir_a = tmp_path / "repo"
         dir_a.mkdir()
-        config = TetherConfig(
+        config = LeashdConfig(
             approved_directories=[tmp_path, dir_a],
             audit_log_path=tmp_path / "audit.jsonl",
         )
@@ -106,7 +106,7 @@ class TestWorkspaceCommand:
     ):
         dir_a = tmp_path / "repo"
         dir_a.mkdir()
-        config = TetherConfig(
+        config = LeashdConfig(
             approved_directories=[tmp_path, dir_a],
             audit_log_path=tmp_path / "audit.jsonl",
         )
@@ -136,7 +136,7 @@ class TestWorkspaceCommand:
         dir_b.mkdir()
         dir_c.mkdir()
 
-        config = TetherConfig(
+        config = LeashdConfig(
             approved_directories=[tmp_path, dir_a, dir_b, dir_c],
             audit_log_path=tmp_path / "audit.jsonl",
         )
@@ -164,7 +164,7 @@ class TestWorkspaceCommand:
         dir_a.mkdir()
         dir_b.mkdir()
 
-        config = TetherConfig(
+        config = LeashdConfig(
             approved_directories=[tmp_path, dir_a, dir_b],
             audit_log_path=tmp_path / "audit.jsonl",
         )
@@ -194,7 +194,7 @@ class TestWorkspaceCommand:
     ):
         dir_a = tmp_path / "repo"
         dir_a.mkdir()
-        config = TetherConfig(
+        config = LeashdConfig(
             approved_directories=[tmp_path, dir_a],
             audit_log_path=tmp_path / "audit.jsonl",
         )
@@ -221,7 +221,7 @@ class TestWorkspaceCommand:
     ):
         dir_a = tmp_path / "repo"
         dir_a.mkdir()
-        config = TetherConfig(
+        config = LeashdConfig(
             approved_directories=[tmp_path, dir_a],
             audit_log_path=tmp_path / "audit.jsonl",
         )
@@ -249,7 +249,7 @@ class TestWorkspaceCommand:
     ):
         dir_a = tmp_path / "repo"
         dir_a.mkdir()
-        config = TetherConfig(
+        config = LeashdConfig(
             approved_directories=[tmp_path, dir_a],
             audit_log_path=tmp_path / "audit.jsonl",
         )
@@ -269,7 +269,7 @@ class TestWorkspaceCommand:
     ):
         dir_a = tmp_path / "repo"
         dir_a.mkdir()
-        config = TetherConfig(
+        config = LeashdConfig(
             approved_directories=[tmp_path, dir_a],
             audit_log_path=tmp_path / "audit.jsonl",
         )
@@ -290,7 +290,7 @@ class TestWorkspaceCommand:
     ):
         dir_a = tmp_path / "repo"
         dir_a.mkdir()
-        config = TetherConfig(
+        config = LeashdConfig(
             approved_directories=[tmp_path, dir_a],
             audit_log_path=tmp_path / "audit.jsonl",
         )
@@ -322,7 +322,7 @@ class TestWorkspaceCommand:
         dir_a.mkdir()
         dir_b.mkdir()
 
-        config = TetherConfig(
+        config = LeashdConfig(
             approved_directories=[tmp_path, dir_a, dir_b],
             audit_log_path=tmp_path / "audit.jsonl",
         )
@@ -357,7 +357,7 @@ class TestDirDeactivatesWorkspace:
         dir_a.mkdir()
         dir_b.mkdir()
 
-        config = TetherConfig(
+        config = LeashdConfig(
             approved_directories=[tmp_path, dir_a, dir_b],
             audit_log_path=tmp_path / "audit.jsonl",
         )
@@ -394,7 +394,7 @@ class TestDirDeactivatesWorkspace:
         dir_a.mkdir()
         dir_b.mkdir()
 
-        config = TetherConfig(
+        config = LeashdConfig(
             approved_directories=[tmp_path, dir_a, dir_b],
             audit_log_path=tmp_path / "audit.jsonl",
         )
@@ -428,7 +428,7 @@ class TestDirDeactivatesWorkspace:
         dir_a.mkdir()
         dir_b.mkdir()
 
-        config = TetherConfig(
+        config = LeashdConfig(
             approved_directories=[dir_a, dir_b],
             audit_log_path=tmp_path / "audit.jsonl",
         )

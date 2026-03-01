@@ -4,8 +4,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from tether.agents.base import AgentResponse, ToolActivity
-from tether.agents.claude_code import (
+from leashd.agents.base import AgentResponse, ToolActivity
+from leashd.agents.claude_code import (
     _AUTO_MODE_INSTRUCTION,
     _PLAN_MODE_INSTRUCTION,
     ClaudeCodeAgent,
@@ -14,9 +14,9 @@ from tether.agents.claude_code import (
     _is_retryable_error,
     _truncate,
 )
-from tether.core.config import TetherConfig
-from tether.core.session import Session
-from tether.exceptions import AgentError
+from leashd.core.config import LeashdConfig
+from leashd.core.session import Session
+from leashd.exceptions import AgentError
 
 # --- SDK mock helpers for _run_with_resume ---
 
@@ -117,7 +117,7 @@ def _patch_sdk_client(messages):
     mock_ctx.__aexit__ = AsyncMock(return_value=False)
 
     return patch(
-        "tether.agents.claude_code._SafeSDKClient",
+        "leashd.agents.claude_code._SafeSDKClient",
         return_value=mock_ctx,
     ), mock_client
 
@@ -152,7 +152,7 @@ class TestClaudeCodeAgent:
         assert opts.resume == "existing-session-id"
 
     def test_build_options_with_system_prompt(self, tmp_path):
-        config = TetherConfig(
+        config = LeashdConfig(
             approved_directories=[tmp_path],
             system_prompt="Be a pirate.",
         )
@@ -169,7 +169,7 @@ class TestClaudeCodeAgent:
         assert "Be a pirate." in opts.system_prompt
 
     def test_build_options_with_allowed_tools(self, tmp_path):
-        config = TetherConfig(
+        config = LeashdConfig(
             approved_directories=[tmp_path],
             allowed_tools=["Read", "Glob"],
         )
@@ -252,7 +252,7 @@ class TestClaudeCodeAgent:
         assert len(agent._active_clients) == 0
 
     def test_build_options_with_disallowed_tools(self, tmp_path):
-        config = TetherConfig(
+        config = LeashdConfig(
             approved_directories=[tmp_path],
             disallowed_tools=["Bash"],
         )
@@ -282,7 +282,7 @@ class TestClaudeCodeAgent:
         assert opts.system_prompt == _PLAN_MODE_INSTRUCTION
 
     def test_plan_mode_with_existing_system_prompt(self, tmp_path):
-        config = TetherConfig(
+        config = LeashdConfig(
             approved_directories=[tmp_path],
             system_prompt="Be a pirate.",
         )
@@ -311,7 +311,7 @@ class TestClaudeCodeAgent:
         assert opts.system_prompt == _AUTO_MODE_INSTRUCTION
 
     def test_auto_mode_with_existing_system_prompt(self, tmp_path):
-        config = TetherConfig(
+        config = LeashdConfig(
             approved_directories=[tmp_path],
             system_prompt="Be a pirate.",
         )
@@ -361,7 +361,7 @@ class TestClaudeCodeAgent:
         assert opts.system_prompt == "You are in test mode."
 
     def test_mode_instruction_with_existing_system_prompt(self, tmp_path):
-        config = TetherConfig(
+        config = LeashdConfig(
             approved_directories=[tmp_path],
             system_prompt="Be helpful.",
         )
@@ -392,9 +392,9 @@ class TestClaudeCodeAgent:
         mcp_file.write_text(
             json.dumps({"mcpServers": {"local-tool": {"command": "node"}}})
         )
-        config = TetherConfig(
+        config = LeashdConfig(
             approved_directories=[tmp_path],
-            mcp_servers={"tether-tool": {"command": "python"}},
+            mcp_servers={"leashd-tool": {"command": "python"}},
         )
         agent = ClaudeCodeAgent(config)
         session = Session(
@@ -405,18 +405,18 @@ class TestClaudeCodeAgent:
         )
         opts = agent._build_options(session, can_use_tool=None)
         assert "local-tool" in opts.mcp_servers
-        assert "tether-tool" in opts.mcp_servers
+        assert "leashd-tool" in opts.mcp_servers
 
-    def test_build_options_tether_mcp_wins_collision(self, tmp_path):
+    def test_build_options_leashd_mcp_wins_collision(self, tmp_path):
         import json
 
         mcp_file = tmp_path / ".mcp.json"
         mcp_file.write_text(
             json.dumps({"mcpServers": {"shared": {"command": "local"}}})
         )
-        config = TetherConfig(
+        config = LeashdConfig(
             approved_directories=[tmp_path],
-            mcp_servers={"shared": {"command": "tether"}},
+            mcp_servers={"shared": {"command": "leashd"}},
         )
         agent = ClaudeCodeAgent(config)
         session = Session(
@@ -426,7 +426,7 @@ class TestClaudeCodeAgent:
             working_directory=str(tmp_path),
         )
         opts = agent._build_options(session, can_use_tool=None)
-        assert opts.mcp_servers["shared"]["command"] == "tether"
+        assert opts.mcp_servers["shared"]["command"] == "leashd"
 
     def test_build_options_no_mcp_servers(self, agent, session):
         opts = agent._build_options(session, can_use_tool=None)
@@ -435,7 +435,7 @@ class TestClaudeCodeAgent:
     def test_build_options_malformed_mcp_json(self, tmp_path):
         mcp_file = tmp_path / ".mcp.json"
         mcp_file.write_text("not valid json {{{")
-        config = TetherConfig(approved_directories=[tmp_path])
+        config = LeashdConfig(approved_directories=[tmp_path])
         agent = ClaudeCodeAgent(config)
         session = Session(
             session_id="s1",
@@ -453,7 +453,7 @@ class TestClaudeCodeAgent:
         mcp_file.write_text(
             json.dumps({"mcpServers": {"playwright": {"command": "npx"}}})
         )
-        config = TetherConfig(
+        config = LeashdConfig(
             approved_directories=[tmp_path],
             mcp_servers={"custom-tool": {"command": "node"}},
         )
@@ -587,7 +587,7 @@ class TestRunWithResume:
             async def __aexit__(self, *args):
                 return False
 
-        with patch("tether.agents.claude_code._SafeSDKClient", return_value=FakeCtx()):
+        with patch("leashd.agents.claude_code._SafeSDKClient", return_value=FakeCtx()):
             resp = await agent._run_with_resume("prompt", session, opts)
 
         assert resp.content == "Retried OK"
@@ -621,7 +621,7 @@ class TestRunWithResume:
             async def __aexit__(self, *args):
                 return False
 
-        with patch("tether.agents.claude_code._SafeSDKClient", return_value=FakeCtx()):
+        with patch("leashd.agents.claude_code._SafeSDKClient", return_value=FakeCtx()):
             resp = await agent._run_with_resume("prompt", session, opts)
 
         assert resp.content == "Fresh OK"
@@ -642,7 +642,7 @@ class TestRunWithResume:
             async def __aexit__(self, *args):
                 return False
 
-        with patch("tether.agents.claude_code._SafeSDKClient", return_value=FakeCtx()):
+        with patch("leashd.agents.claude_code._SafeSDKClient", return_value=FakeCtx()):
             resp = await agent._run_with_resume(
                 "prompt", session, agent._build_options(session, None)
             )
@@ -671,7 +671,7 @@ class TestRunWithResume:
                 return False
 
         with patch(
-            "tether.agents.claude_code._SafeSDKClient", return_value=TrackingCtx()
+            "leashd.agents.claude_code._SafeSDKClient", return_value=TrackingCtx()
         ):
             await agent._run_with_resume(
                 "prompt", session, agent._build_options(session, None)
@@ -690,7 +690,7 @@ class TestRunWithResume:
         mock_ctx.__aexit__ = AsyncMock(return_value=False)
 
         with (
-            patch("tether.agents.claude_code._SafeSDKClient", return_value=mock_ctx),
+            patch("leashd.agents.claude_code._SafeSDKClient", return_value=mock_ctx),
             pytest.raises(RuntimeError, match="SDK crash"),
         ):
             await agent._run_with_resume(
@@ -868,7 +868,7 @@ class TestSafeSDKClient:
 
     @pytest.mark.asyncio
     async def test_skips_unknown_message_types(self):
-        from tether.agents.claude_code import _SafeSDKClient
+        from leashd.agents.claude_code import _SafeSDKClient
 
         raw_messages = [
             {"type": "rate_limit_event", "data": {}},
@@ -896,7 +896,7 @@ class TestSafeSDKClient:
 
     @pytest.mark.asyncio
     async def test_valid_messages_pass_through(self):
-        from tether.agents.claude_code import _SafeSDKClient
+        from leashd.agents.claude_code import _SafeSDKClient
 
         raw_messages = [
             {
@@ -929,7 +929,7 @@ class TestSafeSDKClient:
 
     @pytest.mark.asyncio
     async def test_logs_skipped_messages(self):
-        from tether.agents.claude_code import _SafeSDKClient
+        from leashd.agents.claude_code import _SafeSDKClient
 
         raw_messages = [{"type": "rate_limit_event", "data": {}}]
 
@@ -939,7 +939,7 @@ class TestSafeSDKClient:
             return_value=AsyncIterHelper(raw_messages)
         )
 
-        with patch("tether.agents.claude_code.logger") as mock_logger:
+        with patch("leashd.agents.claude_code.logger") as mock_logger:
             _ = [msg async for msg in client.receive_messages()]
             mock_logger.debug.assert_called_once_with(
                 "skipping_unknown_sdk_message",
@@ -948,7 +948,7 @@ class TestSafeSDKClient:
 
     @pytest.mark.asyncio
     async def test_multiple_unknown_types_all_skipped(self):
-        from tether.agents.claude_code import _SafeSDKClient
+        from leashd.agents.claude_code import _SafeSDKClient
 
         raw_messages = [
             {"type": "rate_limit_event", "data": {}},
@@ -968,7 +968,7 @@ class TestSafeSDKClient:
     @pytest.mark.asyncio
     async def test_dict_without_type_key_skipped(self):
         """A raw dict missing the 'type' key should be skipped gracefully."""
-        from tether.agents.claude_code import _SafeSDKClient
+        from leashd.agents.claude_code import _SafeSDKClient
 
         raw_messages = [
             {"data": "no type key here"},
@@ -997,7 +997,7 @@ class TestSafeSDKClient:
     @pytest.mark.asyncio
     async def test_empty_dict_skipped(self):
         """An empty dict should be skipped without crashing."""
-        from tether.agents.claude_code import _SafeSDKClient
+        from leashd.agents.claude_code import _SafeSDKClient
 
         raw_messages = [{}]
 
@@ -1294,7 +1294,7 @@ class TestRetryableApiErrors:
                 return False
 
         with (
-            patch("tether.agents.claude_code._SafeSDKClient", return_value=FakeCtx()),
+            patch("leashd.agents.claude_code._SafeSDKClient", return_value=FakeCtx()),
             patch("asyncio.sleep", new_callable=AsyncMock),
         ):
             resp = await agent.execute("hello", session)
@@ -1328,7 +1328,7 @@ class TestRetryableApiErrors:
             async def __aexit__(self, *args):
                 return False
 
-        with patch("tether.agents.claude_code._SafeSDKClient", return_value=FakeCtx()):
+        with patch("leashd.agents.claude_code._SafeSDKClient", return_value=FakeCtx()):
             resp = await agent.execute("hello", session)
 
         assert resp.content == "authentication_error: invalid API key"
@@ -1359,7 +1359,7 @@ class TestRetryableApiErrors:
                 return False
 
         with (
-            patch("tether.agents.claude_code._SafeSDKClient", return_value=FakeCtx()),
+            patch("leashd.agents.claude_code._SafeSDKClient", return_value=FakeCtx()),
             patch("asyncio.sleep", new_callable=AsyncMock),
         ):
             resp = await agent.execute("hello", session)
@@ -1398,7 +1398,7 @@ class TestExponentialBackoff:
             sleep_delays.append(delay)
 
         with (
-            patch("tether.agents.claude_code._SafeSDKClient", return_value=FakeCtx()),
+            patch("leashd.agents.claude_code._SafeSDKClient", return_value=FakeCtx()),
             patch("asyncio.sleep", side_effect=capture_sleep),
         ):
             await agent._run_with_resume(
@@ -1443,7 +1443,7 @@ class TestBufferOverflowRetry:
                 return False
 
         with (
-            patch("tether.agents.claude_code._SafeSDKClient", return_value=FakeCtx()),
+            patch("leashd.agents.claude_code._SafeSDKClient", return_value=FakeCtx()),
             patch("asyncio.sleep", new_callable=AsyncMock),
         ):
             resp = await agent.execute("hello", session)
@@ -1474,7 +1474,7 @@ class TestBufferOverflowRetry:
                 return False
 
         with (
-            patch("tether.agents.claude_code._SafeSDKClient", return_value=FakeCtx()),
+            patch("leashd.agents.claude_code._SafeSDKClient", return_value=FakeCtx()),
             patch("asyncio.sleep", new_callable=AsyncMock),
         ):
             resp = await agent.execute("hello", session)

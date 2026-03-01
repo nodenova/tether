@@ -1,6 +1,6 @@
-# Tether Documentation
+# leashd Documentation
 
-Tether is an open-source remote AI-assisted development framework. It lets developers drive Claude Code agent sessions from any device while enforcing YAML-driven safety policies that gate dangerous AI actions behind human approval. The system is modular, lightweight, and bulletproof.
+leashd is an open-source remote AI-assisted development framework. It lets developers drive Claude Code agent sessions from any device while enforcing YAML-driven safety policies that gate dangerous AI actions behind human approval. The system is modular, lightweight, and bulletproof.
 
 ## Three Guarantees
 
@@ -30,7 +30,7 @@ flowchart LR
 | [Architecture](architecture.md) | Component map, dependency injection, startup/shutdown lifecycle |
 | [Safety Pipeline](safety-pipeline.md) | Gatekeeper, sandbox, policy engine, approval coordinator |
 | [Engine](engine.md) | Message lifecycle, plan mode, streaming, slash commands |
-| [Configuration](configuration.md) | All `TETHER_` environment variables reference |
+| [Configuration](configuration.md) | All `LEASHD_` environment variables reference |
 | [Policies](policies.md) | YAML policy format, rule matching algorithm, built-in presets |
 | [Events](events.md) | EventBus, all event types, payload schemas |
 | [Plugins](plugins.md) | Plugin protocol, lifecycle hooks, AuditPlugin example |
@@ -47,18 +47,18 @@ flowchart LR
 ```bash
 # Clone and install
 git clone <repo-url>
-cd tether
+cd leashd
 uv sync
 
 # Minimal .env
-echo 'TETHER_APPROVED_DIRECTORIES=/path/to/your/project' > .env
+echo 'LEASHD_APPROVED_DIRECTORIES=/path/to/your/project' > .env
 
 # Run the CLI (interactive REPL)
-uv run -m tether
+uv run -m leashd
 
 # Run with Telegram connector
-echo 'TETHER_TELEGRAM_BOT_TOKEN=your-bot-token' >> .env
-uv run -m tether
+echo 'LEASHD_TELEGRAM_BOT_TOKEN=your-bot-token' >> .env
+uv run -m leashd
 ```
 
 See [Configuration](configuration.md) for the full environment variable reference.

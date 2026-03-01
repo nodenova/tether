@@ -6,7 +6,7 @@ import pytest
 import yaml
 from pydantic import ValidationError
 
-from tether.core.workspace import Workspace, load_workspaces
+from leashd.core.workspace import Workspace, load_workspaces
 
 
 class TestWorkspaceModel:
@@ -38,9 +38,9 @@ class TestLoadWorkspaces:
         dir_a.mkdir()
         dir_b.mkdir()
 
-        tether_dir = tmp_path / ".tether"
-        tether_dir.mkdir()
-        ws_file = tether_dir / "workspaces.yaml"
+        leashd_dir = tmp_path / ".leashd"
+        leashd_dir.mkdir()
+        ws_file = leashd_dir / "workspaces.yaml"
         ws_file.write_text(
             yaml.dump(
                 {
@@ -65,9 +65,9 @@ class TestLoadWorkspaces:
     def test_yml_extension(self, tmp_path):
         dir_a = tmp_path / "repo"
         dir_a.mkdir()
-        tether_dir = tmp_path / ".tether"
-        tether_dir.mkdir()
-        ws_file = tether_dir / "workspaces.yml"
+        leashd_dir = tmp_path / ".leashd"
+        leashd_dir.mkdir()
+        ws_file = leashd_dir / "workspaces.yml"
         ws_file.write_text(
             yaml.dump({"workspaces": {"ws1": {"directories": [str(dir_a)]}}})
         )
@@ -81,9 +81,9 @@ class TestLoadWorkspaces:
         dir_a.mkdir()
         dir_b.mkdir()
 
-        tether_dir = tmp_path / ".tether"
-        tether_dir.mkdir()
-        (tether_dir / "workspaces.yaml").write_text(
+        leashd_dir = tmp_path / ".leashd"
+        leashd_dir.mkdir()
+        (leashd_dir / "workspaces.yaml").write_text(
             yaml.dump(
                 {
                     "workspaces": {
@@ -106,9 +106,9 @@ class TestLoadWorkspaces:
         dir_a.mkdir()
         nonexistent = tmp_path / "ghost"
 
-        tether_dir = tmp_path / ".tether"
-        tether_dir.mkdir()
-        (tether_dir / "workspaces.yaml").write_text(
+        leashd_dir = tmp_path / ".leashd"
+        leashd_dir.mkdir()
+        (leashd_dir / "workspaces.yaml").write_text(
             yaml.dump(
                 {
                     "workspaces": {
@@ -125,9 +125,9 @@ class TestLoadWorkspaces:
         assert len(ws.directories) == 1
 
     def test_empty_directories_list_skipped(self, tmp_path):
-        tether_dir = tmp_path / ".tether"
-        tether_dir.mkdir()
-        (tether_dir / "workspaces.yaml").write_text(
+        leashd_dir = tmp_path / ".leashd"
+        leashd_dir.mkdir()
+        (leashd_dir / "workspaces.yaml").write_text(
             yaml.dump({"workspaces": {"empty": {"directories": []}}})
         )
 
@@ -136,9 +136,9 @@ class TestLoadWorkspaces:
 
     def test_all_dirs_invalid_skips_workspace(self, tmp_path):
         nonexistent = tmp_path / "ghost"
-        tether_dir = tmp_path / ".tether"
-        tether_dir.mkdir()
-        (tether_dir / "workspaces.yaml").write_text(
+        leashd_dir = tmp_path / ".leashd"
+        leashd_dir.mkdir()
+        (leashd_dir / "workspaces.yaml").write_text(
             yaml.dump({"workspaces": {"bad": {"directories": [str(nonexistent)]}}})
         )
 
@@ -151,9 +151,9 @@ class TestLoadWorkspaces:
         dir_a.mkdir()
         dir_b.mkdir()
 
-        tether_dir = tmp_path / ".tether"
-        tether_dir.mkdir()
-        (tether_dir / "workspaces.yaml").write_text(
+        leashd_dir = tmp_path / ".leashd"
+        leashd_dir.mkdir()
+        (leashd_dir / "workspaces.yaml").write_text(
             yaml.dump(
                 {
                     "workspaces": {
@@ -170,9 +170,9 @@ class TestLoadWorkspaces:
         assert "be" in result
 
     def test_invalid_yaml_returns_empty(self, tmp_path):
-        tether_dir = tmp_path / ".tether"
-        tether_dir.mkdir()
-        (tether_dir / "workspaces.yaml").write_text(":::bad yaml{{{")
+        leashd_dir = tmp_path / ".leashd"
+        leashd_dir.mkdir()
+        (leashd_dir / "workspaces.yaml").write_text(":::bad yaml{{{")
 
         result = load_workspaces(tmp_path, [tmp_path])
         assert result == {}
@@ -181,9 +181,9 @@ class TestLoadWorkspaces:
         dir_a = tmp_path / "repo"
         dir_a.mkdir()
 
-        tether_dir = tmp_path / ".tether"
-        tether_dir.mkdir()
-        (tether_dir / "workspaces.yaml").write_text(
+        leashd_dir = tmp_path / ".leashd"
+        leashd_dir.mkdir()
+        (leashd_dir / "workspaces.yaml").write_text(
             yaml.dump({"workspaces": {"ws": {"directories": [str(dir_a)]}}})
         )
 

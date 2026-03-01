@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import pytest
 
-from tether.middleware.auth import AuthMiddleware
-from tether.middleware.base import MessageContext, MiddlewareChain
-from tether.middleware.rate_limit import RateLimitMiddleware, TokenBucket
+from leashd.middleware.auth import AuthMiddleware
+from leashd.middleware.base import MessageContext, MiddlewareChain
+from leashd.middleware.rate_limit import RateLimitMiddleware, TokenBucket
 
 
 def _make_ctx(user_id: str = "user1", text: str = "hello") -> MessageContext:

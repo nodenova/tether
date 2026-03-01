@@ -1,6 +1,6 @@
 # Policy System
 
-Policies define which tool calls the agent can execute, which are blocked, and which require human approval. They are written in YAML — readable, version-controlled, and swappable at startup via `TETHER_POLICY_FILES`.
+Policies define which tool calls the agent can execute, which are blocked, and which require human approval. They are written in YAML — readable, version-controlled, and swappable at startup via `LEASHD_POLICY_FILES`.
 
 ## YAML File Structure
 
@@ -93,7 +93,7 @@ If no rule matches, `evaluate()` returns the `default_action` from settings (typ
 
 ## Built-In Presets
 
-Tether ships with three policy files in `policies/`:
+leashd ships with three policy files in `policies/`:
 
 ```mermaid
 flowchart TB
@@ -147,7 +147,7 @@ flowchart TB
 5. Set the policy file path:
 
 ```env
-TETHER_POLICY_FILES=policies/default.yaml,path/to/custom.yaml
+LEASHD_POLICY_FILES=policies/default.yaml,path/to/custom.yaml
 ```
 
 Multiple policy files are loaded in order. Later files can add rules and override settings. Rules from all files are combined into a single ordered list.
@@ -189,10 +189,10 @@ Overlays are additional YAML policy files layered on top of a base policy (usual
 
 ### How Overlay Loading Works
 
-Set `TETHER_POLICY_FILES` to a comma-separated list of YAML paths:
+Set `LEASHD_POLICY_FILES` to a comma-separated list of YAML paths:
 
 ```env
-TETHER_POLICY_FILES=tether/policies/default.yaml,tether/policies/dev-tools.yaml
+LEASHD_POLICY_FILES=leashd/policies/default.yaml,leashd/policies/dev-tools.yaml
 ```
 
 The `PolicyEngine` loads rules from each file in order and concatenates them into a single rule list. Since **first-match wins**, the position matters:
@@ -216,7 +216,7 @@ fallback  →  require_approval
 
 ### Built-In `dev-tools.yaml`
 
-Tether ships `tether/policies/dev-tools.yaml` for common development workflows. It contains two rules:
+leashd ships `leashd/policies/dev-tools.yaml` for common development workflows. It contains two rules:
 
 **`dev-linters`** — Auto-allows standalone linters, formatters, and test runners:
 ```
@@ -235,11 +235,11 @@ pytest, ruff, jest, vitest, mypy, black, flake8, eslint, prettier
 | go | build, test, vet, fmt, mod, generate | run, install, get |
 | make | test, check, lint, build, clean, format, fmt, all, dev, install | deploy, release, push |
 
-`dev-tools.yaml` is auto-loaded alongside `default.yaml` when no `TETHER_POLICY_FILES` is set. To disable it, set `TETHER_POLICY_FILES` explicitly without it:
+`dev-tools.yaml` is auto-loaded alongside `default.yaml` when no `LEASHD_POLICY_FILES` is set. To disable it, set `LEASHD_POLICY_FILES` explicitly without it:
 
 ```env
 # Only default policy, no dev-tools overlay
-TETHER_POLICY_FILES=tether/policies/default.yaml
+LEASHD_POLICY_FILES=leashd/policies/default.yaml
 ```
 
 ### Creating Your Own Overlay
@@ -268,7 +268,7 @@ rules:
 2. Add it to your policy chain:
 
 ```env
-TETHER_POLICY_FILES=tether/policies/default.yaml,tether/policies/dev-tools.yaml,overlays/my-team.yaml
+LEASHD_POLICY_FILES=leashd/policies/default.yaml,leashd/policies/dev-tools.yaml,overlays/my-team.yaml
 ```
 
 3. Rules from all files combine in order — your overlay rules are checked last.

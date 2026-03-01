@@ -4,11 +4,11 @@ import asyncio
 
 import pytest
 
+from leashd.agents.base import AgentResponse, BaseAgent
+from leashd.core.engine import Engine
+from leashd.core.interactions import InteractionCoordinator
+from leashd.core.session import SessionManager
 from tests.core.engine.conftest import FakeAgent, _make_git_handler_mock
-from tether.agents.base import AgentResponse, BaseAgent
-from tether.core.engine import Engine
-from tether.core.interactions import InteractionCoordinator
-from tether.core.session import SessionManager
 
 
 class TestStreamingResponderReset:
@@ -17,8 +17,8 @@ class TestStreamingResponderReset:
         self, config, policy_engine, audit_logger
     ):
         """After reset(), the next chunk should create a new message (not edit the old one)."""
+        from leashd.core.engine import _StreamingResponder
         from tests.conftest import MockConnector
-        from tether.core.engine import _StreamingResponder
 
         connector = MockConnector(support_streaming=True)
         responder = _StreamingResponder(connector, "chat1", throttle_seconds=0)
@@ -44,8 +44,8 @@ class TestStreamingResponderReset:
 class TestStreamingResponderMessageTracking:
     @pytest.mark.asyncio
     async def test_all_message_ids_tracks_initial_message(self):
+        from leashd.core.engine import _StreamingResponder
         from tests.conftest import MockConnector
-        from tether.core.engine import _StreamingResponder
 
         connector = MockConnector(support_streaming=True)
         responder = _StreamingResponder(connector, "chat1", throttle_seconds=0)
@@ -55,8 +55,8 @@ class TestStreamingResponderMessageTracking:
 
     @pytest.mark.asyncio
     async def test_all_message_ids_tracks_overflow_messages(self):
+        from leashd.core.engine import _MAX_STREAMING_DISPLAY, _StreamingResponder
         from tests.conftest import MockConnector
-        from tether.core.engine import _MAX_STREAMING_DISPLAY, _StreamingResponder
 
         connector = MockConnector(support_streaming=True)
         responder = _StreamingResponder(connector, "chat1", throttle_seconds=0)
@@ -71,8 +71,8 @@ class TestStreamingResponderMessageTracking:
 
     @pytest.mark.asyncio
     async def test_reset_clears_all_message_ids(self):
+        from leashd.core.engine import _StreamingResponder
         from tests.conftest import MockConnector
-        from tether.core.engine import _StreamingResponder
 
         connector = MockConnector(support_streaming=True)
         responder = _StreamingResponder(connector, "chat1", throttle_seconds=0)
@@ -84,8 +84,8 @@ class TestStreamingResponderMessageTracking:
 
     @pytest.mark.asyncio
     async def test_delete_all_messages_deletes_and_clears(self):
+        from leashd.core.engine import _StreamingResponder
         from tests.conftest import MockConnector
-        from tether.core.engine import _StreamingResponder
 
         connector = MockConnector(support_streaming=True)
         responder = _StreamingResponder(connector, "chat1", throttle_seconds=0)
@@ -102,9 +102,9 @@ class TestStreamingResponderMessageTracking:
 class TestActivityCleanup:
     @pytest.mark.asyncio
     async def test_on_activity_none_clears_when_has_activity(self):
+        from leashd.agents.base import ToolActivity
+        from leashd.core.engine import _StreamingResponder
         from tests.conftest import MockConnector
-        from tether.agents.base import ToolActivity
-        from tether.core.engine import _StreamingResponder
 
         connector = MockConnector(support_streaming=True)
         responder = _StreamingResponder(connector, "chat1", throttle_seconds=0)
@@ -123,8 +123,8 @@ class TestActivityCleanup:
 
     @pytest.mark.asyncio
     async def test_on_activity_none_noop_when_no_activity(self):
+        from leashd.core.engine import _StreamingResponder
         from tests.conftest import MockConnector
-        from tether.core.engine import _StreamingResponder
 
         connector = MockConnector(support_streaming=True)
         responder = _StreamingResponder(connector, "chat1", throttle_seconds=0)
@@ -138,9 +138,9 @@ class TestActivityCleanup:
 
     @pytest.mark.asyncio
     async def test_finalize_clears_activity_before_editing(self):
+        from leashd.agents.base import ToolActivity
+        from leashd.core.engine import _StreamingResponder
         from tests.conftest import MockConnector
-        from tether.agents.base import ToolActivity
-        from tether.core.engine import _StreamingResponder
 
         connector = MockConnector(support_streaming=True)
         responder = _StreamingResponder(connector, "chat1", throttle_seconds=0)
@@ -158,9 +158,9 @@ class TestActivityCleanup:
 
     @pytest.mark.asyncio
     async def test_multi_tool_sequence_clears_each_time(self):
+        from leashd.agents.base import ToolActivity
+        from leashd.core.engine import _StreamingResponder
         from tests.conftest import MockConnector
-        from tether.agents.base import ToolActivity
-        from tether.core.engine import _StreamingResponder
 
         connector = MockConnector(support_streaming=True)
         responder = _StreamingResponder(connector, "chat1", throttle_seconds=0)
@@ -194,9 +194,9 @@ class TestActivityCleanup:
 
     @pytest.mark.asyncio
     async def test_deactivate_then_on_activity_none_no_error(self):
+        from leashd.agents.base import ToolActivity
+        from leashd.core.engine import _StreamingResponder
         from tests.conftest import MockConnector
-        from tether.agents.base import ToolActivity
-        from tether.core.engine import _StreamingResponder
 
         connector = MockConnector(support_streaming=True)
         responder = _StreamingResponder(connector, "chat1", throttle_seconds=0)
@@ -217,8 +217,8 @@ class TestActivityCleanup:
 
     @pytest.mark.asyncio
     async def test_deactivate_without_prior_activity_no_error(self):
+        from leashd.core.engine import _StreamingResponder
         from tests.conftest import MockConnector
-        from tether.core.engine import _StreamingResponder
 
         connector = MockConnector(support_streaming=True)
         responder = _StreamingResponder(connector, "chat1", throttle_seconds=0)

@@ -383,7 +383,7 @@ class GitService:
             return 1, "", f"Directory does not exist: {cwd}"
 
         cmd = ("git", *args)
-        logger.debug("git_exec", command=cmd, cwd=str(cwd))
+        logger.info("git_exec", command=cmd, cwd=str(cwd))
 
         try:
             proc = await asyncio.create_subprocess_exec(

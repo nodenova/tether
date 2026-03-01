@@ -1249,6 +1249,95 @@ class TestSendPlanReviewLongContent:
         assert "123" in connector._plan_message_ids
         assert len(connector._plan_message_ids["123"]) >= 2  # plan msg + review msg
 
+    @pytest.mark.asyncio
+    async def test_fallback_inline_plan_when_send_plan_messages_fails(self, connector):
+        mock_app = _make_mock_app()
+        connector._app = mock_app
+
+        button_msg = MagicMock()
+        button_msg.message_id = 99
+
+        # Patch send_plan_messages to return empty (simulates network failure)
+        connector.send_plan_messages = AsyncMock(return_value=[])
+        mock_app.bot.send_message.return_value = button_msg
+
+        await connector.send_plan_review("123", "abc-123", "My plan content")
+
+        # Button message should include the plan content as fallback
+        last_call = mock_app.bot.send_message.await_args_list[-1]
+        text = last_call.kwargs.get("text", "")
+        assert "My plan content" in text
+        assert "Proceed with implementation?" in text
+
+    @pytest.mark.asyncio
+    async def test_clears_activity_before_sending_plan(self, connector):
+        mock_app = _make_mock_app()
+        connector._app = mock_app
+        mock_msg = MagicMock()
+        mock_msg.message_id = 1
+        mock_app.bot.send_message.return_value = mock_msg
+
+        # Simulate existing activity message with numeric ID
+        connector._activity_message_id["123"] = "42"
+        connector._activity_last_text["123"] = "old"
+
+        await connector.send_plan_review("123", "abc-123", "Plan")
+
+        # Activity should be cleared (delete_message called for activity msg)
+        mock_app.bot.delete_message.assert_awaited_once_with(chat_id=123, message_id=42)
+        assert "123" not in connector._activity_message_id
+
+    @pytest.mark.asyncio
+    async def test_empty_description_uses_generic_header(self, connector):
+        mock_app = _make_mock_app()
+        connector._app = mock_app
+        mock_msg = MagicMock()
+        mock_msg.message_id = 1
+        mock_app.bot.send_message.return_value = mock_msg
+
+        await connector.send_plan_review("123", "abc-123", "")
+
+        last_call = mock_app.bot.send_message.await_args_list[-1]
+        text = last_call.kwargs.get("text", "")
+        assert "Proceed with implementation?" in text
+        assert last_call.kwargs["reply_markup"] is not None
+
+    @pytest.mark.asyncio
+    async def test_inline_fallback_exact_boundary_no_truncation(self, connector):
+        mock_app = _make_mock_app()
+        connector._app = mock_app
+        button_msg = MagicMock()
+        button_msg.message_id = 99
+        connector.send_plan_messages = AsyncMock(return_value=[])
+        mock_app.bot.send_message.return_value = button_msg
+
+        desc = "x" * (_MAX_MESSAGE_LENGTH - 200)  # exactly 3800
+        await connector.send_plan_review("123", "abc-123", desc)
+
+        last_call = mock_app.bot.send_message.await_args_list[-1]
+        text = last_call.kwargs.get("text", "")
+        assert "... (truncated)" not in text
+        assert "Proceed with implementation?" in text
+
+    @pytest.mark.asyncio
+    async def test_inline_fallback_over_boundary_adds_truncation_marker(
+        self, connector
+    ):
+        mock_app = _make_mock_app()
+        connector._app = mock_app
+        button_msg = MagicMock()
+        button_msg.message_id = 99
+        connector.send_plan_messages = AsyncMock(return_value=[])
+        mock_app.bot.send_message.return_value = button_msg
+
+        desc = "x" * (_MAX_MESSAGE_LENGTH - 200 + 1)  # 3801
+        await connector.send_plan_review("123", "abc-123", desc)
+
+        last_call = mock_app.bot.send_message.await_args_list[-1]
+        text = last_call.kwargs.get("text", "")
+        assert "... (truncated)" in text
+        assert "Proceed with implementation?" in text
+
 
 # --- Retry helper tests ---
 
@@ -1652,19 +1741,19 @@ class TestSendActivity:
         mock_app = _make_mock_app()
         connector._app = mock_app
         connector._activity_message_id["123"] = "50"
-        connector._activity_last_text["123"] = "\u23f3 Running: Old task"
+        connector._activity_last_text["123"] = "⏳ Running: Old task"
 
         msg_id = await connector.send_activity("123", "Write", "New task")
         assert msg_id == "50"
         mock_app.bot.edit_message_text.assert_awaited_once()
-        assert connector._activity_last_text["123"] == "\u23f3 Running: New task"
+        assert connector._activity_last_text["123"] == "✏️ Editing: New task"
 
     @pytest.mark.asyncio
     async def test_skips_edit_when_text_unchanged(self, connector):
         mock_app = _make_mock_app()
         connector._app = mock_app
         connector._activity_message_id["123"] = "50"
-        connector._activity_last_text["123"] = "\u23f3 Running: Same task"
+        connector._activity_last_text["123"] = "🔍 Searching: Same task"
 
         msg_id = await connector.send_activity("123", "Read", "Same task")
         assert msg_id == "50"
@@ -1676,6 +1765,37 @@ class TestSendActivity:
         result = await connector.send_activity("123", "Read", "desc")
         assert result is None
 
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("tool_name", "description", "expected_prefix"),
+        [
+            ("Bash", "npm install", "⚡ Running:"),
+            ("Bash", "ls -la /project", "🔍 Searching:"),
+            ("Bash", "find /project -name '*.py'", "🔍 Searching:"),
+            ("Bash", "git log --oneline -20", "🔍 Searching:"),
+            ("Bash", "git status", "🔍 Searching:"),
+            ("Bash", "cat file.py", "🔍 Searching:"),
+            ("Bash", "tree /project -L 2", "🔍 Searching:"),
+            ("Read", "/path/to/file", "🔍 Searching:"),
+            ("Write", "/path/to/file", "✏️ Editing:"),
+            ("EnterPlanMode", "Entering plan mode", "🧠 Thinking:"),
+            ("mcp__playwright__browser_click", "Click button", "🌐 Browsing:"),
+            ("Agent", "Explore project structure", "🔍 Searching:"),
+            ("Agent", "Design implementation plan", "🧠 Thinking:"),
+            ("UnknownTool", "something", "⏳ Running:"),
+        ],
+    )
+    async def test_activity_label_per_tool_category(
+        self, connector, tool_name, description, expected_prefix
+    ):
+        mock_app = _make_mock_app()
+        mock_app.bot.send_message = AsyncMock(return_value=MagicMock(message_id=99))
+        connector._app = mock_app
+
+        await connector.send_activity("123", tool_name, description)
+        sent_text = mock_app.bot.send_message.call_args[1]["text"]
+        assert sent_text.startswith(expected_prefix)
+
 
 class TestClearActivity:
     @pytest.mark.asyncio
@@ -1683,7 +1803,7 @@ class TestClearActivity:
         mock_app = _make_mock_app()
         connector._app = mock_app
         connector._activity_message_id["123"] = "50"
-        connector._activity_last_text["123"] = "\u23f3 Running: task"
+        connector._activity_last_text["123"] = "⏳ Running: task"
 
         await connector.clear_activity("123")
         assert "123" not in connector._activity_message_id
@@ -1697,6 +1817,22 @@ class TestClearActivity:
 
         await connector.clear_activity("123")
         mock_app.bot.delete_message.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_double_clear_is_safe(self, connector):
+        mock_app = _make_mock_app()
+        connector._app = mock_app
+        connector._activity_message_id["123"] = "50"
+        connector._activity_last_text["123"] = "⏳ Running: task"
+
+        # First clear — pops msg_id "50", calls delete_message
+        await connector.clear_activity("123")
+        assert "123" not in connector._activity_message_id
+        mock_app.bot.delete_message.assert_awaited_once()
+
+        # Second clear — pop returns None, delete_message NOT called again
+        await connector.clear_activity("123")
+        assert mock_app.bot.delete_message.await_count == 1
 
 
 # --- B3: Question messages ---
@@ -1784,6 +1920,7 @@ class TestPlanReviewInteractionCallback:
     @pytest.fixture
     def resolved_connector(self, connector):
         mock_app = _make_mock_app()
+        mock_app.bot.send_message.return_value = MagicMock(message_id=500)
         connector._app = mock_app
         resolver = AsyncMock(return_value=True)
         connector.set_interaction_resolver(resolver)
@@ -1794,43 +1931,193 @@ class TestPlanReviewInteractionCallback:
     async def test_clean_edit_deletes_all_plan_messages(self, resolved_connector):
         update = _make_callback_update("interact:int-1:clean_edit")
         update.callback_query.message.chat_id = 999
+        update.callback_query.message.message_id = 12
         with patch.object(
-            resolved_connector, "delete_messages", new_callable=AsyncMock
+            resolved_connector, "delete_message", new_callable=AsyncMock
         ) as mock_del:
             await resolved_connector._on_callback_query(update, MagicMock())
-            mock_del.assert_awaited_once()
-            call_args = mock_del.call_args
-            assert "10" in call_args[0][1]
+            deleted_ids = [call[0][1] for call in mock_del.call_args_list]
+            assert "10" in deleted_ids
+            assert "11" in deleted_ids
+            assert "12" in deleted_ids
 
     @pytest.mark.asyncio
     async def test_edit_deletes_all_plan_messages(self, resolved_connector):
         update = _make_callback_update("interact:int-2:edit")
         update.callback_query.message.chat_id = 999
+        update.callback_query.message.message_id = 12
         with patch.object(
-            resolved_connector, "delete_messages", new_callable=AsyncMock
+            resolved_connector, "delete_message", new_callable=AsyncMock
         ) as mock_del:
             await resolved_connector._on_callback_query(update, MagicMock())
-            mock_del.assert_awaited_once()
+            deleted_ids = [call[0][1] for call in mock_del.call_args_list]
+            assert "10" in deleted_ids
+            assert "11" in deleted_ids
+            assert "12" in deleted_ids
 
     @pytest.mark.asyncio
     async def test_default_deletes_all_plan_messages(self, resolved_connector):
         update = _make_callback_update("interact:int-3:default")
         update.callback_query.message.chat_id = 999
+        update.callback_query.message.message_id = 12
         with patch.object(
-            resolved_connector, "delete_messages", new_callable=AsyncMock
+            resolved_connector, "delete_message", new_callable=AsyncMock
         ) as mock_del:
             await resolved_connector._on_callback_query(update, MagicMock())
-            mock_del.assert_awaited_once()
+            deleted_ids = [call[0][1] for call in mock_del.call_args_list]
+            assert "10" in deleted_ids
+            assert "11" in deleted_ids
+            assert "12" in deleted_ids
 
     @pytest.mark.asyncio
     async def test_adjust_deletes_all_plan_messages(self, resolved_connector):
         update = _make_callback_update("interact:int-4:adjust")
         update.callback_query.message.chat_id = 999
+        update.callback_query.message.message_id = 12
         with patch.object(
-            resolved_connector, "delete_messages", new_callable=AsyncMock
+            resolved_connector, "delete_message", new_callable=AsyncMock
         ) as mock_del:
             await resolved_connector._on_callback_query(update, MagicMock())
-            mock_del.assert_awaited_once()
+            deleted_ids = [call[0][1] for call in mock_del.call_args_list]
+            assert "10" in deleted_ids
+            assert "11" in deleted_ids
+            assert "12" in deleted_ids
+
+    @pytest.mark.asyncio
+    async def test_plan_review_sends_ack_for_proceed(self, resolved_connector):
+        """Non-adjust answers send an ack message and schedule cleanup."""
+        update = _make_callback_update("interact:int-5:edit")
+        update.callback_query.message.chat_id = 999
+        update.callback_query.message.message_id = 12
+        with patch.object(
+            resolved_connector, "schedule_message_cleanup"
+        ) as mock_cleanup:
+            await resolved_connector._on_callback_query(update, MagicMock())
+            mock_cleanup.assert_called_once_with("999", "500")
+
+    @pytest.mark.asyncio
+    async def test_plan_review_adjust_no_ack(self, resolved_connector):
+        """Adjust answer should not send an ack message."""
+        update = _make_callback_update("interact:int-6:adjust")
+        update.callback_query.message.chat_id = 999
+        update.callback_query.message.message_id = 12
+        with patch.object(
+            resolved_connector, "send_message_with_id", new_callable=AsyncMock
+        ) as mock_send:
+            await resolved_connector._on_callback_query(update, MagicMock())
+            mock_send.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_plan_review_empty_plan_ids_only_deletes_button(self, connector):
+        """Empty plan_ids list -> only the button message is deleted."""
+        mock_app = _make_mock_app()
+        mock_app.bot.send_message.return_value = MagicMock(message_id=500)
+        connector._app = mock_app
+        resolver = AsyncMock(return_value=True)
+        connector.set_interaction_resolver(resolver)
+        connector._plan_message_ids["999"] = []
+
+        update = _make_callback_update("interact:int-7:edit")
+        update.callback_query.message.chat_id = 999
+        update.callback_query.message.message_id = 50
+
+        with patch.object(
+            connector, "delete_message", new_callable=AsyncMock
+        ) as mock_del:
+            await connector._on_callback_query(update, MagicMock())
+            mock_del.assert_awaited_once_with("999", "50")
+
+    @pytest.mark.asyncio
+    async def test_plan_review_no_plan_ids_entry_only_deletes_button(self, connector):
+        """No plan_ids entry for chat -> pop returns [], only button deleted."""
+        mock_app = _make_mock_app()
+        mock_app.bot.send_message.return_value = MagicMock(message_id=500)
+        connector._app = mock_app
+        resolver = AsyncMock(return_value=True)
+        connector.set_interaction_resolver(resolver)
+        # Don't set _plan_message_ids for this chat
+
+        update = _make_callback_update("interact:int-8:clean_edit")
+        update.callback_query.message.chat_id = 999
+        update.callback_query.message.message_id = 50
+
+        with patch.object(
+            connector, "delete_message", new_callable=AsyncMock
+        ) as mock_del:
+            await connector._on_callback_query(update, MagicMock())
+            mock_del.assert_awaited_once_with("999", "50")
+
+    @pytest.mark.asyncio
+    async def test_plan_review_button_in_plan_ids_deleted_once(self, connector):
+        """Button message ID in plan_ids -> filtered in loop, deleted after. Exactly once."""
+        mock_app = _make_mock_app()
+        mock_app.bot.send_message.return_value = MagicMock(message_id=500)
+        connector._app = mock_app
+        resolver = AsyncMock(return_value=True)
+        connector.set_interaction_resolver(resolver)
+        connector._plan_message_ids["999"] = ["10", "12", "11"]
+
+        update = _make_callback_update("interact:int-9:default")
+        update.callback_query.message.chat_id = 999
+        update.callback_query.message.message_id = 12
+
+        with patch.object(
+            connector, "delete_message", new_callable=AsyncMock
+        ) as mock_del:
+            await connector._on_callback_query(update, MagicMock())
+            deleted_ids = [call[0][1] for call in mock_del.call_args_list]
+            assert "10" in deleted_ids
+            assert "11" in deleted_ids
+            assert "12" in deleted_ids
+            assert deleted_ids.count("12") == 1
+
+    @pytest.mark.asyncio
+    async def test_plan_review_ack_send_fails_no_cleanup_scheduled(self, connector):
+        """send_message_with_id returns None -> schedule_message_cleanup not called."""
+        mock_app = _make_mock_app()
+        connector._app = mock_app
+        resolver = AsyncMock(return_value=True)
+        connector.set_interaction_resolver(resolver)
+        connector._plan_message_ids["999"] = []
+
+        update = _make_callback_update("interact:int-10:edit")
+        update.callback_query.message.chat_id = 999
+        update.callback_query.message.message_id = 50
+
+        with (
+            patch.object(
+                connector,
+                "send_message_with_id",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+            patch.object(connector, "schedule_message_cleanup") as mock_cleanup,
+            patch.object(connector, "delete_message", new_callable=AsyncMock),
+        ):
+            await connector._on_callback_query(update, MagicMock())
+            mock_cleanup.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_expired_plan_review_no_deletion(self, connector):
+        """Resolver returns False -> returns before cleanup. Plan messages intact."""
+        mock_app = _make_mock_app()
+        connector._app = mock_app
+        resolver = AsyncMock(return_value=False)
+        connector.set_interaction_resolver(resolver)
+        connector._plan_message_ids["999"] = ["10", "11", "12"]
+
+        update = _make_callback_update("interact:int-11:edit")
+        update.callback_query.message.chat_id = 999
+        update.callback_query.message.message_id = 50
+
+        with patch.object(
+            connector, "delete_message", new_callable=AsyncMock
+        ) as mock_del:
+            await connector._on_callback_query(update, MagicMock())
+            mock_del.assert_not_awaited()
+            edited = update.callback_query.edit_message_text.call_args[0][0]
+            assert "Expired" in edited
+            assert connector._plan_message_ids["999"] == ["10", "11", "12"]
 
 
 # --- B5: Git callbacks ---
@@ -1877,6 +2164,88 @@ class TestGitCallback:
         await connector._on_callback_query(update, MagicMock())
         handler.assert_awaited_once_with("42", "99", "push", "origin/main")
 
+    @pytest.mark.asyncio
+    async def test_git_callback_deletes_original_message(self, connector):
+        mock_app = _make_mock_app()
+        connector._app = mock_app
+        handler = AsyncMock()
+        connector.set_git_handler(handler)
+
+        update = _make_callback_update("git:push:main")
+        update.callback_query.from_user = MagicMock(id=42)
+        update.callback_query.message = MagicMock(spec=Message, chat_id=99)
+        update.callback_query.message.message_id = 555
+
+        with patch.object(
+            connector, "delete_message", new_callable=AsyncMock
+        ) as mock_del:
+            # Verify delete is called before handler by checking inside handler
+            async def _assert_already_deleted(*args, **kwargs):
+                assert mock_del.await_count > 0, (
+                    "delete_message should be called before handler"
+                )
+
+            handler.side_effect = _assert_already_deleted
+            await connector._on_callback_query(update, MagicMock())
+            mock_del.assert_awaited_once_with("99", "555")
+
+    @pytest.mark.asyncio
+    async def test_git_handler_exception_still_deletes_message(self, connector):
+        """Handler raises RuntimeError -> message is still deleted."""
+        mock_app = _make_mock_app()
+        connector._app = mock_app
+        handler = AsyncMock(side_effect=RuntimeError("boom"))
+        connector.set_git_handler(handler)
+
+        update = _make_callback_update("git:push:main")
+        update.callback_query.from_user = MagicMock(id=42)
+        update.callback_query.message = MagicMock(spec=Message, chat_id=99)
+        update.callback_query.message.message_id = 555
+
+        with patch.object(
+            connector, "delete_message", new_callable=AsyncMock
+        ) as mock_del:
+            await connector._on_callback_query(update, MagicMock())
+            mock_del.assert_awaited_once_with("99", "555")
+
+    @pytest.mark.asyncio
+    async def test_git_callback_non_message_query_no_delete(self, connector):
+        """query.message is not a Message instance -> early return, no delete."""
+        mock_app = _make_mock_app()
+        connector._app = mock_app
+        handler = AsyncMock()
+        connector.set_git_handler(handler)
+
+        update = _make_callback_update("git:push:main")
+        update.callback_query.from_user = MagicMock(id=42)
+        # Not spec=Message, so isinstance check fails
+        update.callback_query.message = MagicMock()
+
+        with patch.object(
+            connector, "delete_message", new_callable=AsyncMock
+        ) as mock_del:
+            await connector._on_callback_query(update, MagicMock())
+            handler.assert_not_awaited()
+            mock_del.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_git_callback_no_handler_no_delete(self, connector):
+        """No git handler registered -> returns before delete block."""
+        mock_app = _make_mock_app()
+        connector._app = mock_app
+        # Don't call set_git_handler
+
+        update = _make_callback_update("git:push:main")
+        update.callback_query.from_user = MagicMock(id=42)
+        update.callback_query.message = MagicMock(spec=Message, chat_id=99)
+        update.callback_query.message.message_id = 555
+
+        with patch.object(
+            connector, "delete_message", new_callable=AsyncMock
+        ) as mock_del:
+            await connector._on_callback_query(update, MagicMock())
+            mock_del.assert_not_awaited()
+
 
 # --- B6: Edge cases ---
 
@@ -1921,7 +2290,7 @@ class TestCallbackEdgeCases:
         await connector._on_callback_query(update, MagicMock())
 
     @pytest.mark.asyncio
-    async def test_expired_approval_message_not_scheduled_for_cleanup(self, connector):
+    async def test_expired_approval_message_scheduled_for_cleanup(self, connector):
         mock_app = _make_mock_app()
         connector._app = mock_app
         resolver = AsyncMock(return_value=False)
@@ -1930,7 +2299,7 @@ class TestCallbackEdgeCases:
         update = _make_callback_update("approval:yes:abc-3")
         with patch.object(connector, "schedule_message_cleanup") as mock_cleanup:
             await connector._on_callback_query(update, MagicMock())
-            mock_cleanup.assert_not_called()
+            mock_cleanup.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_interaction_callback_expired_edits_message(self, connector):
@@ -1978,7 +2347,7 @@ class TestDirCallback:
         )
 
     @pytest.mark.asyncio
-    async def test_schedules_cleanup_after_edit(self, connector):
+    async def test_does_not_schedule_cleanup_after_edit(self, connector):
         mock_app = _make_mock_app()
         connector._app = mock_app
         handler = AsyncMock(return_value="Switched to api")
@@ -1991,7 +2360,7 @@ class TestDirCallback:
 
         with patch.object(connector, "schedule_message_cleanup") as mock_cleanup:
             await connector._on_callback_query(update, MagicMock())
-            mock_cleanup.assert_called_once_with("99", "555")
+            mock_cleanup.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_no_command_handler_is_noop(self, connector):
@@ -2017,3 +2386,225 @@ class TestDirCallback:
 
         await connector._on_callback_query(update, MagicMock())
         update.callback_query.edit_message_text.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_empty_dir_name_early_return(self, connector):
+        mock_app = _make_mock_app()
+        connector._app = mock_app
+        handler = AsyncMock(return_value="Switched")
+        connector.set_command_handler(handler)
+
+        update = _make_callback_update("dir:")
+        update.callback_query.from_user = MagicMock(id=42)
+        update.callback_query.message = MagicMock(spec=Message, chat_id=99)
+
+        await connector._on_callback_query(update, MagicMock())
+        handler.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_from_user_none_early_return(self, connector):
+        mock_app = _make_mock_app()
+        connector._app = mock_app
+        handler = AsyncMock(return_value="Switched")
+        connector.set_command_handler(handler)
+
+        update = _make_callback_update("dir:api")
+        update.callback_query.from_user = None
+        update.callback_query.message = MagicMock(spec=Message, chat_id=99)
+
+        await connector._on_callback_query(update, MagicMock())
+        handler.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_non_message_query_early_return(self, connector):
+        mock_app = _make_mock_app()
+        connector._app = mock_app
+        handler = AsyncMock(return_value="Switched")
+        connector.set_command_handler(handler)
+
+        update = _make_callback_update("dir:api")
+        update.callback_query.from_user = MagicMock(id=42)
+        update.callback_query.message = MagicMock()  # no spec=Message
+
+        await connector._on_callback_query(update, MagicMock())
+        handler.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_handler_exception_does_not_crash(self, connector):
+        mock_app = _make_mock_app()
+        connector._app = mock_app
+        handler = AsyncMock(side_effect=RuntimeError("database connection lost"))
+        connector.set_command_handler(handler)
+
+        update = _make_callback_update("dir:api")
+        update.callback_query.from_user = MagicMock(id=42)
+        update.callback_query.message = MagicMock(spec=Message, chat_id=99)
+
+        await connector._on_callback_query(update, MagicMock())
+        handler.assert_awaited_once()
+        update.callback_query.edit_message_text.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_edit_message_exception_does_not_crash(self, connector):
+        mock_app = _make_mock_app()
+        connector._app = mock_app
+        handler = AsyncMock(return_value="Switched to api")
+        connector.set_command_handler(handler)
+
+        update = _make_callback_update("dir:api")
+        update.callback_query.from_user = MagicMock(id=42)
+        update.callback_query.message = MagicMock(spec=Message, chat_id=99)
+        update.callback_query.edit_message_text = AsyncMock(
+            side_effect=RuntimeError("Bad Request: message is not modified")
+        )
+
+        await connector._on_callback_query(update, MagicMock())
+        handler.assert_awaited_once()
+
+
+class TestWsCallback:
+    @pytest.mark.asyncio
+    async def test_routes_to_command_handler(self, connector):
+        mock_app = _make_mock_app()
+        connector._app = mock_app
+        handler = AsyncMock(return_value="Workspace 'vb' active")
+        connector.set_command_handler(handler)
+
+        update = _make_callback_update("ws:vb")
+        update.callback_query.from_user = MagicMock(id=42)
+        update.callback_query.message = MagicMock(spec=Message, chat_id=99)
+
+        await connector._on_callback_query(update, MagicMock())
+        handler.assert_awaited_once_with("42", "workspace", "vb", "99")
+
+    @pytest.mark.asyncio
+    async def test_edits_message_with_result(self, connector):
+        mock_app = _make_mock_app()
+        connector._app = mock_app
+        handler = AsyncMock(return_value="Workspace 'vb' active — primary: /tmp/api")
+        connector.set_command_handler(handler)
+
+        update = _make_callback_update("ws:vb")
+        update.callback_query.from_user = MagicMock(id=42)
+        update.callback_query.message = MagicMock(spec=Message, chat_id=99)
+        update.callback_query.message.message_id = 555
+
+        await connector._on_callback_query(update, MagicMock())
+        update.callback_query.edit_message_text.assert_awaited_once_with(
+            "Workspace 'vb' active — primary: /tmp/api"
+        )
+
+    @pytest.mark.asyncio
+    async def test_does_not_schedule_cleanup(self, connector):
+        mock_app = _make_mock_app()
+        connector._app = mock_app
+        handler = AsyncMock(return_value="Workspace 'vb' active")
+        connector.set_command_handler(handler)
+
+        update = _make_callback_update("ws:vb")
+        update.callback_query.from_user = MagicMock(id=42)
+        update.callback_query.message = MagicMock(spec=Message, chat_id=99)
+        update.callback_query.message.message_id = 555
+
+        with patch.object(connector, "schedule_message_cleanup") as mock_cleanup:
+            await connector._on_callback_query(update, MagicMock())
+            mock_cleanup.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_no_command_handler_is_noop(self, connector):
+        mock_app = _make_mock_app()
+        connector._app = mock_app
+
+        update = _make_callback_update("ws:vb")
+        update.callback_query.from_user = MagicMock(id=42)
+        update.callback_query.message = MagicMock(spec=Message, chat_id=99)
+
+        await connector._on_callback_query(update, MagicMock())
+
+    @pytest.mark.asyncio
+    async def test_empty_result_does_not_edit(self, connector):
+        mock_app = _make_mock_app()
+        connector._app = mock_app
+        handler = AsyncMock(return_value="")
+        connector.set_command_handler(handler)
+
+        update = _make_callback_update("ws:vb")
+        update.callback_query.from_user = MagicMock(id=42)
+        update.callback_query.message = MagicMock(spec=Message, chat_id=99)
+
+        await connector._on_callback_query(update, MagicMock())
+        update.callback_query.edit_message_text.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_empty_ws_name_early_return(self, connector):
+        mock_app = _make_mock_app()
+        connector._app = mock_app
+        handler = AsyncMock(return_value="Workspace active")
+        connector.set_command_handler(handler)
+
+        update = _make_callback_update("ws:")
+        update.callback_query.from_user = MagicMock(id=42)
+        update.callback_query.message = MagicMock(spec=Message, chat_id=99)
+
+        await connector._on_callback_query(update, MagicMock())
+        handler.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_from_user_none_early_return(self, connector):
+        mock_app = _make_mock_app()
+        connector._app = mock_app
+        handler = AsyncMock(return_value="Workspace active")
+        connector.set_command_handler(handler)
+
+        update = _make_callback_update("ws:vb")
+        update.callback_query.from_user = None
+        update.callback_query.message = MagicMock(spec=Message, chat_id=99)
+
+        await connector._on_callback_query(update, MagicMock())
+        handler.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_non_message_query_early_return(self, connector):
+        mock_app = _make_mock_app()
+        connector._app = mock_app
+        handler = AsyncMock(return_value="Workspace active")
+        connector.set_command_handler(handler)
+
+        update = _make_callback_update("ws:vb")
+        update.callback_query.from_user = MagicMock(id=42)
+        update.callback_query.message = MagicMock()  # no spec=Message
+
+        await connector._on_callback_query(update, MagicMock())
+        handler.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_handler_exception_does_not_crash(self, connector):
+        mock_app = _make_mock_app()
+        connector._app = mock_app
+        handler = AsyncMock(side_effect=RuntimeError("database connection lost"))
+        connector.set_command_handler(handler)
+
+        update = _make_callback_update("ws:vb")
+        update.callback_query.from_user = MagicMock(id=42)
+        update.callback_query.message = MagicMock(spec=Message, chat_id=99)
+
+        await connector._on_callback_query(update, MagicMock())
+        handler.assert_awaited_once()
+        update.callback_query.edit_message_text.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_edit_message_exception_does_not_crash(self, connector):
+        mock_app = _make_mock_app()
+        connector._app = mock_app
+        handler = AsyncMock(return_value="Workspace 'vb' active")
+        connector.set_command_handler(handler)
+
+        update = _make_callback_update("ws:vb")
+        update.callback_query.from_user = MagicMock(id=42)
+        update.callback_query.message = MagicMock(spec=Message, chat_id=99)
+        update.callback_query.edit_message_text = AsyncMock(
+            side_effect=RuntimeError("Bad Request: message is not modified")
+        )
+
+        await connector._on_callback_query(update, MagicMock())
+        handler.assert_awaited_once()

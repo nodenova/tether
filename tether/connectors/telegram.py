@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from collections.abc import Callable, Coroutine
 from datetime import timedelta
 from pathlib import Path
@@ -43,6 +44,7 @@ _INTERACTION_CLEANUP_DELAY = (
 )
 _GIT_PREFIX = "git:"
 _DIR_PREFIX = "dir:"
+_WS_PREFIX = "ws:"
 _INTERRUPT_PREFIX = "interrupt:"
 
 _STARTUP_MAX_RETRIES = 5
@@ -51,6 +53,53 @@ _STARTUP_MAX_DELAY = 60.0
 _SEND_MAX_RETRIES = 3
 _SEND_BASE_DELAY = 1.0
 _SEND_MAX_DELAY = 10.0
+
+
+_SEARCH_TOOLS = frozenset(
+    {"Read", "Glob", "Grep", "WebFetch", "WebSearch", "TaskGet", "TaskList"}
+)
+_EDIT_TOOLS = frozenset({"Write", "Edit", "NotebookEdit"})
+_THINK_TOOLS = frozenset(
+    {
+        "EnterPlanMode",
+        "ExitPlanMode",
+        "plan",
+        "AskUserQuestion",
+        "TodoWrite",
+        "TaskCreate",
+        "TaskUpdate",
+    }
+)
+
+
+_BASH_SEARCH_RE = re.compile(
+    r"^(ls|cat|head|tail|find|grep|rg|wc|du|df|pwd|echo|date|whoami|which|type|file|stat|tree)\b"
+)
+_BASH_GIT_READ_RE = re.compile(
+    r"^git\s+(.+\s+)?(status|log|diff|show|branch|remote|tag)\b"
+)
+
+
+def _activity_label(tool_name: str, description: str = "") -> tuple[str, str]:
+    """Return (emoji, verb) for a tool's activity message."""
+    if tool_name == "Bash":
+        if _BASH_SEARCH_RE.search(description) or _BASH_GIT_READ_RE.search(description):
+            return ("🔍", "Searching")
+        return ("⚡", "Running")
+    if tool_name in _EDIT_TOOLS:
+        return ("✏️", "Editing")
+    if tool_name in _SEARCH_TOOLS:
+        return ("🔍", "Searching")
+    if tool_name in _THINK_TOOLS:
+        return ("🧠", "Thinking")
+    if tool_name.startswith(("mcp__playwright__", "browser_")):
+        return ("🌐", "Browsing")
+    if tool_name == "Agent":
+        lowered = description.lower()
+        if any(w in lowered for w in ("plan", "design", "architect")):
+            return ("🧠", "Thinking")
+        return ("🔍", "Searching")
+    return ("⏳", "Running")
 
 
 def _truncate_callback_data(data: str) -> str:
@@ -129,7 +178,18 @@ class TelegramConnector(BaseConnector):
         )
         self._app.add_handler(
             CommandHandler(
-                ["plan", "edit", "default", "status", "clear", "dir", "git", "test"],
+                [
+                    "plan",
+                    "edit",
+                    "default",
+                    "status",
+                    "clear",
+                    "dir",
+                    "git",
+                    "test",
+                    "workspace",
+                    "ws",
+                ],
                 self._on_command,
             )
         )
@@ -275,12 +335,13 @@ class TelegramConnector(BaseConnector):
     async def send_activity(
         self,
         chat_id: str,
-        tool_name: str,  # noqa: ARG002
+        tool_name: str,
         description: str,
     ) -> str | None:
         if self._app is None:
             return None
-        text = f"\u23f3 Running: {description}"
+        emoji, verb = _activity_label(tool_name, description)
+        text = f"{emoji} {verb}: {description}"
         existing = self._activity_message_id.get(chat_id)
         if existing:
             if self._activity_last_text.get(chat_id) == text:
@@ -513,7 +574,17 @@ class TelegramConnector(BaseConnector):
             description_length=len(description),
             will_split=len(description) > _MAX_MESSAGE_LENGTH,
         )
+        await self.clear_activity(chat_id)
         plan_ids = await self.send_plan_messages(chat_id, description)
+
+        if not plan_ids and description:
+            max_inline = _MAX_MESSAGE_LENGTH - 200
+            truncated = description[:max_inline]
+            if len(description) > max_inline:
+                truncated += "\n\n... (truncated)"
+            review_header = f"{truncated}\n\n---\nProceed with implementation?"
+        else:
+            review_header = "Claude has written up a plan. Proceed with implementation?"
 
         buttons = [
             [
@@ -549,7 +620,6 @@ class TelegramConnector(BaseConnector):
                 ),
             ],
         ]
-        review_header = "Claude has written up a plan. Proceed with implementation?"
         review_msg_id = await self._send_message_with_id_and_buttons(
             chat_id, review_header, buttons
         )
@@ -639,6 +709,10 @@ class TelegramConnector(BaseConnector):
             await self._handle_dir_callback(query, data)
             return
 
+        if data.startswith(_WS_PREFIX):
+            await self._handle_ws_callback(query, data)
+            return
+
         if data.startswith(_INTERACTION_PREFIX):
             await self._handle_interaction_callback(query, data)
             return
@@ -710,10 +784,9 @@ class TelegramConnector(BaseConnector):
         try:
             raw = f"{query.message.text}\n\n{status}"
             await query.edit_message_text(raw)
-            if resolved:
-                chat_id = str(query.message.chat_id)
-                msg_id = str(query.message.message_id)
-                self.schedule_message_cleanup(chat_id, msg_id)
+            chat_id = str(query.message.chat_id)
+            msg_id = str(query.message.message_id)
+            self.schedule_message_cleanup(chat_id, msg_id)
         except Exception:
             logger.exception("telegram_edit_approval_message_failed")
 
@@ -760,8 +833,19 @@ class TelegramConnector(BaseConnector):
         is_plan_review = answer in ("clean_edit", "edit", "default", "adjust")
         if is_plan_review:
             plan_ids = self._plan_message_ids.pop(chat_id, [])
-            if plan_ids:
-                await self.delete_messages(chat_id, plan_ids)
+            button_msg_id = str(query.message.message_id)
+
+            for pid in plan_ids:
+                if pid != button_msg_id:
+                    await self.delete_message(chat_id, pid)
+
+            await self.delete_message(chat_id, button_msg_id)
+
+            if answer != "adjust":
+                ack = "\u2713 Proceeding with implementation..."
+                ack_id = await self.send_message_with_id(chat_id, ack)
+                if ack_id:
+                    self.schedule_message_cleanup(chat_id, ack_id)
         else:
             msg_id = self._question_message_ids.pop(chat_id, None)
             if msg_id:
@@ -834,6 +918,10 @@ class TelegramConnector(BaseConnector):
         if not user_id or not chat_id:
             return
 
+        if isinstance(query.message, Message):
+            msg_id = str(query.message.message_id)
+            await self.delete_message(chat_id, msg_id)
+
         try:
             await self._git_handler(user_id, chat_id, action, payload)
         except Exception:
@@ -857,10 +945,29 @@ class TelegramConnector(BaseConnector):
             result = await self._command_handler(user_id, "dir", dir_name, chat_id)
             if isinstance(query.message, Message) and result:
                 await query.edit_message_text(result)
-                msg_id = str(query.message.message_id)
-                self.schedule_message_cleanup(chat_id, msg_id)
         except Exception:
             logger.exception("telegram_dir_callback_error", chat_id=chat_id)
+
+    async def _handle_ws_callback(self, query: CallbackQuery, data: str) -> None:
+        """Route workspace switch button callbacks to the command handler."""
+        ws_name = data[len(_WS_PREFIX) :]
+        if not ws_name or not self._command_handler:
+            return
+
+        user_id = str(query.from_user.id) if query.from_user else ""
+        chat_id = (
+            str(query.message.chat_id) if isinstance(query.message, Message) else ""
+        )
+
+        if not user_id or not chat_id:
+            return
+
+        try:
+            result = await self._command_handler(user_id, "workspace", ws_name, chat_id)
+            if isinstance(query.message, Message) and result:
+                await query.edit_message_text(result)
+        except Exception:
+            logger.exception("telegram_ws_callback_error", chat_id=chat_id)
 
     async def _on_error(
         self, update: object, context: ContextTypes.DEFAULT_TYPE

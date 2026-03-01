@@ -246,6 +246,7 @@ class TestSqliteEdgeCases:
                 message_count=42,
                 total_cost=9.99,
                 is_active=True,
+                workspace_name="myws",
             )
             await store.save(session)
             loaded = await store.load("full-u1", "full-c1")
@@ -255,6 +256,36 @@ class TestSqliteEdgeCases:
             assert loaded.message_count == 42
             assert loaded.total_cost == pytest.approx(9.99)
             assert loaded.is_active is True
+            assert loaded.workspace_name == "myws"
+            assert loaded.workspace_directories == []
+        finally:
+            await store.teardown()
+
+
+class TestSqliteWorkspacePersistence:
+    @pytest.mark.asyncio
+    async def test_workspace_name_round_trip(self, tmp_path):
+        store = SqliteSessionStore(tmp_path / "test.db")
+        await store.setup()
+        try:
+            session = _make_session(workspace_name="fullstack")
+            await store.save(session)
+            loaded = await store.load("u1", "c1")
+            assert loaded.workspace_name == "fullstack"
+            assert loaded.workspace_directories == []
+        finally:
+            await store.teardown()
+
+    @pytest.mark.asyncio
+    async def test_workspace_name_defaults_to_none(self, tmp_path):
+        store = SqliteSessionStore(tmp_path / "test.db")
+        await store.setup()
+        try:
+            session = _make_session()
+            await store.save(session)
+            loaded = await store.load("u1", "c1")
+            assert loaded.workspace_name is None
+            assert loaded.workspace_directories == []
         finally:
             await store.teardown()
 

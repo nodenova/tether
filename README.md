@@ -11,11 +11,14 @@
 
 Tether lets you send natural-language coding instructions from Telegram on your phone to a Claude Code agent running on your dev machine. A three-layer safety pipeline — sandbox, policy rules, and human approval — keeps the AI from doing anything dangerous without your explicit sign-off.
 
-## What's New in 0.2.0
+## What's New in 0.3.0
 
-- **Git from your phone** — run `/git status`, `/git commit`, `/git push` and more directly from Telegram with inline action buttons
-- **Smart git workflows** — auto-generated commit messages, fuzzy branch search, interactive file staging
-- **Full audit trail** — every git operation is logged with session context
+- **`/test` command** — 9-phase agent-driven test workflow with project config (`.tether/test.yaml`)
+- **`/git merge`** — AI-assisted conflict resolution with auto-resolve/abort buttons
+- **`/plan <text>` and `/edit <text>`** — switch mode and start the agent in one step
+- **Message interrupt buttons** — interrupt or wait during agent execution instead of silent queuing
+- **`dev-tools.yaml` policy overlay** — auto-allows common dev commands (package managers, linters, test runners)
+- **Agent resilience** — auto-retry with exponential backoff, 30-minute execution timeout
 
 See [CHANGELOG.md](CHANGELOG.md) for full details.
 
@@ -23,8 +26,12 @@ See [CHANGELOG.md](CHANGELOG.md) for full details.
 
 - **Remote AI coding from any device** — send instructions via Telegram, Claude writes the code on your machine
 - **Three-layer safety pipeline** — sandbox boundaries, YAML policy rules, and human approval on every risky action
-- **YAML-driven policy rules** — 3 built-in presets (default, strict, permissive) or write your own
+- **YAML-driven policy rules** — 4 built-in policies (default, strict, permissive + dev-tools overlay) or write your own
 - **Inline approve/reject buttons** — tap to approve or block actions right from your phone
+- **Git integration** — full `/git` command suite from Telegram with inline action buttons
+- **`/test` command** — 9-phase agent-driven test workflow with browser automation
+- **Plan and edit modes** — `/plan` for review-before-execute, `/edit` for direct implementation, `/default` for balanced
+- **8 slash commands** — `/dir`, `/plan`, `/edit`, `/default`, `/git`, `/test`, `/clear`, `/status`
 - **Multi-turn sessions** — Claude remembers the full conversation, so you can iterate naturally
 - **Audit logging** — every tool attempt and decision is logged to an append-only JSONL file
 - **Streaming responses** — see Claude's output live as it types, with real-time tool activity indicators
@@ -85,7 +92,7 @@ Edit `.env` and set these three values:
 
 ```bash
 # The project directory you want the AI to work on (must exist)
-TETHER_APPROVED_DIRECTORY=/path/to/your/project
+TETHER_APPROVED_DIRECTORIES=/path/to/your/project
 
 # Bot token from step 2
 TETHER_TELEGRAM_BOT_TOKEN=123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11
@@ -125,7 +132,7 @@ The three essential variables are covered in [Quick Start](#4-configure). Here's
 
 | Variable | Default | Description |
 |---|---|---|
-| `TETHER_APPROVED_DIRECTORY` | **required** | Directory the AI agent can work in. Must exist. |
+| `TETHER_APPROVED_DIRECTORIES` | **required** | Directories the AI agent can work in (comma-separated). Must exist. |
 | `TETHER_TELEGRAM_BOT_TOKEN` | — | Bot token from @BotFather. Without this, Tether runs in local CLI mode instead. |
 | `TETHER_ALLOWED_USER_IDS` | *(no restriction)* | Comma-separated Telegram user IDs that can use the bot. Empty = anyone can use it. |
 | `TETHER_MAX_TURNS` | `25` | Max conversation turns per request. |
@@ -134,15 +141,18 @@ The three essential variables are covered in [Quick Start](#4-configure). Here's
 | `TETHER_APPROVAL_TIMEOUT_SECONDS` | `300` | Seconds to wait for your approval tap before auto-denying. |
 | `TETHER_RATE_LIMIT_RPM` | `0` *(off)* | Max requests per minute per user. |
 | `TETHER_RATE_LIMIT_BURST` | `5` | Burst capacity for the rate limiter. |
-| `TETHER_STORAGE_BACKEND` | `memory` | `memory` (sessions lost on restart) or `sqlite` (persistent). |
-| `TETHER_STORAGE_PATH` | `tether.db` | SQLite database path. Only used when backend is `sqlite`. |
+| `TETHER_STORAGE_BACKEND` | `sqlite` | `sqlite` (persistent, default) or `memory` (sessions lost on restart). |
+| `TETHER_STORAGE_PATH` | `.tether/tether.db` | SQLite database path. Only used when backend is `sqlite`. |
 | `TETHER_LOG_LEVEL` | `INFO` | `DEBUG`, `INFO`, `WARNING`, or `ERROR`. |
-| `TETHER_AUDIT_LOG_PATH` | `audit.jsonl` | Path for the append-only audit log of all tool decisions. |
+| `TETHER_AUDIT_LOG_PATH` | `.tether/audit.jsonl` | Path for the append-only audit log of all tool decisions. |
 | `TETHER_ALLOWED_TOOLS` | *(all)* | Allowlist of Claude tool names. Empty = all tools allowed. |
 | `TETHER_DISALLOWED_TOOLS` | *(none)* | Denylist of Claude tool names. |
 | `TETHER_STREAMING_ENABLED` | `true` | Progressive streaming updates in Telegram. |
 | `TETHER_STREAMING_THROTTLE_SECONDS` | `1.5` | Min seconds between message edits during streaming. |
-| `TETHER_LOG_DIR` | *(disabled)* | Directory for rotating JSON file logging (`{dir}/tether.log`). |
+| `TETHER_AGENT_TIMEOUT_SECONDS` | `1800` | Agent execution timeout (30 minutes). |
+| `TETHER_DEFAULT_MODE` | `default` | Default session mode: `"default"`, `"plan"`, or `"auto"`. |
+| `TETHER_MCP_SERVERS` | `{}` | JSON dict of MCP server configurations. |
+| `TETHER_LOG_DIR` | `.tether/logs` | Directory for rotating JSON file logging (`{dir}/tether.log`). |
 | `TETHER_LOG_MAX_BYTES` | `10485760` | Max log file size before rotation. Used with `LOG_DIR`. |
 | `TETHER_LOG_BACKUP_COUNT` | `5` | Rotated log backups to keep. Used with `LOG_DIR`. |
 
@@ -152,17 +162,17 @@ The three essential variables are covered in [Quick Start](#4-configure). Here's
 
 Every tool call Claude makes passes through a three-layer pipeline before it can execute:
 
-**1. Sandbox** — The agent can only touch files inside `TETHER_APPROVED_DIRECTORY`. Any path traversal attempt is blocked immediately and logged as a security violation.
+**1. Sandbox** — The agent can only touch files inside `TETHER_APPROVED_DIRECTORIES`. Any path traversal attempt is blocked immediately and logged as a security violation.
 
 **2. Policy rules** — YAML rules classify each tool call as `allow`, `deny`, or `require_approval` based on the tool name, command patterns, and file path patterns. Rules are evaluated in order; first match wins.
 
 **3. Human approval** — For `require_approval` actions, Tether sends you an inline message on Telegram with **Approve** and **Reject** buttons. If you don't respond within the timeout (default: 5 minutes), the action is denied automatically. Safe by default.
 
-Everything is logged to `audit.jsonl` — every tool attempt, every decision.
+Everything is logged to `.tether/audit.jsonl` — every tool attempt, every decision.
 
 ### Built-in policies
 
-Tether ships with three policies in `policies/`:
+Tether ships with four policies in `policies/`:
 
 **`default.yaml`** (recommended) — Good starting point for phone-based vibe coding.
 - Auto-allows: file reads, search, grep, git status/log/diff, readonly browser tools (snapshots, screenshots)
@@ -185,6 +195,16 @@ To switch policies:
 TETHER_POLICY_FILES=policies/strict.yaml
 ```
 
+**`dev-tools.yaml`** (overlay) — Auto-allows common development commands. Loaded alongside `default.yaml` by default.
+- Auto-allows: linters (`ruff`, `eslint`, `prettier`), test runners (`pytest`, `jest`, `vitest`), package managers (`npm install`, `pip install`, `uv sync`, `cargo build`)
+- Does not override deny rules from the base policy
+
+To switch policies:
+
+```bash
+TETHER_POLICY_FILES=policies/strict.yaml
+```
+
 You can also combine multiple policy files (rules are merged, evaluated in order):
 
 ```bash
@@ -193,14 +213,13 @@ TETHER_POLICY_FILES=policies/default.yaml,policies/my-overrides.yaml
 
 ## Session Persistence
 
-By default, sessions are stored in memory and lost when Tether restarts. To persist sessions across restarts (so Claude remembers your conversation context), switch to SQLite:
+By default, sessions are stored in SQLite (`.tether/tether.db`) and persist across restarts — Claude remembers your conversation context between sessions. Tether also logs every message (user and assistant) with cost, duration, and session metadata — giving you a queryable conversation history.
+
+For development or testing, you can opt into in-memory storage (sessions lost on restart):
 
 ```bash
-TETHER_STORAGE_BACKEND=sqlite
-TETHER_STORAGE_PATH=tether.db
+TETHER_STORAGE_BACKEND=memory
 ```
-
-With SQLite storage, Tether also logs every message (user and assistant) with cost, duration, and session metadata — giving you a queryable conversation history.
 
 ## Browser Testing
 
@@ -212,7 +231,7 @@ Tether integrates with [Playwright MCP](https://github.com/playwright-community/
 npx playwright install chromium
 ```
 
-**It's already configured.** The `.mcp.json` at the project root tells Claude Code to spawn the Playwright MCP server (pinned to `@playwright/mcp@0.0.41`, headless). The 25 browser tools are classified in all three policy presets — readonly tools (snapshots, screenshots) are auto-allowed in default policy, while mutation tools (click, navigate, type) require your approval.
+**It's already configured.** The `.mcp.json` at the project root tells Claude Code to spawn the Playwright MCP server (pinned to `@playwright/mcp@0.0.41`, headless). The 28 browser tools are classified in all three policy presets — readonly tools (snapshots, screenshots) are auto-allowed in default policy, while mutation tools (click, navigate, type) require your approval.
 
 **Typical workflow:**
 

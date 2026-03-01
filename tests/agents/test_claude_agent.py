@@ -595,6 +595,41 @@ class TestRunWithResume:
         assert session.claude_session_id is None
 
     @pytest.mark.asyncio
+    async def test_resume_crash_retries_fresh(self, agent, session):
+        """When CLI crashes during resume, clear resume and retry fresh."""
+        session.claude_session_id = "stale-session"
+        opts = agent._build_options(session, None)
+        assert opts.resume == "stale-session"
+
+        result_ok = _make_result_message(result="Fresh OK", num_turns=1)
+        call_count = 0
+
+        class FakeCtx:
+            async def __aenter__(self):
+                nonlocal call_count
+                call_count += 1
+                client = MagicMock()
+                if call_count == 1:
+                    client.query = AsyncMock(side_effect=RuntimeError("exit code 1"))
+                else:
+                    client.query = AsyncMock(return_value=None)
+                    client.receive_response = MagicMock(
+                        return_value=AsyncIterHelper([result_ok])
+                    )
+                return client
+
+            async def __aexit__(self, *args):
+                return False
+
+        with patch("tether.agents.claude_code._SafeSDKClient", return_value=FakeCtx()):
+            resp = await agent._run_with_resume("prompt", session, opts)
+
+        assert resp.content == "Fresh OK"
+        assert call_count == 2
+        assert opts.resume is None
+        assert session.claude_session_id is None
+
+    @pytest.mark.asyncio
     async def test_exhausted_attempts(self, agent, session):
         # Both attempts yield no messages at all → "No response received."
         class FakeCtx:
@@ -1037,6 +1072,19 @@ class TestDescribeTool:
     def test_task_list_shows_all_tasks(self):
         result = _describe_tool("TaskList", {})
         assert result == "all tasks"
+
+    def test_exit_plan_mode(self):
+        result = _describe_tool("ExitPlanMode", {"allowedPrompts": [{"tool": "Bash"}]})
+        assert result == "Presenting plan for review"
+
+    def test_enter_plan_mode(self):
+        assert _describe_tool("EnterPlanMode", {}) == "Entering plan mode"
+
+    def test_ask_user_question(self):
+        result = _describe_tool(
+            "AskUserQuestion", {"questions": [{"question": "Which?"}]}
+        )
+        assert result == "Asking a question"
 
     def test_unknown_tool_shows_first_string(self):
         assert _describe_tool("CustomTool", {"arg": "value"}) == "value"

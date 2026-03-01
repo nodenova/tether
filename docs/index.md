@@ -1,6 +1,6 @@
 # Tether Documentation
 
-Tether is NodeNova's open-source remote AI-assisted development framework. It lets developers drive Claude Code agent sessions from any device while enforcing YAML-driven safety policies that gate dangerous AI actions behind human approval. The system is modular, lightweight, and bulletproof.
+Tether is an open-source remote AI-assisted development framework. It lets developers drive Claude Code agent sessions from any device while enforcing YAML-driven safety policies that gate dangerous AI actions behind human approval. The system is modular, lightweight, and bulletproof.
 
 ## Three Guarantees
 
@@ -32,7 +32,7 @@ flowchart LR
 | [Engine](engine.md) | Message lifecycle, plan mode, streaming, slash commands |
 | [Configuration](configuration.md) | All `TETHER_` environment variables reference |
 | [Policies](policies.md) | YAML policy format, rule matching algorithm, built-in presets |
-| [Events](events.md) | EventBus, all 12 event types, payload schemas |
+| [Events](events.md) | EventBus, all event types, payload schemas |
 | [Plugins](plugins.md) | Plugin protocol, lifecycle hooks, AuditPlugin example |
 | [Agents](agents.md) | BaseAgent protocol, ClaudeCodeAgent, session resume |
 | [Connectors](connectors.md) | BaseConnector ABC, handler registration, building a connector |
@@ -40,6 +40,7 @@ flowchart LR
 | [Storage](storage.md) | SessionStore protocol, memory and SQLite backends |
 | [Browser Testing](browser-testing.md) | Playwright MCP setup, browser tool policies, test agents |
 | [Interactions](interactions.md) | Question flow, plan review flow, asyncio bridge |
+| [Testing Setup](testing-setup.md) | Three-tier setup guide for e2e testing with /test and Playwright |
 
 ## Quick Start
 
@@ -50,7 +51,7 @@ cd tether
 uv sync
 
 # Minimal .env
-echo 'TETHER_APPROVED_DIRECTORY=/path/to/your/project' > .env
+echo 'TETHER_APPROVED_DIRECTORIES=/path/to/your/project' > .env
 
 # Run the CLI (interactive REPL)
 uv run -m tether

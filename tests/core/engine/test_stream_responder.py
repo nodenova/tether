@@ -99,6 +99,140 @@ class TestStreamingResponderMessageTracking:
         assert len(connector.deleted_messages) >= 1
 
 
+class TestActivityCleanup:
+    @pytest.mark.asyncio
+    async def test_on_activity_none_clears_when_has_activity(self):
+        from tests.conftest import MockConnector
+        from tether.agents.base import ToolActivity
+        from tether.core.engine import _StreamingResponder
+
+        connector = MockConnector(support_streaming=True)
+        responder = _StreamingResponder(connector, "chat1", throttle_seconds=0)
+
+        # Send a chunk first to create a message
+        await responder.on_chunk("hello")
+        # Trigger activity so _has_activity becomes True
+        await responder.on_activity(ToolActivity(tool_name="Grep", description="*.py"))
+        assert responder._has_activity is True
+        assert len(connector.activity_messages) == 1
+
+        # Now send None — should clear
+        await responder.on_activity(None)
+        assert responder._has_activity is False
+        assert len(connector.cleared_activities) == 1
+
+    @pytest.mark.asyncio
+    async def test_on_activity_none_noop_when_no_activity(self):
+        from tests.conftest import MockConnector
+        from tether.core.engine import _StreamingResponder
+
+        connector = MockConnector(support_streaming=True)
+        responder = _StreamingResponder(connector, "chat1", throttle_seconds=0)
+
+        await responder.on_chunk("hello")
+        assert responder._has_activity is False
+
+        await responder.on_activity(None)
+        assert responder._has_activity is False
+        assert len(connector.cleared_activities) == 0
+
+    @pytest.mark.asyncio
+    async def test_finalize_clears_activity_before_editing(self):
+        from tests.conftest import MockConnector
+        from tether.agents.base import ToolActivity
+        from tether.core.engine import _StreamingResponder
+
+        connector = MockConnector(support_streaming=True)
+        responder = _StreamingResponder(connector, "chat1", throttle_seconds=0)
+
+        await responder.on_chunk("hello")
+        await responder.on_activity(ToolActivity(tool_name="Read", description="/f.py"))
+        assert responder._has_activity is True
+
+        result = await responder.finalize("hello")
+        assert result is True
+        assert responder._has_activity is False
+        assert len(connector.cleared_activities) == 1
+        # Activity cleared before edit — clear should come before the final edit
+        assert len(connector.edited_messages) >= 1
+
+    @pytest.mark.asyncio
+    async def test_multi_tool_sequence_clears_each_time(self):
+        from tests.conftest import MockConnector
+        from tether.agents.base import ToolActivity
+        from tether.core.engine import _StreamingResponder
+
+        connector = MockConnector(support_streaming=True)
+        responder = _StreamingResponder(connector, "chat1", throttle_seconds=0)
+
+        # Agent starts streaming text
+        await responder.on_chunk("hello ")
+
+        # --- ToolUseBlock("Bash") processed ---
+        await responder.on_activity(
+            ToolActivity(tool_name="Bash", description="git status")
+        )
+        assert responder._has_activity is True
+        assert len(connector.activity_messages) == 1
+
+        # --- ToolResultBlock processed → on_tool_activity(None) ---
+        await responder.on_activity(None)
+        assert responder._has_activity is False
+        assert len(connector.cleared_activities) == 1
+
+        # --- ToolUseBlock("Read") processed ---
+        await responder.on_activity(
+            ToolActivity(tool_name="Read", description="/src/main.py")
+        )
+        assert responder._has_activity is True
+        assert len(connector.activity_messages) == 2
+
+        # --- ToolResultBlock processed → on_tool_activity(None) ---
+        await responder.on_activity(None)
+        assert responder._has_activity is False
+        assert len(connector.cleared_activities) == 2
+
+    @pytest.mark.asyncio
+    async def test_deactivate_then_on_activity_none_no_error(self):
+        from tests.conftest import MockConnector
+        from tether.agents.base import ToolActivity
+        from tether.core.engine import _StreamingResponder
+
+        connector = MockConnector(support_streaming=True)
+        responder = _StreamingResponder(connector, "chat1", throttle_seconds=0)
+
+        await responder.on_chunk("hello")
+        await responder.on_activity(ToolActivity(tool_name="Read", description="/a.py"))
+        assert responder._has_activity is True
+
+        # Engine interrupt path calls deactivate() — clears via connector, sets _active=False
+        await responder.deactivate()
+        assert responder._active is False
+        assert len(connector.cleared_activities) == 1
+
+        # Late-arriving on_tool_activity(None) from agent — should be silently dropped
+        await responder.on_activity(None)
+        # No additional clear — still just 1
+        assert len(connector.cleared_activities) == 1
+
+    @pytest.mark.asyncio
+    async def test_deactivate_without_prior_activity_no_error(self):
+        from tests.conftest import MockConnector
+        from tether.core.engine import _StreamingResponder
+
+        connector = MockConnector(support_streaming=True)
+        responder = _StreamingResponder(connector, "chat1", throttle_seconds=0)
+
+        await responder.on_chunk("hello")
+        assert responder._has_activity is False
+
+        # Interrupt with no prior activity — deactivate calls clear_activity on empty connector
+        await responder.deactivate()
+        assert responder._active is False
+        # MockConnector.clear_activity only records when msg_id exists — nothing to clear
+        assert len(connector.cleared_activities) == 0
+
+
 class TestTransientMessages:
     @pytest.mark.asyncio
     async def test_context_cleared_message_scheduled_for_cleanup(
@@ -112,6 +246,7 @@ class TestTransientMessages:
         class PlanAgent(BaseAgent):
             async def execute(self, prompt, session, *, can_use_tool=None, **kwargs):
                 if not prompt.startswith("Implement"):
+                    session.mode = "plan"
 
                     async def click_clean():
                         await asyncio.sleep(0.05)
@@ -156,6 +291,7 @@ class TestTransientMessages:
         class PlanAgent(BaseAgent):
             async def execute(self, prompt, session, *, can_use_tool=None, **kwargs):
                 if not prompt.startswith("Implement"):
+                    session.mode = "plan"
 
                     async def click_clean():
                         await asyncio.sleep(0.05)

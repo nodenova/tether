@@ -4,6 +4,8 @@ import asyncio
 
 import pytest
 
+from tether.core.config import TetherConfig
+
 
 class TestQuestionHandling:
     @pytest.mark.asyncio
@@ -68,7 +70,7 @@ class TestQuestionHandling:
     async def test_timeout_denies(self, mock_connector, config):
         from tether.core.interactions import InteractionCoordinator
 
-        config.approval_timeout_seconds = 0.1
+        config.interaction_timeout_seconds = 0.1
         coord = InteractionCoordinator(mock_connector, config)
         tool_input = {
             "questions": [
@@ -84,6 +86,35 @@ class TestQuestionHandling:
         result = await coord.handle_question("chat1", tool_input)
         assert result.behavior == "deny"
         assert "No response" in result.message
+
+    @pytest.mark.asyncio
+    async def test_default_none_timeout_waits_for_answer(self, mock_connector, config):
+        from tether.core.interactions import InteractionCoordinator
+
+        assert config.interaction_timeout_seconds is None
+        coord = InteractionCoordinator(mock_connector, config)
+        tool_input = {
+            "questions": [
+                {
+                    "question": "Pick one?",
+                    "header": "Choice",
+                    "options": [{"label": "A", "description": "A"}],
+                    "multiSelect": False,
+                }
+            ]
+        }
+
+        async def answer_after_delay():
+            await asyncio.sleep(0.2)
+            req = mock_connector.question_requests[0]
+            await coord.resolve_option(req["interaction_id"], "A")
+
+        task = asyncio.create_task(answer_after_delay())
+        result = await coord.handle_question("chat1", tool_input)
+        await task
+
+        assert result.behavior == "allow"
+        assert result.updated_input["answers"]["Pick one?"] == "A"
 
     @pytest.mark.asyncio
     async def test_multiple_questions_sequential(
@@ -229,12 +260,34 @@ class TestPlanReviewHandling:
 
         from tether.core.interactions import InteractionCoordinator
 
-        config.approval_timeout_seconds = 0.1
+        config.interaction_timeout_seconds = 0.1
         coord = InteractionCoordinator(mock_connector, config)
 
         result = await coord.handle_plan_review("chat1", {})
         assert isinstance(result, PermissionResultDeny)
         assert "timed out" in result.message
+
+    @pytest.mark.asyncio
+    async def test_default_none_timeout_waits_for_decision(
+        self, mock_connector, config
+    ):
+        from tether.core.interactions import InteractionCoordinator, PlanReviewDecision
+
+        assert config.interaction_timeout_seconds is None
+        coord = InteractionCoordinator(mock_connector, config)
+
+        async def decide_after_delay():
+            await asyncio.sleep(0.2)
+            req = mock_connector.plan_review_requests[0]
+            await coord.resolve_option(req["interaction_id"], "edit")
+
+        task = asyncio.create_task(decide_after_delay())
+        result = await coord.handle_plan_review("chat1", {})
+        await task
+
+        assert isinstance(result, PlanReviewDecision)
+        assert result.permission.behavior == "allow"
+        assert result.target_mode == "edit"
 
     @pytest.mark.asyncio
     async def test_default_allows_without_auto_approve(
@@ -407,6 +460,242 @@ class TestPlanContentPassthrough:
         assert mock_connector.plan_review_requests[0]["description"] == (
             "Plan is ready for review."
         )
+
+
+class TestInteractionTimeoutBehavior:
+    """Tests for timeout, cancel, and state cleanup in InteractionCoordinator."""
+
+    def _make_coord(self, connector, config, event_bus=None):
+        from tether.core.interactions import InteractionCoordinator
+
+        return InteractionCoordinator(connector, config, event_bus)
+
+    def _question_input(self, text="Pick one?"):
+        return {
+            "questions": [
+                {
+                    "question": text,
+                    "header": "Choice",
+                    "options": [{"label": "A", "description": "A"}],
+                    "multiSelect": False,
+                }
+            ]
+        }
+
+    @pytest.mark.asyncio
+    async def test_question_timeout_cleans_state(self, mock_connector, config):
+        config.interaction_timeout_seconds = 0.1
+        coord = self._make_coord(mock_connector, config)
+
+        result = await coord.handle_question("chat1", self._question_input())
+
+        assert result.behavior == "deny"
+        assert coord.pending == {}
+        assert coord._chat_index == {}
+        assert coord.has_pending("chat1") is False
+
+    @pytest.mark.asyncio
+    async def test_plan_review_timeout_cleans_state(self, mock_connector, config):
+        config.interaction_timeout_seconds = 0.1
+        coord = self._make_coord(mock_connector, config)
+
+        result = await coord.handle_plan_review("chat1", {})
+
+        assert result.behavior == "deny"
+        assert "timed out" in result.message
+        assert coord.pending == {}
+        assert coord._chat_index == {}
+        assert coord.has_pending("chat1") is False
+
+    @pytest.mark.asyncio
+    async def test_cancel_escapes_indefinite_question_wait(
+        self, mock_connector, config
+    ):
+        assert config.interaction_timeout_seconds is None
+        coord = self._make_coord(mock_connector, config)
+
+        async def cancel_soon():
+            await asyncio.sleep(0.05)
+            cancelled = coord.cancel_pending("chat1")
+            assert len(cancelled) == 1
+
+        task = asyncio.create_task(cancel_soon())
+        result = await coord.handle_question("chat1", self._question_input())
+        await task
+
+        assert result.behavior == "deny"
+        assert "No answer" in result.message
+        assert coord.pending == {}
+        assert coord._chat_index == {}
+
+    @pytest.mark.asyncio
+    async def test_cancel_escapes_indefinite_plan_review_wait(
+        self, mock_connector, config
+    ):
+        assert config.interaction_timeout_seconds is None
+        coord = self._make_coord(mock_connector, config)
+
+        async def cancel_soon():
+            await asyncio.sleep(0.05)
+            cancelled = coord.cancel_pending("chat1")
+            assert len(cancelled) == 1
+
+        task = asyncio.create_task(cancel_soon())
+        result = await coord.handle_plan_review("chat1", {})
+        await task
+
+        assert result.behavior == "deny"
+        assert "cancelled" in result.message.lower()
+        assert "timed out" not in result.message.lower()
+        assert coord.pending == {}
+        assert coord._chat_index == {}
+
+    @pytest.mark.asyncio
+    async def test_multi_question_first_answered_second_times_out(
+        self, mock_connector, config
+    ):
+        config.interaction_timeout_seconds = 0.2
+        coord = self._make_coord(mock_connector, config)
+
+        tool_input = {
+            "questions": [
+                {
+                    "question": "Q1?",
+                    "header": "H1",
+                    "options": [{"label": "A", "description": "a"}],
+                    "multiSelect": False,
+                },
+                {
+                    "question": "Q2?",
+                    "header": "H2",
+                    "options": [{"label": "B", "description": "b"}],
+                    "multiSelect": False,
+                },
+            ]
+        }
+
+        async def answer_first_only():
+            await asyncio.sleep(0.05)
+            req = mock_connector.question_requests[0]
+            await coord.resolve_option(req["interaction_id"], "A")
+            # Q2 is never answered — it will time out
+
+        task = asyncio.create_task(answer_first_only())
+        result = await coord.handle_question("chat1", tool_input)
+        await task
+
+        assert result.behavior == "deny"
+        assert coord.pending == {}
+        assert coord._chat_index == {}
+
+    @pytest.mark.asyncio
+    async def test_resolve_after_timeout_returns_false(self, mock_connector, config):
+        config.interaction_timeout_seconds = 0.1
+        coord = self._make_coord(mock_connector, config)
+
+        result = await coord.handle_question("chat1", self._question_input())
+        assert result.behavior == "deny"
+
+        # Grab the interaction_id that was used
+        iid = mock_connector.question_requests[0]["interaction_id"]
+
+        # Late resolve attempts should return False and not crash
+        assert await coord.resolve_option(iid, "A") is False
+        assert await coord.resolve_text("chat1", "late answer") is False
+        assert coord.pending == {}
+        assert coord._chat_index == {}
+
+    @pytest.mark.asyncio
+    async def test_invalid_plan_decision_blocks_then_times_out(
+        self, mock_connector, config
+    ):
+        config.interaction_timeout_seconds = 0.2
+        coord = self._make_coord(mock_connector, config)
+
+        async def send_invalid_decision():
+            await asyncio.sleep(0.05)
+            req = mock_connector.plan_review_requests[0]
+            ok = await coord.resolve_option(req["interaction_id"], "skip")
+            assert ok is False
+            # interaction stays pending, will time out
+
+        task = asyncio.create_task(send_invalid_decision())
+        result = await coord.handle_plan_review("chat1", {})
+        await task
+
+        assert result.behavior == "deny"
+        assert "timed out" in result.message
+        assert coord.pending == {}
+        assert coord._chat_index == {}
+
+    @pytest.mark.asyncio
+    async def test_explicit_integer_timeout_allows_fast_answer(
+        self, mock_connector, config
+    ):
+        config.interaction_timeout_seconds = 5
+        coord = self._make_coord(mock_connector, config)
+
+        async def answer_fast():
+            await asyncio.sleep(0.05)
+            req = mock_connector.question_requests[0]
+            await coord.resolve_option(req["interaction_id"], "A")
+
+        task = asyncio.create_task(answer_fast())
+        result = await coord.handle_question("chat1", self._question_input())
+        await task
+
+        assert result.behavior == "allow"
+        assert result.updated_input["answers"]["Pick one?"] == "A"
+        assert coord.pending == {}
+        assert coord._chat_index == {}
+
+    @pytest.mark.asyncio
+    async def test_interaction_and_approval_timeouts_are_independent(
+        self, mock_connector, config
+    ):
+        config.interaction_timeout_seconds = 42
+        config.approval_timeout_seconds = 999
+        assert config.interaction_timeout_seconds == 42
+        assert config.approval_timeout_seconds == 999
+
+        config2 = TetherConfig(
+            approved_directories=config.approved_directories,
+            approval_timeout_seconds=10,
+        )
+        assert config2.interaction_timeout_seconds is None
+        assert config2.approval_timeout_seconds == 10
+
+    @pytest.mark.asyncio
+    async def test_zero_timeout_immediate_denial(self, mock_connector, config):
+        config.interaction_timeout_seconds = 0
+        coord = self._make_coord(mock_connector, config)
+
+        q_result = await coord.handle_question("chat1", self._question_input())
+        assert q_result.behavior == "deny"
+        assert coord.pending == {}
+        assert coord._chat_index == {}
+
+        p_result = await coord.handle_plan_review("chat1", {})
+        assert p_result.behavior == "deny"
+        assert coord.pending == {}
+        assert coord._chat_index == {}
+
+    @pytest.mark.asyncio
+    async def test_no_event_bus_still_works(self, mock_connector, config):
+        coord = self._make_coord(mock_connector, config, event_bus=None)
+
+        async def answer():
+            await asyncio.sleep(0.05)
+            req = mock_connector.question_requests[0]
+            await coord.resolve_option(req["interaction_id"], "A")
+
+        task = asyncio.create_task(answer())
+        result = await coord.handle_question("chat1", self._question_input())
+        await task
+
+        assert result.behavior == "allow"
+        assert coord.pending == {}
+        assert coord._chat_index == {}
 
 
 class TestInteractionEdgeCases:

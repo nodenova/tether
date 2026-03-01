@@ -169,7 +169,7 @@ class MockConnector(BaseConnector):
                 {
                     "chat_id": chat_id,
                     "message_id": existing,
-                    "text": f"\u23f3 Running: {description}",
+                    "text": f"{tool_name}: {description}",
                 }
             )
             self.activity_messages.append(

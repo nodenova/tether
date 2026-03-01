@@ -121,7 +121,7 @@ The plugin only reacts to sandbox violations (not policy denials) to avoid dupli
 
 ## Built-In: `BrowserToolsPlugin`
 
-`BrowserToolsPlugin` (`plugins/builtin/browser_tools.py`) provides observability for the 25 Playwright MCP browser tools. It logs when browser tools enter the safety pipeline, are allowed, or are denied.
+`BrowserToolsPlugin` (`plugins/builtin/browser_tools.py`) provides observability for the 28 Playwright MCP browser tools. It logs when browser tools enter the safety pipeline, are allowed, or are denied.
 
 ```mermaid
 sequenceDiagram
@@ -151,11 +151,47 @@ The module exports constants for classifying browser tools in other components:
 | Export | Type | Description |
 |---|---|---|
 | `BROWSER_READONLY_TOOLS` | `frozenset[str]` | 7 tools that observe without changing the page |
-| `BROWSER_MUTATION_TOOLS` | `frozenset[str]` | 18 tools that interact with or modify the page |
-| `ALL_BROWSER_TOOLS` | `frozenset[str]` | Union of readonly and mutation sets (25 total) |
+| `BROWSER_MUTATION_TOOLS` | `frozenset[str]` | 21 tools that interact with or modify the page |
+| `ALL_BROWSER_TOOLS` | `frozenset[str]` | Union of readonly and mutation sets (28 total) |
 | `is_browser_tool(name)` | `function` | Returns `True` if the tool name is a Playwright browser tool |
 
 See [Browser Testing](browser-testing.md) for the full browser testing guide.
+
+## Built-In: `TestRunnerPlugin`
+
+`TestRunnerPlugin` (`plugins/builtin/test_runner.py`) activates the 9-phase test workflow via the `/test` command.
+
+| Aspect | Detail |
+|---|---|
+| Subscribes to | `COMMAND_TEST` |
+| Emits | `TEST_STARTED` |
+| Auto-approves | All 28 browser tools, test bash commands (`pytest`, `jest`, `vitest`, etc.), Write/Edit for test files |
+
+The plugin intercepts `/test` commands with structured flags (`--url`, `--framework`, `--dir`, `--no-e2e`, `--no-unit`, `--no-backend`), sets the session to test mode, and instructs the agent to run a multi-phase test workflow including discovery, generation, execution, and healing.
+
+## Built-In: `MergeResolverPlugin`
+
+`MergeResolverPlugin` (`plugins/builtin/merge_resolver.py`) handles `/git merge` conflict resolution.
+
+| Aspect | Detail |
+|---|---|
+| Subscribes to | `COMMAND_MERGE` |
+| Emits | `MERGE_STARTED` |
+| Auto-approves | Edit, Write, Read, and git read commands |
+
+When a merge results in conflicts, the plugin sets the session to merge mode and instructs the agent to resolve conflicts file by file, then presents auto-resolve/abort buttons to the user.
+
+## Built-In: `TestConfigLoaderPlugin`
+
+`TestConfigLoaderPlugin` (`plugins/builtin/test_config_loader.py`) loads per-project test configuration from `.tether/test.yaml`.
+
+| Aspect | Detail |
+|---|---|
+| Config file | `.tether/test.yaml` in the project working directory |
+| Merge behavior | CLI flags override config file values |
+| Supported fields | URL, server command, framework, credentials, preconditions |
+
+The plugin provides project-specific defaults for the `/test` workflow, so teams can commit shared test configuration without passing flags every time.
 
 ## Writing a Custom Plugin
 

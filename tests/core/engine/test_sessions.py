@@ -10,7 +10,8 @@ from tether.agents.base import AgentResponse, BaseAgent
 from tether.core.config import TetherConfig
 from tether.core.engine import Engine
 from tether.core.interactions import InteractionCoordinator
-from tether.core.session import SessionManager
+from tether.core.session import Session, SessionManager
+from tether.exceptions import AgentError, StorageError
 from tether.middleware.base import MessageContext, MiddlewareChain
 
 
@@ -174,6 +175,496 @@ class TestEngineWithMiddleware:
         assert fake_agent.last_can_use_tool is not None
 
 
+class ResumeFailAgent(BaseAgent):
+    """Simulates _run_with_resume clearing a stale claude_session_id then failing.
+
+    If session.claude_session_id is set → clears to None, raises AgentError.
+    If session.claude_session_id is None → succeeds with fresh response.
+    """
+
+    async def execute(self, prompt, session, *, can_use_tool=None, **kwargs):
+        if session.claude_session_id:
+            session.claude_session_id = None
+            raise AgentError("resume failed — stale session")
+        return AgentResponse(
+            content=f"Fresh: {prompt}",
+            session_id="new-fresh-id",
+            cost=0.01,
+        )
+
+    async def cancel(self, session_id):
+        pass
+
+    async def shutdown(self):
+        pass
+
+
+class ConnectFailAgent(BaseAgent):
+    """Simulates connect() failure: raises AgentError WITHOUT clearing claude_session_id.
+
+    This exercises the defense-in-depth path where the agent's retry logic
+    is bypassed (e.g., connect() fails before the inner try/except).
+    The engine's error handler must clear the stale ID.
+    """
+
+    async def execute(self, prompt, session, *, can_use_tool=None, **kwargs):
+        raise AgentError("CLI process exited with code 1")
+
+    async def cancel(self, session_id):
+        pass
+
+    async def shutdown(self):
+        pass
+
+
+class MidStreamIdAcquireAgent(BaseAgent):
+    """Simulates agent acquiring a new session ID mid-stream then crashing.
+
+    Sets session.claude_session_id to new_id, then raises AgentError.
+    """
+
+    def __init__(self, new_id: str):
+        self._new_id = new_id
+
+    async def execute(self, prompt, session, *, can_use_tool=None, **kwargs):
+        session.claude_session_id = self._new_id
+        raise AgentError("stream failed after acquiring new session ID")
+
+    async def cancel(self, session_id):
+        pass
+
+    async def shutdown(self):
+        pass
+
+
+class NullSessionIdAgent(BaseAgent):
+    """Returns a response with session_id=None, simulating no ID in ResultMessage."""
+
+    async def execute(self, prompt, session, *, can_use_tool=None, **kwargs):
+        return AgentResponse(
+            content=f"Null-session: {prompt}",
+            session_id=None,
+            cost=0.005,
+        )
+
+    async def cancel(self, session_id):
+        pass
+
+    async def shutdown(self):
+        pass
+
+
+class CountingFailAgent(BaseAgent):
+    """First N calls fail (setting claude_session_id=None), then succeeds."""
+
+    def __init__(self, fail_count: int, success_id: str):
+        self._fail_count = fail_count
+        self._success_id = success_id
+        self._call_count = 0
+
+    async def execute(self, prompt, session, *, can_use_tool=None, **kwargs):
+        self._call_count += 1
+        if self._call_count <= self._fail_count:
+            session.claude_session_id = None
+            raise AgentError(f"failure #{self._call_count}")
+        return AgentResponse(
+            content=f"Recovered: {prompt}",
+            session_id=self._success_id,
+            cost=0.01,
+        )
+
+    async def cancel(self, session_id):
+        pass
+
+    async def shutdown(self):
+        pass
+
+
+class SucceedThenFailAgent(BaseAgent):
+    """First call returns success, second call raises AgentError."""
+
+    def __init__(self):
+        self._call_count = 0
+
+    async def execute(self, prompt, session, *, can_use_tool=None, **kwargs):
+        self._call_count += 1
+        if self._call_count == 1:
+            return AgentResponse(
+                content=f"Success: {prompt}",
+                session_id="good-id",
+                cost=0.01,
+            )
+        raise AgentError("second call failed")
+
+    async def cancel(self, session_id):
+        pass
+
+    async def shutdown(self):
+        pass
+
+
+class CostAccumulatorAgent(BaseAgent):
+    """Returns increasing cost and session ID per call."""
+
+    def __init__(self):
+        self._call_count = 0
+
+    async def execute(self, prompt, session, *, can_use_tool=None, **kwargs):
+        self._call_count += 1
+        return AgentResponse(
+            content=f"Message #{self._call_count}: {prompt}",
+            session_id=f"session-{self._call_count}",
+            cost=0.01 * self._call_count,
+        )
+
+    async def cancel(self, session_id):
+        pass
+
+    async def shutdown(self):
+        pass
+
+
+class HangingAgent(BaseAgent):
+    """Simulates an agent that hangs (for timeout tests).
+
+    Optionally updates session.claude_session_id during execution to simulate
+    receiving a SystemMessage with a new session ID.
+    """
+
+    def __init__(self, *, new_session_id: str | None = None):
+        self._new_session_id = new_session_id
+
+    async def execute(self, prompt, session, *, can_use_tool=None, **kwargs):
+        if self._new_session_id:
+            session.claude_session_id = self._new_session_id
+        await asyncio.sleep(60)
+        return AgentResponse(content="unreachable", session_id="x", cost=0.0)
+
+    async def cancel(self, session_id):
+        pass
+
+    async def shutdown(self):
+        pass
+
+
+class TestErrorPathSessionPersistence:
+    """Regression tests: stale claude_session_id cleared on both error and timeout paths."""
+
+    @pytest.mark.asyncio
+    async def test_save_captures_cleared_claude_session_id(
+        self, audit_logger, policy_engine, tmp_path
+    ):
+        """AgentError path: verify the saved session has claude_session_id=None."""
+        save_snapshots: list[dict] = []
+
+        async def capture_save(session):
+            save_snapshots.append(
+                {
+                    "claude_session_id": session.claude_session_id,
+                    "session_id": session.session_id,
+                }
+            )
+
+        store = AsyncMock()
+        store.load = AsyncMock(return_value=None)
+        store.save = AsyncMock(side_effect=capture_save)
+
+        config = TetherConfig(
+            approved_directories=[tmp_path],
+            audit_log_path=tmp_path / "audit.jsonl",
+        )
+        sm = SessionManager(store=store)
+        eng = Engine(
+            connector=None,
+            agent=ResumeFailAgent(),
+            config=config,
+            session_manager=sm,
+            policy_engine=policy_engine,
+            audit=audit_logger,
+        )
+
+        # Pre-load stale session into memory
+        session = await sm.get_or_create("user1", "chat1", str(tmp_path))
+        session.claude_session_id = "stale-id-123"
+
+        result = await eng.handle_message("user1", "hello", "chat1")
+        assert "Error:" in result
+
+        # The save in the error handler must have captured claude_session_id=None
+        error_saves = [s for s in save_snapshots if s["claude_session_id"] is None]
+        assert len(error_saves) >= 1
+
+    @pytest.mark.asyncio
+    async def test_sqlite_round_trip_stale_id_cleared(
+        self, audit_logger, policy_engine, tmp_path
+    ):
+        """Pre-seed SQLite with stale ID → agent fails → reload → ID is None."""
+        from tether.storage.sqlite import SqliteSessionStore
+
+        config = TetherConfig(
+            approved_directories=[tmp_path],
+            audit_log_path=tmp_path / "audit.jsonl",
+        )
+        store = SqliteSessionStore(tmp_path / "sessions.db")
+        await store.setup()
+        try:
+            # Pre-seed with stale session
+            await store.save(
+                Session(
+                    session_id="pre-seed",
+                    user_id="user1",
+                    chat_id="chat1",
+                    working_directory=str(tmp_path),
+                    claude_session_id="stale-id-456",
+                )
+            )
+
+            sm = SessionManager(store=store)
+            eng = Engine(
+                connector=None,
+                agent=ResumeFailAgent(),
+                config=config,
+                session_manager=sm,
+                policy_engine=policy_engine,
+                audit=audit_logger,
+                store=store,
+            )
+
+            result = await eng.handle_message("user1", "hello", "chat1")
+            assert "Error:" in result
+
+            loaded = await store.load("user1", "chat1")
+            assert loaded is not None
+            assert loaded.claude_session_id is None
+        finally:
+            await store.teardown()
+
+    @pytest.mark.asyncio
+    async def test_stale_id_cleared_survives_restart(
+        self, audit_logger, policy_engine, tmp_path
+    ):
+        """Two-engine pattern: stale ID cleared in Engine 1, Engine 2 works fresh."""
+        from tether.storage.sqlite import SqliteSessionStore
+
+        config = TetherConfig(
+            approved_directories=[tmp_path],
+            audit_log_path=tmp_path / "audit.jsonl",
+        )
+        session_db = tmp_path / "sessions.db"
+
+        # Engine 1: stale session → agent fails → cleared
+        store1 = SqliteSessionStore(session_db)
+        await store1.setup()
+        await store1.save(
+            Session(
+                session_id="pre-seed",
+                user_id="user1",
+                chat_id="chat1",
+                working_directory=str(tmp_path),
+                claude_session_id="stale-id-789",
+            )
+        )
+        sm1 = SessionManager(store=store1)
+        eng1 = Engine(
+            connector=None,
+            agent=ResumeFailAgent(),
+            config=config,
+            session_manager=sm1,
+            policy_engine=policy_engine,
+            audit=audit_logger,
+            store=store1,
+        )
+        result1 = await eng1.handle_message("user1", "hello", "chat1")
+        assert "Error:" in result1
+        await store1.teardown()
+
+        # Engine 2: fresh stores on same DB → agent succeeds (no stale resume)
+        store2 = SqliteSessionStore(session_db)
+        await store2.setup()
+        sm2 = SessionManager(store=store2)
+        eng2 = Engine(
+            connector=None,
+            agent=ResumeFailAgent(),
+            config=config,
+            session_manager=sm2,
+            policy_engine=policy_engine,
+            audit=audit_logger,
+            store=store2,
+        )
+        result2 = await eng2.handle_message("user1", "continue", "chat1")
+        assert "Fresh:" in result2
+
+        session2 = sm2.get("user1", "chat1")
+        assert session2.claude_session_id == "new-fresh-id"
+        await store2.teardown()
+
+    @pytest.mark.asyncio
+    async def test_timeout_with_stale_id_clears_it(
+        self, audit_logger, policy_engine, tmp_path
+    ):
+        """Timeout path: stale claude_session_id is cleared, not re-persisted."""
+        config = TetherConfig(
+            approved_directories=[tmp_path],
+            audit_log_path=tmp_path / "audit.jsonl",
+            agent_timeout_seconds=1,
+        )
+        store = AsyncMock()
+        store.load = AsyncMock(return_value=None)
+        store.save = AsyncMock()
+
+        sm = SessionManager(store=store)
+        eng = Engine(
+            connector=None,
+            agent=HangingAgent(),
+            config=config,
+            session_manager=sm,
+            policy_engine=policy_engine,
+            audit=audit_logger,
+        )
+
+        session = await sm.get_or_create("user1", "chat1", str(tmp_path))
+        session.claude_session_id = "stale-timeout-id"
+
+        result = await eng.handle_message("user1", "hello", "chat1")
+        assert "timed out" in result
+
+        assert session.claude_session_id is None
+
+    @pytest.mark.asyncio
+    async def test_timeout_with_new_session_id_preserves_it(
+        self, audit_logger, policy_engine, tmp_path
+    ):
+        """Timeout path: new session ID acquired during execution is preserved."""
+        config = TetherConfig(
+            approved_directories=[tmp_path],
+            audit_log_path=tmp_path / "audit.jsonl",
+            agent_timeout_seconds=1,
+        )
+        save_snapshots: list[dict] = []
+
+        async def capture_save(session):
+            save_snapshots.append({"claude_session_id": session.claude_session_id})
+
+        store = AsyncMock()
+        store.load = AsyncMock(return_value=None)
+        store.save = AsyncMock(side_effect=capture_save)
+
+        sm = SessionManager(store=store)
+        eng = Engine(
+            connector=None,
+            agent=HangingAgent(new_session_id="new-during-exec"),
+            config=config,
+            session_manager=sm,
+            policy_engine=policy_engine,
+            audit=audit_logger,
+        )
+
+        result = await eng.handle_message("user1", "hello", "chat1")
+        assert "timed out" in result
+
+        session = sm.get("user1", "chat1")
+        assert session.claude_session_id == "new-during-exec"
+
+    @pytest.mark.asyncio
+    async def test_second_message_after_error_works_fresh(
+        self, audit_logger, policy_engine, tmp_path
+    ):
+        """SQLite end-to-end: first msg stale→error→cleared, second msg fresh→succeeds."""
+        from tether.storage.sqlite import SqliteSessionStore
+
+        config = TetherConfig(
+            approved_directories=[tmp_path],
+            audit_log_path=tmp_path / "audit.jsonl",
+        )
+        store = SqliteSessionStore(tmp_path / "sessions.db")
+        await store.setup()
+        try:
+            # Pre-seed with stale ID
+            await store.save(
+                Session(
+                    session_id="pre-seed",
+                    user_id="user1",
+                    chat_id="chat1",
+                    working_directory=str(tmp_path),
+                    claude_session_id="stale-e2e-id",
+                )
+            )
+
+            sm = SessionManager(store=store)
+            eng = Engine(
+                connector=None,
+                agent=ResumeFailAgent(),
+                config=config,
+                session_manager=sm,
+                policy_engine=policy_engine,
+                audit=audit_logger,
+                store=store,
+            )
+
+            # First message: stale ID → error → cleared
+            result1 = await eng.handle_message("user1", "hello", "chat1")
+            assert "Error:" in result1
+
+            # Second message: fresh → succeeds
+            result2 = await eng.handle_message("user1", "world", "chat1")
+            assert "Fresh:" in result2
+
+            # Final SQLite state has new claude_session_id
+            loaded = await store.load("user1", "chat1")
+            assert loaded is not None
+            assert loaded.claude_session_id == "new-fresh-id"
+        finally:
+            await store.teardown()
+
+    @pytest.mark.asyncio
+    async def test_connect_failure_clears_stale_id(
+        self, audit_logger, policy_engine, tmp_path
+    ):
+        """Connect failure path: agent raises without clearing stale ID.
+
+        Defense-in-depth: engine error handler must clear it so the stale ID
+        is not re-persisted to storage (preventing crash loops).
+        """
+        save_snapshots: list[dict] = []
+
+        async def capture_save(session):
+            save_snapshots.append(
+                {
+                    "claude_session_id": session.claude_session_id,
+                    "session_id": session.session_id,
+                }
+            )
+
+        store = AsyncMock()
+        store.load = AsyncMock(return_value=None)
+        store.save = AsyncMock(side_effect=capture_save)
+
+        config = TetherConfig(
+            approved_directories=[tmp_path],
+            audit_log_path=tmp_path / "audit.jsonl",
+        )
+        sm = SessionManager(store=store)
+        eng = Engine(
+            connector=None,
+            agent=ConnectFailAgent(),
+            config=config,
+            session_manager=sm,
+            policy_engine=policy_engine,
+            audit=audit_logger,
+        )
+
+        session = await sm.get_or_create("user1", "chat1", str(tmp_path))
+        session.claude_session_id = "stale-connect-id"
+
+        result = await eng.handle_message("user1", "hello", "chat1")
+        assert "Error:" in result
+
+        # Engine error handler must have cleared the stale ID before saving
+        assert session.claude_session_id is None
+        error_saves = [s for s in save_snapshots if s["claude_session_id"] is None]
+        assert len(error_saves) >= 1
+
+
 class TestTetherDirCreatedOnSessionInit:
     """Verify .tether/ is created on first message and on commands."""
 
@@ -305,6 +796,7 @@ class TestSessionPersistenceOnDirSwitch:
         class PlanAgent(BaseAgent):
             async def execute(self, prompt, session, *, can_use_tool=None, **kwargs):
                 if not prompt.startswith("Implement"):
+                    session.mode = "plan"
 
                     async def click():
                         await asyncio.sleep(0.05)
@@ -546,3 +1038,511 @@ class TestDirectoryPersistenceAcrossRestart:
         assert loaded.working_directory == str(d2.resolve())
         await session_store.teardown()
         await message_store.teardown()
+
+
+class TestRealisticSessionScenarios:
+    """Tests targeting real-world session mutation scenarios."""
+
+    @pytest.mark.asyncio
+    async def test_new_id_acquired_mid_stream_then_error_preserves_new_id(
+        self, audit_logger, policy_engine, tmp_path
+    ):
+        """Agent acquires new session ID mid-stream then crashes — new ID preserved."""
+        save_snapshots: list[dict] = []
+
+        async def capture_save(session):
+            save_snapshots.append({"claude_session_id": session.claude_session_id})
+
+        store = AsyncMock()
+        store.load = AsyncMock(return_value=None)
+        store.save = AsyncMock(side_effect=capture_save)
+
+        config = TetherConfig(
+            approved_directories=[tmp_path],
+            audit_log_path=tmp_path / "audit.jsonl",
+        )
+        sm = SessionManager(store=store)
+        eng = Engine(
+            connector=None,
+            agent=MidStreamIdAcquireAgent(new_id="new-acquired-id"),
+            config=config,
+            session_manager=sm,
+            policy_engine=policy_engine,
+            audit=audit_logger,
+        )
+
+        result = await eng.handle_message("user1", "hello", "chat1")
+        assert "Error:" in result
+
+        session = sm.get("user1", "chat1")
+        assert session.claude_session_id == "new-acquired-id"
+        saved = [
+            s for s in save_snapshots if s["claude_session_id"] == "new-acquired-id"
+        ]
+        assert len(saved) >= 1
+
+    @pytest.mark.asyncio
+    async def test_new_id_over_stale_id_then_error_preserves_new_id(
+        self, audit_logger, policy_engine, tmp_path
+    ):
+        """Agent overwrites stale ID with new one then crashes — new ID preserved."""
+        store = AsyncMock()
+        store.load = AsyncMock(return_value=None)
+        store.save = AsyncMock()
+
+        config = TetherConfig(
+            approved_directories=[tmp_path],
+            audit_log_path=tmp_path / "audit.jsonl",
+        )
+        sm = SessionManager(store=store)
+        eng = Engine(
+            connector=None,
+            agent=MidStreamIdAcquireAgent(new_id="new-acquired-id"),
+            config=config,
+            session_manager=sm,
+            policy_engine=policy_engine,
+            audit=audit_logger,
+        )
+
+        session = await sm.get_or_create("user1", "chat1", str(tmp_path))
+        session.claude_session_id = "old-stale-id"
+
+        result = await eng.handle_message("user1", "hello", "chat1")
+        assert "Error:" in result
+        assert session.claude_session_id == "new-acquired-id"
+
+    @pytest.mark.asyncio
+    async def test_null_response_session_id_does_not_overwrite_existing(
+        self, audit_logger, policy_engine, tmp_path
+    ):
+        """Agent returns session_id=None — must not overwrite existing good ID."""
+        store = AsyncMock()
+        store.load = AsyncMock(return_value=None)
+        store.save = AsyncMock()
+
+        config = TetherConfig(
+            approved_directories=[tmp_path],
+            audit_log_path=tmp_path / "audit.jsonl",
+        )
+        sm = SessionManager(store=store)
+        eng = Engine(
+            connector=None,
+            agent=NullSessionIdAgent(),
+            config=config,
+            session_manager=sm,
+            policy_engine=policy_engine,
+            audit=audit_logger,
+        )
+
+        session = await sm.get_or_create("user1", "chat1", str(tmp_path))
+        session.claude_session_id = "existing-good-id"
+
+        await eng.handle_message("user1", "hello", "chat1")
+
+        assert session.claude_session_id == "existing-good-id"
+        assert session.message_count == 1
+        assert session.total_cost == pytest.approx(0.005)
+
+    @pytest.mark.asyncio
+    async def test_null_response_session_id_with_no_existing_stays_none(
+        self, audit_logger, policy_engine, tmp_path
+    ):
+        """Agent returns session_id=None with no existing ID — stays None."""
+        store = AsyncMock()
+        store.load = AsyncMock(return_value=None)
+        store.save = AsyncMock()
+
+        config = TetherConfig(
+            approved_directories=[tmp_path],
+            audit_log_path=tmp_path / "audit.jsonl",
+        )
+        sm = SessionManager(store=store)
+        eng = Engine(
+            connector=None,
+            agent=NullSessionIdAgent(),
+            config=config,
+            session_manager=sm,
+            policy_engine=policy_engine,
+            audit=audit_logger,
+        )
+
+        await eng.handle_message("user1", "hello", "chat1")
+
+        session = sm.get("user1", "chat1")
+        assert session.claude_session_id is None
+        assert session.message_count == 1
+
+    @pytest.mark.asyncio
+    async def test_interrupted_execution_skips_session_update(
+        self, audit_logger, policy_engine, tmp_path
+    ):
+        """Interrupt check runs BEFORE update_from_result — prevents stale
+        agent results from corrupting a reset session (e.g. after /clear)."""
+
+        class InterruptAgent(BaseAgent):
+            async def execute(self, prompt, session, *, can_use_tool=None, **kwargs):
+                return AgentResponse(
+                    content="Done",
+                    session_id="interrupt-session-id",
+                    cost=0.02,
+                )
+
+            async def cancel(self, session_id):
+                pass
+
+            async def shutdown(self):
+                pass
+
+        store = AsyncMock()
+        store.load = AsyncMock(return_value=None)
+        store.save = AsyncMock()
+
+        config = TetherConfig(
+            approved_directories=[tmp_path],
+            audit_log_path=tmp_path / "audit.jsonl",
+        )
+        sm = SessionManager(store=store)
+        eng = Engine(
+            connector=None,
+            agent=InterruptAgent(),
+            config=config,
+            session_manager=sm,
+            policy_engine=policy_engine,
+            audit=audit_logger,
+        )
+
+        eng._interrupted_chats.add("chat1")
+        result = await eng.handle_message("user1", "hello", "chat1")
+        assert result == ""
+
+        session = sm.get("user1", "chat1")
+        # Interrupted execution must NOT update session — the old agent's
+        # session_id/cost would overwrite the freshly reset session state.
+        assert session.message_count == 0
+        assert session.total_cost == 0.0
+        assert session.claude_session_id is None
+
+    @pytest.mark.asyncio
+    async def test_two_consecutive_errors_then_recovery_sqlite(
+        self, audit_logger, policy_engine, tmp_path
+    ):
+        """Two failures then recovery — accumulated state stays clean in SQLite."""
+        from tether.storage.sqlite import SqliteSessionStore
+
+        config = TetherConfig(
+            approved_directories=[tmp_path],
+            audit_log_path=tmp_path / "audit.jsonl",
+        )
+        store = SqliteSessionStore(tmp_path / "sessions.db")
+        await store.setup()
+        try:
+            await store.save(
+                Session(
+                    session_id="pre-seed",
+                    user_id="user1",
+                    chat_id="chat1",
+                    working_directory=str(tmp_path),
+                    claude_session_id="stale-1",
+                )
+            )
+
+            sm = SessionManager(store=store)
+            eng = Engine(
+                connector=None,
+                agent=CountingFailAgent(fail_count=2, success_id="recovered-id"),
+                config=config,
+                session_manager=sm,
+                policy_engine=policy_engine,
+                audit=audit_logger,
+                store=store,
+            )
+
+            r1 = await eng.handle_message("user1", "msg1", "chat1")
+            assert "Error:" in r1
+
+            r2 = await eng.handle_message("user1", "msg2", "chat1")
+            assert "Error:" in r2
+
+            r3 = await eng.handle_message("user1", "msg3", "chat1")
+            assert "Recovered:" in r3
+
+            session = sm.get("user1", "chat1")
+            assert session.claude_session_id == "recovered-id"
+            assert session.message_count == 1
+
+            loaded = await store.load("user1", "chat1")
+            assert loaded is not None
+            assert loaded.claude_session_id == "recovered-id"
+            assert loaded.message_count == 1
+        finally:
+            await store.teardown()
+
+    @pytest.mark.asyncio
+    async def test_storage_save_failure_in_error_handler_propagates(
+        self, audit_logger, policy_engine, tmp_path
+    ):
+        """StorageError in error handler replaces AgentError — propagates to caller."""
+        store = AsyncMock()
+        store.load = AsyncMock(return_value=None)
+        store.save = AsyncMock(side_effect=StorageError("disk full"))
+
+        config = TetherConfig(
+            approved_directories=[tmp_path],
+            audit_log_path=tmp_path / "audit.jsonl",
+        )
+        sm = SessionManager(store=store)
+        eng = Engine(
+            connector=None,
+            agent=ConnectFailAgent(),
+            config=config,
+            session_manager=sm,
+            policy_engine=policy_engine,
+            audit=audit_logger,
+        )
+
+        session = await sm.get_or_create("user1", "chat1", str(tmp_path))
+        session.claude_session_id = "stale-id"
+
+        with pytest.raises(StorageError):
+            await eng.handle_message("user1", "hello", "chat1")
+
+        assert session.claude_session_id is None
+
+    @pytest.mark.asyncio
+    async def test_update_from_result_save_failure_leaves_memory_ahead_of_storage(
+        self, audit_logger, policy_engine, tmp_path
+    ):
+        """StorageError in update_from_result — memory mutated, storage not."""
+        store = AsyncMock()
+        store.load = AsyncMock(return_value=None)
+        store.save = AsyncMock(side_effect=StorageError("connection lost"))
+
+        config = TetherConfig(
+            approved_directories=[tmp_path],
+            audit_log_path=tmp_path / "audit.jsonl",
+        )
+        sm = SessionManager(store=store)
+        eng = Engine(
+            connector=None,
+            agent=FakeAgent(),
+            config=config,
+            session_manager=sm,
+            policy_engine=policy_engine,
+            audit=audit_logger,
+        )
+
+        with pytest.raises(StorageError):
+            await eng.handle_message("user1", "hello", "chat1")
+
+        session = sm.get("user1", "chat1")
+        assert session.message_count == 1
+        assert session.total_cost == pytest.approx(0.01)
+        assert session.claude_session_id == "test-session-123"
+
+    @pytest.mark.asyncio
+    async def test_cost_accumulation_across_four_messages(
+        self, audit_logger, policy_engine, tmp_path
+    ):
+        """Four consecutive messages — cost and count accumulate correctly."""
+        config = TetherConfig(
+            approved_directories=[tmp_path],
+            audit_log_path=tmp_path / "audit.jsonl",
+        )
+        sm = SessionManager()
+        eng = Engine(
+            connector=None,
+            agent=CostAccumulatorAgent(),
+            config=config,
+            session_manager=sm,
+            policy_engine=policy_engine,
+            audit=audit_logger,
+        )
+
+        for i in range(4):
+            await eng.handle_message("user1", f"msg{i + 1}", "chat1")
+
+        session = sm.get("user1", "chat1")
+        assert session.message_count == 4
+        assert session.total_cost == pytest.approx(0.10)
+        assert session.claude_session_id == "session-4"
+
+    @pytest.mark.asyncio
+    async def test_error_after_success_preserves_previous_cost_and_count(
+        self, audit_logger, policy_engine, tmp_path
+    ):
+        """First message succeeds, second fails — first cost/count survive."""
+        save_snapshots: list[dict] = []
+
+        async def capture_save(session):
+            save_snapshots.append(
+                {
+                    "claude_session_id": session.claude_session_id,
+                    "message_count": session.message_count,
+                    "total_cost": session.total_cost,
+                }
+            )
+
+        store = AsyncMock()
+        store.load = AsyncMock(return_value=None)
+        store.save = AsyncMock(side_effect=capture_save)
+
+        config = TetherConfig(
+            approved_directories=[tmp_path],
+            audit_log_path=tmp_path / "audit.jsonl",
+        )
+        sm = SessionManager(store=store)
+        eng = Engine(
+            connector=None,
+            agent=SucceedThenFailAgent(),
+            config=config,
+            session_manager=sm,
+            policy_engine=policy_engine,
+            audit=audit_logger,
+        )
+
+        r1 = await eng.handle_message("user1", "first", "chat1")
+        assert "Success:" in r1
+
+        r2 = await eng.handle_message("user1", "second", "chat1")
+        assert "Error:" in r2
+
+        session = sm.get("user1", "chat1")
+        assert session.message_count == 1
+        assert session.total_cost == pytest.approx(0.01)
+        assert session.claude_session_id is None
+
+
+class TestWorkspacePersistence:
+    @pytest.mark.asyncio
+    async def test_workspace_survives_restart(
+        self, tmp_path, policy_engine, audit_logger
+    ):
+        """Activate workspace in engine1, create engine2 with same DB — hydration restores directories."""
+        from tether.core.workspace import Workspace
+        from tether.storage.sqlite import SqliteSessionStore
+
+        db_path = tmp_path / "sessions.db"
+        dir_a = tmp_path / "fe"
+        dir_b = tmp_path / "be"
+        dir_a.mkdir()
+        dir_b.mkdir()
+
+        config = TetherConfig(
+            approved_directories=[tmp_path, dir_a, dir_b],
+            audit_log_path=tmp_path / "audit.jsonl",
+        )
+        workspaces = {
+            "myws": Workspace(
+                name="myws", directories=[dir_a, dir_b], description="Test"
+            ),
+        }
+
+        # Engine 1 — activate workspace
+        store1 = SqliteSessionStore(db_path)
+        await store1.setup()
+        try:
+            sm1 = SessionManager(store=store1)
+            eng1 = Engine(
+                connector=None,
+                agent=FakeAgent(),
+                config=config,
+                session_manager=sm1,
+                policy_engine=policy_engine,
+                audit=audit_logger,
+            )
+            eng1._workspaces = workspaces
+            result = await eng1.handle_command("user1", "workspace", "myws", "chat1")
+            assert "active" in result.lower()
+            session1 = sm1.get("user1", "chat1")
+            assert session1.workspace_name == "myws"
+            assert session1.workspace_directories == [str(dir_a), str(dir_b)]
+            await sm1.save(session1)
+        finally:
+            await store1.teardown()
+
+        # Engine 2 — fresh process, same DB. Only name persisted; hydration fills directories.
+        store2 = SqliteSessionStore(db_path)
+        await store2.setup()
+        try:
+            sm2 = SessionManager(store=store2)
+            eng2 = Engine(
+                connector=None,
+                agent=FakeAgent(),
+                config=config,
+                session_manager=sm2,
+                policy_engine=policy_engine,
+                audit=audit_logger,
+            )
+            eng2._workspaces = workspaces
+            session2 = await sm2.get_or_create("user1", "chat1", str(tmp_path))
+            # Before hydration: name persisted, directories empty
+            assert session2.workspace_name == "myws"
+            assert session2.workspace_directories == []
+            # Hydration fills directories from YAML
+            await eng2._realign_paths_for_session(session2)
+            assert session2.workspace_name == "myws"
+            assert session2.workspace_directories == [str(dir_a), str(dir_b)]
+        finally:
+            await store2.teardown()
+
+    @pytest.mark.asyncio
+    async def test_workspace_removed_from_yaml_clears_stale_name(
+        self, tmp_path, policy_engine, audit_logger
+    ):
+        """If workspace was deleted from YAML, hydration clears the stale name."""
+        from tether.core.workspace import Workspace
+        from tether.storage.sqlite import SqliteSessionStore
+
+        db_path = tmp_path / "sessions.db"
+        dir_a = tmp_path / "repo"
+        dir_a.mkdir()
+
+        config = TetherConfig(
+            approved_directories=[tmp_path, dir_a],
+            audit_log_path=tmp_path / "audit.jsonl",
+        )
+
+        # Engine 1 — activate workspace
+        store1 = SqliteSessionStore(db_path)
+        await store1.setup()
+        try:
+            sm1 = SessionManager(store=store1)
+            eng1 = Engine(
+                connector=None,
+                agent=FakeAgent(),
+                config=config,
+                session_manager=sm1,
+                policy_engine=policy_engine,
+                audit=audit_logger,
+            )
+            eng1._workspaces = {
+                "deleted": Workspace(name="deleted", directories=[dir_a]),
+            }
+            await eng1.handle_command("user1", "workspace", "deleted", "chat1")
+            session1 = sm1.get("user1", "chat1")
+            assert session1.workspace_name == "deleted"
+            await sm1.save(session1)
+        finally:
+            await store1.teardown()
+
+        # Engine 2 — workspace no longer in YAML
+        store2 = SqliteSessionStore(db_path)
+        await store2.setup()
+        try:
+            sm2 = SessionManager(store=store2)
+            eng2 = Engine(
+                connector=None,
+                agent=FakeAgent(),
+                config=config,
+                session_manager=sm2,
+                policy_engine=policy_engine,
+                audit=audit_logger,
+            )
+            eng2._workspaces = {}  # workspace removed from YAML
+            session2 = await sm2.get_or_create("user1", "chat1", str(tmp_path))
+            assert session2.workspace_name == "deleted"
+            await eng2._realign_paths_for_session(session2)
+            assert session2.workspace_name is None
+            assert session2.workspace_directories == []
+        finally:
+            await store2.teardown()

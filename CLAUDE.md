@@ -44,7 +44,9 @@ uv run ruff check --fix . && uv run ruff format .
 
 The system follows a three-layer safety pipeline: **Sandbox → Policy → Approval**.
 
-**Engine** (`core/engine.py`) is the central orchestrator. It receives user messages from connectors, passes them through the middleware chain, routes messages to the Claude Code agent, and sends responses back through connectors. Supports `/dir` command to list and switch between approved directories (updates `session.working_directory`, resets agent context).
+**Bootstrap** (`app.py`) wires all subsystems together: builds config, storage, connectors, middleware, plugins, safety pipeline, git handler, and engine. Entry point is `main.py` → `app.py`.
+
+**Engine** (`core/engine.py`) is the central orchestrator. It receives user messages from connectors, passes them through the middleware chain, routes messages to the Claude Code agent, and sends responses back through connectors. Supports `/dir`, `/plan <text>`, `/edit <text>`, `/git`, and `/workspace` (alias `/ws`) commands.
 
 **Safety pipeline** (all in `core/safety/`):
 0. **Gatekeeper** (`gatekeeper.py`) — `ToolGatekeeper` orchestrates the full sandbox → policy → approval chain per tool call, emitting events at each stage. Extracted from Engine to keep it focused on message routing.
@@ -68,12 +70,25 @@ The system follows a three-layer safety pipeline: **Sandbox → Policy → Appro
 - Built-in: `BrowserToolsPlugin` provides structured logging for the 28 Playwright MCP browser tools (classifies as readonly vs mutation, logs gated/allowed/denied events)
 - Built-in: `TestRunnerPlugin` activates 9-phase test workflow via `/test` command, auto-approves browser tools and test commands
 - Built-in: `MergeResolverPlugin` handles `/git merge` conflict resolution, auto-approves Edit/Write/Read and git read commands
+- Built-in: `TestConfigLoaderPlugin` loads per-project test configuration from `.tether/test.yaml` to customize the `/test` workflow
+
+**Interactions** (`core/interactions.py`): `InteractionCoordinator` bridges Claude's `AskUserQuestion` and `ExitPlanMode` SDK events to connectors — forwards questions/plan reviews to Telegram, collects user responses, and returns them to the agent.
+
+**Session management** (`core/session.py`): `SessionManager` handles session lifecycle — creation, lookup by user+chat pair, working directory switching, and delegation to the storage backend.
+
+**Workspaces** (`core/workspace.py`): Groups related repos under a named workspace so the agent gets multi-repo context. `Workspace` is a frozen Pydantic model; `load_workspaces()` reads `.tether/workspaces.yaml`, validates dirs against `TETHER_APPROVED_DIRECTORIES`. `/workspace` (alias `/ws`) command activates a workspace — sets cwd to primary dir, injects multi-repo context into system prompt. MCP servers are **not** copied from workspace directories; the agent only uses MCP from the working directory and TetherConfig.
+
+**Git integration** (`git/`): Full `/git` command suite accessible from Telegram with inline action buttons.
+- `GitService` (`service.py`) — async wrapper around git CLI with 30s timeout and input validation
+- `GitCommandHandler` (`handler.py`) — routes `/git` subcommands (status, branch, checkout, diff, log, add, commit, push, pull, merge) and callback buttons
+- `GitFormatter` (`formatter.py`) — Telegram-friendly display with emoji indicators and 4096-char truncation
+- `GitModels` (`models.py`) — frozen Pydantic models for status, branches, log entries, and results
 
 **Agent abstraction** (`agents/`): `BaseAgent` protocol with `ClaudeCodeAgent` implementation wrapping `claude-agent-sdk`. Supports session resume for multi-turn continuity.
 
 **Connector protocol** (`connectors/base.py`): Abstract interface for I/O transports (Telegram, Slack, etc.). Handles message delivery, typing indicators, approval requests, and file sending.
 
-**Policies** (`policies/`): Three built-in YAML policies — `default.yaml` (balanced), `strict.yaml` (maximum restrictions, shorter timeout), `permissive.yaml` (maximum freedom for trusted environments). All deny credential file access and destructive patterns.
+**Policies** (`policies/`): Four built-in YAML policies — `default.yaml` (balanced), `strict.yaml` (maximum restrictions, shorter timeout), `permissive.yaml` (maximum freedom for trusted environments), `dev-tools.yaml` (overlay that auto-allows common dev commands like package managers, linters, test runners — meant to be combined with other policies). All deny credential file access and destructive patterns.
 
 **Configuration** (`core/config.py`): `TetherConfig` uses pydantic-settings, loaded from environment variables prefixed with `TETHER_`. Required: `TETHER_APPROVED_DIRECTORIES` (comma-separated paths). `build_directory_names()` derives short names from basenames for the `/dir` command.
 
@@ -119,7 +134,7 @@ Tether integrates with Playwright MCP for browser automation. The `.mcp.json` at
 After completing each feature, bug fix, or notable change, add a concise entry to `CHANGELOG.md` under the **current (latest) version heading**. All new entries accumulate under that version until a new version is explicitly introduced (e.g., bumping from `0.2.1` to `0.2.2` or `0.3.0`).
 
 ```markdown
-## [0.2.1] - 2026-02-23
+## [0.3.0] - 2026-02-26
 - **category**: Short description of what changed
 ```
 

@@ -93,6 +93,8 @@ class ApprovalCoordinator:
                 approval_id=approval_id,
                 tool=tool_name,
             )
+            if pending.message_id:
+                await self.connector.delete_message(chat_id, pending.message_id)
             return ApprovalResult(approved=False)
         finally:
             self.pending.pop(approval_id, None)
@@ -153,12 +155,14 @@ class ApprovalCoordinator:
         parts.append("\n\U0001f4ac Reply with a message to reject with instructions")
         return "\n".join(parts)
 
-    def cancel_pending(self, chat_id: str) -> list[str]:
+    async def cancel_pending(self, chat_id: str) -> list[str]:
         cancelled: list[str] = []
         for approval_id, pending in list(self.pending.items()):
             if pending.chat_id == chat_id:
                 pending.decision = False
                 pending.event.set()
+                if pending.message_id:
+                    await self.connector.delete_message(chat_id, pending.message_id)
                 cancelled.append(approval_id)
                 logger.info(
                     "approval_cancelled",

@@ -15,6 +15,7 @@ class TestTetherConfig:
         assert config.max_turns == 25
         assert config.storage_backend == "sqlite"
         assert config.approval_timeout_seconds == 300
+        assert config.interaction_timeout_seconds is None
         assert config.log_level == "INFO"
         assert config.system_prompt is None
         assert config.allowed_tools == []

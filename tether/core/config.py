@@ -68,6 +68,7 @@ class TetherConfig(BaseSettings):
     # Safety settings
     policy_files: list[Path] = []
     approval_timeout_seconds: int = 300
+    interaction_timeout_seconds: int | None = None
 
     # Auth & rate limiting
     allowed_user_ids: set[str] = set()
@@ -76,6 +77,9 @@ class TetherConfig(BaseSettings):
 
     # Connector
     telegram_bot_token: str | None = None
+
+    # Workspaces
+    workspace_config_root: Path | None = None
 
     # Storage
     storage_backend: str = "sqlite"

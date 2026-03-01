@@ -5,6 +5,7 @@ import time
 from unittest.mock import patch
 
 import pytest
+from claude_agent_sdk.types import PermissionResultDeny
 
 from tests.core.engine.conftest import FakeAgent
 from tether.agents.base import AgentResponse, BaseAgent
@@ -45,6 +46,7 @@ class TestPlanContentInEngine:
                     await on_text_chunk("I'll start by exploring the codebase...\n")
 
                 if prompt != "Implement the plan.":
+                    session.mode = "plan"
                     # Write the plan to a .plan file
                     await can_use_tool(
                         "Write",
@@ -120,6 +122,7 @@ class TestPlanContentInEngine:
                     await on_text_chunk("Narration that should NOT appear in review\n")
 
                 if not prompt.startswith("Implement"):
+                    session.mode = "plan"
                     await can_use_tool(
                         "Write",
                         {
@@ -192,6 +195,7 @@ class TestPlanContentInEngine:
                     await on_text_chunk("Here is the streamed plan content\n")
 
                 if not prompt.startswith("Implement"):
+                    session.mode = "plan"
 
                     async def click():
                         await asyncio.sleep(0.05)
@@ -242,6 +246,7 @@ class TestPlanContentInEngine:
                 self.last_can_use_tool = can_use_tool
                 prompts_seen.append(prompt)
                 if not prompt.startswith("Implement"):
+                    session.mode = "plan"
                     await can_use_tool(
                         "Write",
                         {
@@ -498,6 +503,7 @@ class TestPlanFileDiskRead:
             async def execute(self, prompt, session, *, can_use_tool=None, **kwargs):
                 self.last_can_use_tool = can_use_tool
                 if not prompt.startswith("Implement"):
+                    session.mode = "plan"
                     # Write initial content
                     await can_use_tool(
                         "Write",
@@ -674,6 +680,7 @@ class TestPlanContentSourceTracking:
             async def execute(self, prompt, session, *, can_use_tool=None, **kwargs):
                 self.last_can_use_tool = can_use_tool
                 if not prompt.startswith("Implement"):
+                    session.mode = "plan"
                     await can_use_tool(
                         "Write",
                         {
@@ -733,6 +740,7 @@ class TestPlanContentSourceTracking:
             async def execute(self, prompt, session, *, can_use_tool=None, **kwargs):
                 self.last_can_use_tool = can_use_tool
                 if not prompt.startswith("Implement"):
+                    session.mode = "plan"
                     # Write to a path that won't exist on disk
                     await can_use_tool(
                         "Write",
@@ -838,6 +846,7 @@ class TestPlanFileDiscoveryFromDisk:
 
             async def execute(self, prompt, session, *, can_use_tool=None, **kwargs):
                 if not prompt.startswith("Implement"):
+                    session.mode = "plan"
 
                     async def click():
                         await asyncio.sleep(0.05)
@@ -899,6 +908,7 @@ class TestPlanFileDiscoveryFromDisk:
             async def execute(self, prompt, session, *, can_use_tool=None, **kwargs):
                 prompts_seen.append(prompt)
                 if not prompt.startswith("Implement"):
+                    session.mode = "plan"
 
                     async def click():
                         await asyncio.sleep(0.05)
@@ -1555,8 +1565,10 @@ class TestPlanModeRegression:
         result = await hook(
             "Write", {"file_path": "/tmp/project/src/main.py", "content": "x"}, None
         )
-        assert result["behavior"] == "deny"
-        assert "plan mode" in result["message"].lower()
+        from claude_agent_sdk.types import PermissionResultDeny
+
+        assert isinstance(result, PermissionResultDeny)
+        assert "plan mode" in result.message.lower()
 
     @pytest.mark.asyncio
     async def test_edit_to_source_file_denied_in_plan_mode(
@@ -1586,7 +1598,9 @@ class TestPlanModeRegression:
             },
             None,
         )
-        assert result["behavior"] == "deny"
+        from claude_agent_sdk.types import PermissionResultDeny
+
+        assert isinstance(result, PermissionResultDeny)
 
     @pytest.mark.asyncio
     async def test_write_to_plan_file_allowed_in_plan_mode(
@@ -1613,8 +1627,11 @@ class TestPlanModeRegression:
             {"file_path": "/home/user/.claude/plans/plan.md", "content": "the plan"},
             None,
         )
-        # Should NOT be denied — goes through to gatekeeper
-        assert result != {"behavior": "deny"}
+        # Should NOT be the plan-mode deny — may still be denied by sandbox/policy
+        assert not (
+            isinstance(result, PermissionResultDeny)
+            and "plan mode" in result.message.lower()
+        )
 
     @pytest.mark.asyncio
     async def test_dot_plan_file_allowed_in_plan_mode(
@@ -1640,7 +1657,11 @@ class TestPlanModeRegression:
             {"file_path": "/tmp/project/feature.plan", "content": "plan"},
             None,
         )
-        assert result != {"behavior": "deny"}
+        # Should NOT be the plan-mode deny — may still be denied by sandbox/policy
+        assert not (
+            isinstance(result, PermissionResultDeny)
+            and "plan mode" in result.message.lower()
+        )
 
     @pytest.mark.asyncio
     async def test_write_allowed_outside_plan_mode(
@@ -1667,7 +1688,153 @@ class TestPlanModeRegression:
             None,
         )
         # Should NOT be the plan-mode deny — goes through to gatekeeper instead
-        assert not (isinstance(result, dict) and result.get("behavior") == "deny")
+        assert not (
+            isinstance(result, PermissionResultDeny)
+            and "plan mode" in result.message.lower()
+        )
+
+
+class TestModeGuards:
+    """Deny ExitPlanMode/EnterPlanMode when session mode makes them invalid."""
+
+    @pytest.mark.asyncio
+    async def test_exit_plan_mode_denied_in_auto_mode(
+        self, config, audit_logger, policy_engine
+    ):
+        from tests.conftest import MockConnector
+
+        connector = MockConnector(support_streaming=True)
+        coordinator = InteractionCoordinator(connector, config)
+
+        agent = FakeAgent()
+        eng = Engine(
+            connector=connector,
+            agent=agent,
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+            interaction_coordinator=coordinator,
+        )
+
+        await eng.handle_message("user1", "hello", "chat1")
+        session = eng.session_manager.get("user1", "chat1")
+        session.mode = "auto"
+
+        hook = agent.last_can_use_tool
+        result = await hook("ExitPlanMode", {}, None)
+
+        assert isinstance(result, PermissionResultDeny)
+        assert "implementation mode" in result.message.lower()
+        assert len(connector.plan_review_requests) == 0
+
+    @pytest.mark.asyncio
+    async def test_exit_plan_mode_denied_in_edit_mode(
+        self, config, audit_logger, policy_engine
+    ):
+        from tests.conftest import MockConnector
+
+        connector = MockConnector(support_streaming=True)
+        coordinator = InteractionCoordinator(connector, config)
+
+        agent = FakeAgent()
+        eng = Engine(
+            connector=connector,
+            agent=agent,
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+            interaction_coordinator=coordinator,
+        )
+
+        await eng.handle_message("user1", "hello", "chat1")
+        session = eng.session_manager.get("user1", "chat1")
+        session.mode = "edit"
+
+        hook = agent.last_can_use_tool
+        result = await hook("ExitPlanMode", {}, None)
+
+        assert isinstance(result, PermissionResultDeny)
+        assert "implementation mode" in result.message.lower()
+
+    @pytest.mark.asyncio
+    async def test_enter_plan_mode_denied_in_auto_mode(
+        self, config, audit_logger, policy_engine
+    ):
+        agent = FakeAgent()
+        eng = Engine(
+            connector=None,
+            agent=agent,
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+        )
+
+        await eng.handle_message("user1", "hello", "chat1")
+        session = eng.session_manager.get("user1", "chat1")
+        session.mode = "auto"
+
+        hook = agent.last_can_use_tool
+        result = await hook("EnterPlanMode", {}, None)
+
+        assert isinstance(result, PermissionResultDeny)
+        assert "accept-edits mode" in result.message.lower()
+
+    @pytest.mark.asyncio
+    async def test_exit_plan_mode_denied_in_default_mode(
+        self, config, audit_logger, policy_engine
+    ):
+        from tests.conftest import MockConnector
+
+        connector = MockConnector(support_streaming=True)
+        coordinator = InteractionCoordinator(connector, config)
+
+        agent = FakeAgent()
+        eng = Engine(
+            connector=connector,
+            agent=agent,
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+            interaction_coordinator=coordinator,
+        )
+
+        await eng.handle_message("user1", "hello", "chat1")
+        session = eng.session_manager.get("user1", "chat1")
+        assert session.mode == "default"
+
+        hook = agent.last_can_use_tool
+        result = await hook("ExitPlanMode", {}, None)
+
+        assert isinstance(result, PermissionResultDeny)
+        assert "implementation mode" in result.message.lower()
+
+    @pytest.mark.asyncio
+    async def test_enter_plan_mode_allowed_in_default_mode(
+        self, config, audit_logger, policy_engine
+    ):
+        agent = FakeAgent()
+        eng = Engine(
+            connector=None,
+            agent=agent,
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+        )
+
+        await eng.handle_message("user1", "hello", "chat1")
+        session = eng.session_manager.get("user1", "chat1")
+        assert session.mode == "default"
+
+        hook = agent.last_can_use_tool
+        result = await hook("EnterPlanMode", {}, None)
+
+        # Should NOT be denied — goes through to gatekeeper
+        assert not isinstance(result, PermissionResultDeny)
 
 
 class TestResolvePlanContentFallbacks:
@@ -1777,3 +1944,647 @@ class TestResolvePlanContentFallbacks:
 
         result = eng._resolve_plan_content(state, "last resort fallback")
         assert result == "last resort fallback"
+
+
+class TestExitPlanModeClearsActivity:
+    @pytest.mark.asyncio
+    async def test_exit_plan_mode_clears_activity_before_plan_review(
+        self, config, policy_engine, audit_logger
+    ):
+        from tests.conftest import MockConnector
+
+        streaming_connector = MockConnector(support_streaming=True)
+        coordinator = InteractionCoordinator(streaming_connector, config)
+
+        class ActivityPlanAgent(BaseAgent):
+            async def execute(
+                self,
+                prompt,
+                session,
+                *,
+                can_use_tool=None,
+                on_text_chunk=None,
+                on_tool_activity=None,
+                **kwargs,
+            ):
+                if prompt != "Implement the plan.":
+                    session.mode = "plan"
+                    if on_tool_activity:
+                        from tether.agents.base import ToolActivity
+
+                        await on_tool_activity(
+                            ToolActivity(
+                                tool_name="ExitPlanMode",
+                                description="Presenting plan for review",
+                            )
+                        )
+
+                    async def click_proceed():
+                        await asyncio.sleep(0.05)
+                        req = streaming_connector.plan_review_requests[0]
+                        await coordinator.resolve_option(req["interaction_id"], "edit")
+
+                    task = asyncio.create_task(click_proceed())
+                    await can_use_tool("ExitPlanMode", {}, None)
+                    await task
+
+                return AgentResponse(
+                    content="Done.",
+                    session_id="sid",
+                    cost=0.01,
+                )
+
+            async def cancel(self, session_id):
+                pass
+
+            async def shutdown(self):
+                pass
+
+        eng = Engine(
+            connector=streaming_connector,
+            agent=ActivityPlanAgent(),
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+            interaction_coordinator=coordinator,
+        )
+
+        await eng.handle_message("user1", "Plan something", "chat1")
+
+        # Activity should have been cleared before the plan review was shown
+        assert len(streaming_connector.cleared_activities) >= 1
+
+
+class TestExitPlanModeDeniedAfterApproval:
+    @pytest.mark.asyncio
+    async def test_exit_plan_mode_denied_after_approval_in_same_turn(
+        self, config, policy_engine, audit_logger
+    ):
+        """Agent calling ExitPlanMode twice in one execute() — second call is denied."""
+        from claude_agent_sdk.types import PermissionResultDeny
+
+        from tests.conftest import MockConnector
+
+        streaming_connector = MockConnector(support_streaming=True)
+        coordinator = InteractionCoordinator(streaming_connector, config)
+
+        second_call_results = []
+
+        class DoublePlanAgent(BaseAgent):
+            async def execute(
+                self,
+                prompt,
+                session,
+                *,
+                can_use_tool=None,
+                on_text_chunk=None,
+                **kwargs,
+            ):
+                if prompt != "Implement the plan.":
+                    session.mode = "plan"
+
+                    # First ExitPlanMode — approved via background task
+                    async def click_proceed():
+                        await asyncio.sleep(0.05)
+                        req = streaming_connector.plan_review_requests[0]
+                        await coordinator.resolve_option(req["interaction_id"], "edit")
+
+                    task = asyncio.create_task(click_proceed())
+                    await can_use_tool("ExitPlanMode", {}, None)
+                    await task
+
+                    # Second ExitPlanMode — should be denied
+                    second_result = await can_use_tool("ExitPlanMode", {}, None)
+                    second_call_results.append(second_result)
+
+                return AgentResponse(
+                    content="Done.",
+                    session_id="sid",
+                    cost=0.01,
+                )
+
+            async def cancel(self, session_id):
+                pass
+
+            async def shutdown(self):
+                pass
+
+        eng = Engine(
+            connector=streaming_connector,
+            agent=DoublePlanAgent(),
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+            interaction_coordinator=coordinator,
+        )
+
+        await eng.handle_message("user1", "Plan something", "chat1")
+
+        assert len(second_call_results) == 1
+        result = second_call_results[0]
+        assert isinstance(result, PermissionResultDeny)
+        # After edit approval, mode switches to "auto" — second ExitPlanMode
+        # is denied by the mode guard (not the plan_approved guard)
+        assert (
+            "implementation mode" in result.message.lower()
+            or "already approved" in result.message.lower()
+        )
+        # Only one plan review should have been shown
+        assert len(streaming_connector.plan_review_requests) == 1
+
+    @pytest.mark.asyncio
+    async def test_clean_edit_cancels_agent_and_sets_clean_proceed(
+        self, config, policy_engine, audit_logger
+    ):
+        """clean_edit approval schedules _cancel_agent and sets clean_proceed."""
+        from tests.conftest import MockConnector
+
+        streaming_connector = MockConnector(support_streaming=True)
+        coordinator = InteractionCoordinator(streaming_connector, config)
+        config.streaming_enabled = True
+
+        cancel_called = asyncio.Event()
+
+        class CancelTrackingAgent(BaseAgent):
+            async def execute(
+                self,
+                prompt,
+                session,
+                *,
+                can_use_tool=None,
+                on_text_chunk=None,
+                **kwargs,
+            ):
+                if prompt != "Implement the plan.":
+                    session.mode = "plan"
+                    await can_use_tool(
+                        "Write",
+                        {
+                            "file_path": "/tmp/project/.claude/plans/my.plan",
+                            "content": "Step 1: Do stuff",
+                        },
+                        None,
+                    )
+
+                    async def click_proceed():
+                        await asyncio.sleep(0.05)
+                        req = streaming_connector.plan_review_requests[0]
+                        await coordinator.resolve_option(
+                            req["interaction_id"], "clean_edit"
+                        )
+
+                    task = asyncio.create_task(click_proceed())
+                    await can_use_tool("ExitPlanMode", {}, None)
+                    await task
+
+                return AgentResponse(
+                    content="Plan reviewed.", session_id="sid", cost=0.01
+                )
+
+            async def cancel(self, session_id):
+                cancel_called.set()
+
+            async def shutdown(self):
+                pass
+
+        eng = Engine(
+            connector=streaming_connector,
+            agent=CancelTrackingAgent(),
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+            interaction_coordinator=coordinator,
+        )
+
+        await eng.handle_message("user1", "Plan something", "chat1")
+
+        # _cancel_agent fires after 100ms — wait up to 500ms
+        try:
+            await asyncio.wait_for(cancel_called.wait(), timeout=0.5)
+        except TimeoutError:
+            pytest.fail("_cancel_agent() was never called")
+
+        assert cancel_called.is_set()
+
+    @pytest.mark.asyncio
+    async def test_edit_approval_switches_session_mode(
+        self, config, policy_engine, audit_logger
+    ):
+        """edit approval (non-clean) switches session.mode to 'auto'."""
+        from claude_agent_sdk.types import PermissionResultAllow
+
+        from tests.conftest import MockConnector
+
+        streaming_connector = MockConnector(support_streaming=True)
+        coordinator = InteractionCoordinator(streaming_connector, config)
+        config.streaming_enabled = True
+
+        exit_results = []
+        session_modes_after = []
+
+        class EditApprovalAgent(BaseAgent):
+            async def execute(
+                self,
+                prompt,
+                session,
+                *,
+                can_use_tool=None,
+                on_text_chunk=None,
+                **kwargs,
+            ):
+                if prompt != "Implement the plan.":
+                    session.mode = "plan"
+                    await can_use_tool(
+                        "Write",
+                        {
+                            "file_path": "/tmp/project/.claude/plans/my.plan",
+                            "content": "Step 1: Implement feature",
+                        },
+                        None,
+                    )
+
+                    async def click_proceed():
+                        await asyncio.sleep(0.05)
+                        req = streaming_connector.plan_review_requests[0]
+                        await coordinator.resolve_option(req["interaction_id"], "edit")
+
+                    task = asyncio.create_task(click_proceed())
+                    result = await can_use_tool("ExitPlanMode", {}, None)
+                    await task
+                    exit_results.append(result)
+                    session_modes_after.append(session.mode)
+
+                return AgentResponse(
+                    content="Implementing.", session_id="sid", cost=0.01
+                )
+
+            async def cancel(self, session_id):
+                pass
+
+            async def shutdown(self):
+                pass
+
+        eng = Engine(
+            connector=streaming_connector,
+            agent=EditApprovalAgent(),
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+            interaction_coordinator=coordinator,
+        )
+
+        await eng.handle_message("user1", "Plan something", "chat1")
+
+        assert len(exit_results) == 1
+        assert isinstance(exit_results[0], PermissionResultAllow)
+        # edit approval should switch mode to "auto" so Write/Edit are allowed
+        assert session_modes_after[0] == "auto"
+
+
+class TestPlanApprovalBehavior:
+    """Behavioral integration tests — verify Write/Edit actually succeed after
+    each approval type and that cancel fires when it should.  These close the
+    coverage gap that let the _cancel_agent() deletion slip through."""
+
+    @pytest.mark.asyncio
+    async def test_clean_edit_implementation_turn_write_allowed(
+        self, config, policy_engine, audit_logger
+    ):
+        """clean_edit: cancel fires → new implementation turn → Write ALLOW."""
+        from claude_agent_sdk.types import PermissionResultAllow
+
+        from tests.conftest import MockConnector
+
+        approved_dir = str(config.approved_directories[0])
+        streaming_connector = MockConnector(support_streaming=True)
+        coordinator = InteractionCoordinator(streaming_connector, config)
+        config.streaming_enabled = True
+
+        cancel_called = asyncio.Event()
+        prompts_seen: list[str] = []
+        write_results: list = []
+
+        class CleanEditAgent(BaseAgent):
+            async def execute(
+                self,
+                prompt,
+                session,
+                *,
+                can_use_tool=None,
+                on_text_chunk=None,
+                **kwargs,
+            ):
+                prompts_seen.append(prompt)
+                if not prompt.startswith("Implement"):
+                    session.mode = "plan"
+                    await can_use_tool(
+                        "Write",
+                        {
+                            "file_path": f"{approved_dir}/.claude/plans/my.plan",
+                            "content": "Step 1: Build the feature",
+                        },
+                        None,
+                    )
+
+                    async def click():
+                        await asyncio.sleep(0.05)
+                        req = streaming_connector.plan_review_requests[0]
+                        await coordinator.resolve_option(
+                            req["interaction_id"], "clean_edit"
+                        )
+
+                    task = asyncio.create_task(click())
+                    await can_use_tool("ExitPlanMode", {}, None)
+                    await task
+                else:
+                    result = await can_use_tool(
+                        "Write",
+                        {
+                            "file_path": f"{approved_dir}/src/main.py",
+                            "content": "print()",
+                        },
+                        None,
+                    )
+                    write_results.append(result)
+
+                return AgentResponse(content="Done.", session_id="sid", cost=0.01)
+
+            async def cancel(self, session_id):
+                cancel_called.set()
+
+            async def shutdown(self):
+                pass
+
+        eng = Engine(
+            connector=streaming_connector,
+            agent=CleanEditAgent(),
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+            interaction_coordinator=coordinator,
+        )
+
+        await eng.handle_message("user1", "Plan something", "chat1")
+
+        # _cancel_agent fires after 100ms — wait up to 500ms
+        try:
+            await asyncio.wait_for(cancel_called.wait(), timeout=0.5)
+        except TimeoutError:
+            pytest.fail("_cancel_agent() was never called (regression guard)")
+
+        assert cancel_called.is_set()
+        assert len(prompts_seen) == 2
+        assert prompts_seen[1].startswith("Implement")
+        assert len(write_results) == 1
+        assert isinstance(write_results[0], PermissionResultAllow)
+
+    @pytest.mark.asyncio
+    async def test_edit_approval_write_allowed_in_same_session(
+        self, config, policy_engine, audit_logger
+    ):
+        """edit (non-clean): mode switches to 'auto', Write succeeds in same execute()."""
+        from claude_agent_sdk.types import PermissionResultAllow
+
+        from tests.conftest import MockConnector
+
+        approved_dir = str(config.approved_directories[0])
+        streaming_connector = MockConnector(support_streaming=True)
+        coordinator = InteractionCoordinator(streaming_connector, config)
+        config.streaming_enabled = True
+
+        write_results: list = []
+        session_ref: list = []
+
+        class EditApprovalWriteAgent(BaseAgent):
+            async def execute(
+                self,
+                prompt,
+                session,
+                *,
+                can_use_tool=None,
+                on_text_chunk=None,
+                **kwargs,
+            ):
+                session_ref.append(session)
+                session.mode = "plan"
+                await can_use_tool(
+                    "Write",
+                    {
+                        "file_path": f"{approved_dir}/.claude/plans/my.plan",
+                        "content": "Step 1: Implement feature",
+                    },
+                    None,
+                )
+
+                async def click():
+                    await asyncio.sleep(0.05)
+                    req = streaming_connector.plan_review_requests[0]
+                    await coordinator.resolve_option(req["interaction_id"], "edit")
+
+                task = asyncio.create_task(click())
+                await can_use_tool("ExitPlanMode", {}, None)
+                await task
+
+                # After edit approval, Write to a source file in the same execute()
+                result = await can_use_tool(
+                    "Write",
+                    {"file_path": f"{approved_dir}/src/app.py", "content": "# app"},
+                    None,
+                )
+                write_results.append(result)
+
+                return AgentResponse(
+                    content="Implementing.", session_id="sid", cost=0.01
+                )
+
+            async def cancel(self, session_id):
+                pass
+
+            async def shutdown(self):
+                pass
+
+        eng = Engine(
+            connector=streaming_connector,
+            agent=EditApprovalWriteAgent(),
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+            interaction_coordinator=coordinator,
+        )
+
+        await eng.handle_message("user1", "Plan something", "chat1")
+
+        assert len(write_results) == 1
+        assert isinstance(write_results[0], PermissionResultAllow)
+        assert session_ref[0].mode == "auto"
+
+    @pytest.mark.asyncio
+    async def test_default_approval_mode_switch_no_auto_approve(
+        self, config, policy_engine, audit_logger
+    ):
+        """default approval: mode → 'default', no Write/Edit auto-approve."""
+        from claude_agent_sdk.types import PermissionResultAllow
+
+        from tests.conftest import MockConnector
+
+        approved_dir = str(config.approved_directories[0])
+        streaming_connector = MockConnector(support_streaming=True)
+        coordinator = InteractionCoordinator(streaming_connector, config)
+        config.streaming_enabled = True
+
+        exit_results: list = []
+        session_ref: list = []
+
+        class DefaultApprovalAgent(BaseAgent):
+            async def execute(
+                self,
+                prompt,
+                session,
+                *,
+                can_use_tool=None,
+                on_text_chunk=None,
+                **kwargs,
+            ):
+                session_ref.append(session)
+                session.mode = "plan"
+                await can_use_tool(
+                    "Write",
+                    {
+                        "file_path": f"{approved_dir}/.claude/plans/my.plan",
+                        "content": "Step 1: Implement feature",
+                    },
+                    None,
+                )
+
+                async def click():
+                    await asyncio.sleep(0.05)
+                    req = streaming_connector.plan_review_requests[0]
+                    await coordinator.resolve_option(req["interaction_id"], "default")
+
+                task = asyncio.create_task(click())
+                result = await can_use_tool("ExitPlanMode", {}, None)
+                await task
+                exit_results.append(result)
+
+                return AgentResponse(content="Proceeding.", session_id="sid", cost=0.01)
+
+            async def cancel(self, session_id):
+                pass
+
+            async def shutdown(self):
+                pass
+
+        eng = Engine(
+            connector=streaming_connector,
+            agent=DefaultApprovalAgent(),
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+            interaction_coordinator=coordinator,
+        )
+
+        await eng.handle_message("user1", "Plan something", "chat1")
+
+        assert len(exit_results) == 1
+        assert isinstance(exit_results[0], PermissionResultAllow)
+        assert session_ref[0].mode == "default"
+        # default approval must NOT auto-approve Write/Edit
+        auto_tools = eng._gatekeeper._auto_approved_tools.get("chat1", set())
+        assert "Write" not in auto_tools
+        assert "Edit" not in auto_tools
+
+    @pytest.mark.asyncio
+    async def test_bash_still_gated_after_edit_approval(
+        self, config, policy_engine, audit_logger
+    ):
+        """Security regression: edit approval auto-approves Write/Edit but Bash
+        must still flow through the gatekeeper (not auto-approved)."""
+        from claude_agent_sdk.types import PermissionResultAllow
+
+        from tests.conftest import MockConnector
+
+        approved_dir = str(config.approved_directories[0])
+        streaming_connector = MockConnector(support_streaming=True)
+        coordinator = InteractionCoordinator(streaming_connector, config)
+        config.streaming_enabled = True
+
+        bash_results: list = []
+        write_results: list = []
+
+        class EditThenBashAgent(BaseAgent):
+            async def execute(
+                self,
+                prompt,
+                session,
+                *,
+                can_use_tool=None,
+                on_text_chunk=None,
+                **kwargs,
+            ):
+                session.mode = "plan"
+                await can_use_tool(
+                    "Write",
+                    {
+                        "file_path": f"{approved_dir}/.claude/plans/my.plan",
+                        "content": "Step 1: Implement feature",
+                    },
+                    None,
+                )
+
+                async def click():
+                    await asyncio.sleep(0.05)
+                    req = streaming_connector.plan_review_requests[0]
+                    await coordinator.resolve_option(req["interaction_id"], "edit")
+
+                task = asyncio.create_task(click())
+                await can_use_tool("ExitPlanMode", {}, None)
+                await task
+
+                # Write should be auto-approved after edit approval
+                w_result = await can_use_tool(
+                    "Write",
+                    {"file_path": f"{approved_dir}/src/app.py", "content": "# app"},
+                    None,
+                )
+                write_results.append(w_result)
+
+                # Bash should NOT be auto-approved — must go through gatekeeper
+                b_result = await can_use_tool(
+                    "Bash",
+                    {"command": "curl http://example.com"},
+                    None,
+                )
+                bash_results.append(b_result)
+
+                return AgentResponse(content="Done.", session_id="sid", cost=0.01)
+
+            async def cancel(self, session_id):
+                pass
+
+            async def shutdown(self):
+                pass
+
+        eng = Engine(
+            connector=streaming_connector,
+            agent=EditThenBashAgent(),
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+            interaction_coordinator=coordinator,
+        )
+
+        await eng.handle_message("user1", "Plan something", "chat1")
+
+        assert len(write_results) == 1
+        assert isinstance(write_results[0], PermissionResultAllow)
+        # Bash goes through gatekeeper — should NOT be auto-approved
+        assert len(bash_results) == 1
+        assert not isinstance(bash_results[0], PermissionResultAllow)
